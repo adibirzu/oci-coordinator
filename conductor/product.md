@@ -46,11 +46,7 @@ An AI-powered coordinator that:
                     ┌───────────▼───────────┐
                     │                       │
                     │  LANGGRAPH CONDUCTOR  │
-                    │  ───────────────────  │
-                    │  • State Management   │
-                    │  • Routing Logic      │
-                    │  • Human-in-the-loop  │
-                    │  • Checkpointing      │
+                    │  (Tool Catalog-aware) │
                     │                       │
                     └───────────┬───────────┘
                                 │
@@ -58,20 +54,25 @@ An AI-powered coordinator that:
         │           │           │           │           │           │
         ▼           ▼           ▼           ▼           ▼           ▼
 ┌───────────┐ ┌───────────┐ ┌───────────┐ ┌───────────┐ ┌───────────┐ ┌─────────┐
-│ OCI GenAI │ │ OCI GenAI │ │ OCI GenAI │ │ OCI GenAI │ │ OCI GenAI │ │ Custom  │
-│  DB Agent │ │ Log Agent │ │ Sec Agent │ │ Fin Agent │ │ Infra Agt │ │ LangChn │
-│ (Managed) │ │ (Managed) │ │ (Managed) │ │ (Managed) │ │ (Managed) │ │  Tool   │
+│ Database  │ │ OCI GenAI │ │ OCI GenAI │ │ OCI GenAI │ │ OCI GenAI │ │ Custom  │
+│Observatory│ │ Log Agent │ │ Sec Agent │ │ Fin Agent │ │ Infra Agt │ │ LangChn │
+│  Agent    │ │ (Managed) │ │ (Managed) │ │ (Managed) │ │ (Managed) │ │  Tool   │
 └─────┬─────┘ └─────┬─────┘ └─────┬─────┘ └─────┬─────┘ └─────┬─────┘ └────┬────┘
       │             │             │             │             │            │
       └─────────────┴─────────────┴──────┬──────┴─────────────┴────────────┘
                                          │
                     ┌────────────────────▼────────────────────┐
-                    │           MCP SERVER LAYER              │
-                    │ (Exposed as Tools to OCI/LangChain)     │
-                    ├──────────┬──────────┬──────────┬────────┤
-                    │ OCI-Cost │ OCI-DB   │OCI-Compute│OCI-Net │
-                    │ OCI-Logan│OCI-Security│ OCI-Unified│ ... │
-                    └──────────┴──────────┴──────────┴────────┘
+                    │      UNIFIED MCP SERVER LAYER           │
+                    │  (Progressive Disclosure & Skills)      │
+                    │  • Compute   • Network    • DB          │
+                    │  • Cost      • Security   • Observability│
+                    └────────────────────┬────────────────────┘
+                                         │
+                    ┌────────────────────▼────────────────────┐
+                    │      ORACLE CLOUD INFRASTRUCTURE        │
+                    │  ─────────────────────────────────────  │
+                    │  Databases | Compute | Network | IAM    │
+                    └─────────────────────────────────────────┘
 ```
 
 ### 2.2 Component Description
@@ -79,10 +80,10 @@ An AI-powered coordinator that:
 | Component | Responsibility | Technology |
 |-----------|---------------|------------|
 | Input Channels | Receive and normalize user requests | Slack Bot, Teams Bot, Web API |
-| LangGraph Conductor | Orchestration, state persistence, and routing | LangGraph + Redis |
+| LangGraph Conductor | Orchestration, state persistence, and tool routing | LangGraph + ToolCatalog |
+| Database Observatory | Specialized multi-agent system for DB observability | OCI Database Observatory Agent |
 | OCI Managed Agents | Domain-specific task execution using OCI GenAI | OCI GenAI Agents Service |
-| Custom Tools | Specific logic not covered by managed agents | LangChain Tools |
-| MCP Servers | OCI API abstraction | Python FastMCP |
+| Unified MCP Server | OCI API abstraction with progressive disclosure | FastMCP + Skills Architecture |
 | Context Store | Checkpoints and thread history | Redis |
 
 ---
@@ -90,26 +91,40 @@ An AI-powered coordinator that:
 ## 3. Agent Definitions
 
 ### 3.1 Coordinator (LangGraph)
-**Purpose**: Central state machine that manages the conversation lifecycle.
+
+**Purpose**: Central state machine that manages the conversation lifecycle using a `ToolCatalog`.
+
+
 
 **Capabilities**:
-- **State Management**: Persists conversation state across multi-turn interactions.
-- **Conditional Routing**: Determines the next step (Agent, Tool, or Human) based on current state.
-- **Human-in-the-Loop**: Pauses execution for user clarification or approval.
-- **Parallel Execution**: Can trigger multiple specialized agents simultaneously.
 
-**Routing Logic (Graph Nodes)**:
-- `entry_node`: Analyzes intent using OCI GenAI Inference.
-- `router_node`: Directs flow to `db_agent`, `sec_agent`, etc.
-- `aggregator_node`: Synthesizes responses from multiple agents.
-- `human_node`: Asks clarifying questions if confidence is low.
+- **State Management**: Persists conversation state (`CoordinatorState`) using `MemorySaver` / Redis.
+
+- **Dynamic Tool Routing**: Uses `ToolCatalog` to discover and bind tools/skills.
+
+- **Skill Execution**: Can invoke high-level skills (e.g., "Troubleshoot Instance") via MCP.
+
+- **Graph Flow**: `input -> agent -> (action -> agent)* -> output` loop.
+
+
 
 ### 3.2 Specialized OCI Agents (Managed)
-These are instances of **OCI Generative AI Agents**, configured with specific knowledge bases (RAG) and tools.
-#### DB Troubleshoot Agent
-- **Type**: OCI GenAI Agent
-- **Tools**: `oci-mcp-db` tools linked via OCI Agent Tool Definition.
-- **Knowledge**: Oracle Database documentation and internal runbooks.
+
+
+
+#### Database Observatory Agent
+
+- **Type**: Dedicated Sub-System (Reference: `oci-database-observatory`)
+
+- **Capabilities**:
+
+    - **Multi-DB Support**: Oracle, MySQL, PostgreSQL.
+
+    - **Observability**: OCI APM integration, OpenTelemetry tracing.
+
+    - **Advanced Diagnostics**: SQL tuning, AWR analysis, wait event interpretation.
+
+- **Integration**: Accessed via MCP or direct API call.
 
 #### Log Analytics Agent
 - **Type**: OCI GenAI Agent
