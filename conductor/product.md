@@ -80,7 +80,8 @@ An AI-powered coordinator that:
 | Component | Responsibility | Technology |
 |-----------|---------------|------------|
 | Input Channels | Receive and normalize user requests | Slack Bot, Teams Bot, Web API |
-| LangGraph Conductor | Orchestration, state persistence, and tool routing | LangGraph + ToolCatalog |
+| LangGraph Conductor | Orchestration, state persistence, and routing (Workflow-first) | LangGraph + ToolCatalog |
+| Evaluator | Continuous assessment of agent performance (LLM-as-a-Judge) | LangSmith / Custom |
 | Database Observatory | Specialized multi-agent system for DB observability | OCI Database Observatory Agent |
 | OCI Managed Agents | Domain-specific task execution using OCI GenAI | OCI GenAI Agents Service |
 | Unified MCP Server | OCI API abstraction with progressive disclosure | FastMCP + Skills Architecture |
@@ -90,21 +91,33 @@ An AI-powered coordinator that:
 
 ## 3. Agent Definitions
 
-### 3.1 Coordinator (LangGraph)
+### 3.1 Coordinator (Augmented LLM & Workflows)
 
-**Purpose**: Central state machine that manages the conversation lifecycle using a `ToolCatalog`.
+**Purpose**: Central orchestrator that prioritizes deterministic **Workflows** for known tasks and falls back to **Agentic** behavior for ambiguity.
 
 
 
 **Capabilities**:
 
-- **State Management**: Persists conversation state (`CoordinatorState`) using `MemorySaver` / Redis.
+- **Workflow Routing**: Detects specific intents (e.g., "Restart Instance") and routes to deterministic LangGraph sub-graphs.
 
-- **Dynamic Tool Routing**: Uses `ToolCatalog` to discover and bind tools/skills.
+- **Agentic Fallback**: Uses LLM reasoning to handle complex, novel requests that don't match a workflow.
 
-- **Skill Execution**: Can invoke high-level skills (e.g., "Troubleshoot Instance") via MCP.
+- **Tool/Skill Usage**: "Skills" are exposed as high-level, well-documented tools (e.g., `troubleshoot_instance` vs `get_instance`).
 
-- **Graph Flow**: `input -> agent -> (action -> agent)* -> output` loop.
+- **State Management**: Persists conversation state (`CoordinatorState`) using `MemorySaver`.
+
+
+
+**Routing Logic (Graph Nodes)**:
+
+- `entry_node`: Classification (Workflow vs Agent).
+
+- `workflow_node`: Executes predefined steps (e.g., Standard Operating Procedures).
+
+- `agent_node`: LLM loop with `ToolCatalog` for general problem solving.
+
+- `human_node`: Approval/Clarification.
 
 
 
@@ -210,15 +223,24 @@ An AI-powered coordinator that:
 
 ---
 
-## 6. Success Metrics
+## 6. Success & Evaluation (Anthropic Best Practices)
 
-| Metric | Target | Measurement |
-|--------|--------|-------------|
-| Intent Classification Accuracy | > 95% | Manual review sampling |
-| Mean Time to Resolution | -40% | Ticket closure time |
-| User Satisfaction | > 4.5/5 | Feedback surveys |
-| Agent Response Time | < 5s | P95 latency |
-| Automation Rate | > 70% | Resolved without escalation |
+### 6.1 Success Criteria
+- **Task Success Rate**: % of requests where the user accepts the solution without retry.
+- **Workflow vs Agent Ratio**: Target >70% of requests handled by deterministic Workflows (higher reliability).
+- **Tool Usage Accuracy**: % of correct tool selections and valid parameter generation.
+
+### 6.2 Evaluation Strategy (LLM-as-a-Judge)
+- **Dataset**: Gold-standard set of 50+ diverse queries (simple, complex, adversarial).
+- **Evaluator**: Strong LLM (e.g., Claude 3.5 Sonnet / OCI GenAI) evaluating execution traces.
+- **Metrics**:
+    - `is_correct`: Did the final answer match the ground truth?
+    - `is_safe`: Did it respect guardrails?
+    - `is_efficient`: Did it use the minimum number of steps?
+
+### 6.3 User-Centric Metrics
+- **Mean Time to Resolution (MTTR)**: Reduction in time compared to manual console ops.
+- **Human Intervention Rate**: Frequency of `human_node` triggers.
 
 ---
 
