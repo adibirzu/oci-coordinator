@@ -1,7 +1,9 @@
 # Track Plan: Foundation & Core Infrastructure
 
 ## Phase 1: Project Environment & LLM Setup
-- [ ] Task: Initialize Python project with Poetry and install core dependencies (langchain, langgraph, oci, fastapi, redis, pydantic)
+- [ ] Task: Initialize Python project with Poetry and install dependencies (langchain, langgraph, oci, fastapi, opentelemetry-api, opentelemetry-sdk, opentelemetry-exporter-otlp)
+- [ ] Task: Configure Environment (Copy .env.local from /Users/abirzu/dev/oracle-db-autonomous-agent/.env.local)
+- [ ] Task: Implement OCI APM Tracing (Python port of OtelTracing.ts logic)
 - [ ] Task: Implement OCA LangChain Wrapper (Python) based on referenced client
 - [ ] Task: Implement Multi-LLM Factory (Factory pattern for OCA, OCI GenAI, Anthropic, OpenAI)
 - [ ] Task: Configure linting and formatting with Ruff and Black

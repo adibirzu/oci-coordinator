@@ -8,6 +8,7 @@
 - **LangGraph**: State graph orchestration for multi-agent workflows (Workflow-first architecture).
 - **LangChain**: Framework for building agents and tooling.
 - **OCA LangChain Client**: Python client for Oracle Cloud Agent (Primary LLM).
+- **OpenTelemetry**: Standard observability framework (SDK, OTLP Exporter).
 - **Pydantic**: Data validation and settings management.
 - **Redis**: In-memory store for LangGraph state checkpoints and shared context.
 - **Tenacity**: For retry logic and resilience.
@@ -17,6 +18,7 @@
     - **OCA (Primary)**: Oracle Cloud Agent.
     - **OCI GenAI**: Llama 3, Cohere.
     - **External (Supported)**: Anthropic Claude, OpenAI GPT-4, Google Gemini.
+- **OCI APM**: Application Performance Monitoring (OpenTelemetry endpoint).
 - **OCI SDK for Python**: Underlying library for OCI interactions.
 - **MCP (Unified Server)**: Unified FastMCP server exposing "Skills" and "Tools".
 - **OCI Vault**: Secure management of secrets and API keys.
