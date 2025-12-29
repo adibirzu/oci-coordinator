@@ -5,15 +5,17 @@
 
 ## 2. Core Frameworks & Libraries
 - **FastAPI / Uvicorn**: High-performance web framework for the Web API and agent coordination.
-- **Anthropic SDK**: Client library for interacting with Claude models.
+- **LangGraph**: State graph orchestration for multi-agent workflows, cycles, and persistence.
+- **LangChain**: Framework for building agents and tooling.
 - **Pydantic**: Data validation and settings management.
-- **Redis**: In-memory context store for session management and conversation state.
+- **Redis**: In-memory store for LangGraph state checkpoints and shared context.
 - **Tenacity**: For retry logic and resilience.
-- **HTTPX**: Asynchronous HTTP client.
 
 ## 3. OCI Integration & Infrastructure
-- **MCP (Model Context Protocol)**: Architecture for tool execution and OCI API abstraction.
+- **OCI Generative AI Agents**: Managed service for RAG and specialized agent capabilities.
+- **OCI Generative AI Inference**: For direct LLM invocation where needed.
 - **OCI SDK for Python**: Underlying library for OCI interactions.
+- **MCP (Model Context Protocol)**: Standard for integrating custom tools with agents.
 - **OCI Vault**: Secure management of secrets and API keys.
 - **Oracle Container Engine for Kubernetes (OKE)**: Production deployment environment.
 

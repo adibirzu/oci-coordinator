@@ -1,7 +1,7 @@
 # Track Plan: Foundation & Core Infrastructure
 
 ## Phase 1: Project Environment
-- [ ] Task: Initialize Python project with Poetry and install core dependencies (anthropic, fastapi, redis, pydantic)
+- [ ] Task: Initialize Python project with Poetry and install core dependencies (langchain, langgraph, oci, fastapi, redis, pydantic)
 - [ ] Task: Configure linting and formatting with Ruff and Black
 - [ ] Task: Set up testing framework with Pytest and coverage reporting
 - [ ] Task: Create Docker development environment for local development
@@ -14,11 +14,10 @@
 - [ ] Task: Implement MCP server health monitoring utility
 - [ ] Task: Conductor - User Manual Verification 'MCP Layer' (Protocol in workflow.md)
 
-## Phase 3: Coordinator Core
-- [ ] Task: Implement Coordinator prompt loading system
-- [ ] Task: Write tests for intent classification logic
-- [ ] Task: Implement intent classification logic
-- [ ] Task: Write tests for agent routing
-- [ ] Task: Implement basic routing to specialized agents
-- [ ] Task: Create response formatting utilities
-- [ ] Task: Conductor - User Manual Verification 'Coordinator Core' (Protocol in workflow.md)
+## Phase 3: LangGraph Coordinator Core
+- [ ] Task: Define LangGraph State schema (messages, current_agent, slots)
+- [ ] Task: Implement OCI GenAI Inference Node (Intent Classification)
+- [ ] Task: Implement Router Node logic (Conditional Edges)
+- [ ] Task: Implement Mock Agent Nodes for testing routing
+- [ ] Task: Create basic LangGraph runtime loop and test entry point
+- [ ] Task: Conductor - User Manual Verification 'LangGraph Coordinator Core' (Protocol in workflow.md)

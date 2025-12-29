@@ -45,12 +45,12 @@ An AI-powered coordinator that:
                                 │
                     ┌───────────▼───────────┐
                     │                       │
-                    │   COORDINATOR AGENT   │
-                    │   ─────────────────   │
-                    │   • Intent Analysis   │
-                    │   • Agent Selection   │
-                    │   • Context Manager   │
-                    │   • Response Router   │
+                    │  LANGGRAPH CONDUCTOR  │
+                    │  ───────────────────  │
+                    │  • State Management   │
+                    │  • Routing Logic      │
+                    │  • Human-in-the-loop  │
+                    │  • Checkpointing      │
                     │                       │
                     └───────────┬───────────┘
                                 │
@@ -58,26 +58,20 @@ An AI-powered coordinator that:
         │           │           │           │           │           │
         ▼           ▼           ▼           ▼           ▼           ▼
 ┌───────────┐ ┌───────────┐ ┌───────────┐ ┌───────────┐ ┌───────────┐ ┌─────────┐
-│    DB     │ │    Log    │ │  Security │ │  FinOps   │ │  Infra    │ │ Custom  │
-│Troubleshoot│ │ Analytics │ │  & Threat │ │   Agent   │ │  Agent    │ │ Agents  │
-│   Agent   │ │   Agent   │ │   Agent   │ │           │ │           │ │         │
+│ OCI GenAI │ │ OCI GenAI │ │ OCI GenAI │ │ OCI GenAI │ │ OCI GenAI │ │ Custom  │
+│  DB Agent │ │ Log Agent │ │ Sec Agent │ │ Fin Agent │ │ Infra Agt │ │ LangChn │
+│ (Managed) │ │ (Managed) │ │ (Managed) │ │ (Managed) │ │ (Managed) │ │  Tool   │
 └─────┬─────┘ └─────┬─────┘ └─────┬─────┘ └─────┬─────┘ └─────┬─────┘ └────┬────┘
       │             │             │             │             │            │
       └─────────────┴─────────────┴──────┬──────┴─────────────┴────────────┘
                                          │
                     ┌────────────────────▼────────────────────┐
                     │           MCP SERVER LAYER              │
+                    │ (Exposed as Tools to OCI/LangChain)     │
                     ├──────────┬──────────┬──────────┬────────┤
                     │ OCI-Cost │ OCI-DB   │OCI-Compute│OCI-Net │
                     │ OCI-Logan│OCI-Security│ OCI-Unified│ ... │
                     └──────────┴──────────┴──────────┴────────┘
-                                         │
-                    ┌────────────────────▼────────────────────┐
-                    │      ORACLE CLOUD INFRASTRUCTURE        │
-                    │  ─────────────────────────────────────  │
-                    │  Databases | Compute | Network | IAM    │
-                    │  Logging | Monitoring | Security | ...  │
-                    └─────────────────────────────────────────┘
 ```
 
 ### 2.2 Component Description
@@ -85,118 +79,57 @@ An AI-powered coordinator that:
 | Component | Responsibility | Technology |
 |-----------|---------------|------------|
 | Input Channels | Receive and normalize user requests | Slack Bot, Teams Bot, Web API |
-| Coordinator Agent | Intent classification, agent routing, context management | LLM (Claude/Gemini) |
-| Specialized Agents | Domain-specific task execution | LLM + MCP Tools |
-| MCP Servers | OCI API abstraction and tool execution | Python FastMCP |
-| Context Store | Conversation state and history | Redis/OCI NoSQL |
-| Knowledge Base | Domain knowledge and runbooks | Vector DB + RAG |
+| LangGraph Conductor | Orchestration, state persistence, and routing | LangGraph + Redis |
+| OCI Managed Agents | Domain-specific task execution using OCI GenAI | OCI GenAI Agents Service |
+| Custom Tools | Specific logic not covered by managed agents | LangChain Tools |
+| MCP Servers | OCI API abstraction | Python FastMCP |
+| Context Store | Checkpoints and thread history | Redis |
 
 ---
 
 ## 3. Agent Definitions
 
-### 3.1 Coordinator Agent
-**Purpose**: Central orchestrator for all agent interactions
+### 3.1 Coordinator (LangGraph)
+**Purpose**: Central state machine that manages the conversation lifecycle.
 
 **Capabilities**:
-- Natural language understanding for OCI operations
-- Intent classification with confidence scoring
-- Multi-agent workflow orchestration
-- Context preservation across agent calls
-- Response aggregation and formatting
+- **State Management**: Persists conversation state across multi-turn interactions.
+- **Conditional Routing**: Determines the next step (Agent, Tool, or Human) based on current state.
+- **Human-in-the-Loop**: Pauses execution for user clarification or approval.
+- **Parallel Execution**: Can trigger multiple specialized agents simultaneously.
 
-**Routing Logic**:
-```
-Intent Categories → Agent Mapping
-├── database.troubleshoot → DB Troubleshoot Agent
-├── database.performance → DB Troubleshoot Agent
-├── logs.search → Log Analytics Agent
-├── logs.error → Log Analytics Agent
-├── security.threat → Security Agent
-├── security.compliance → Security Agent
-├── cost.analysis → FinOps Agent
-├── cost.optimization → FinOps Agent
-├── infrastructure.* → Infrastructure Agent
-└── unknown → Clarification Flow
-```
+**Routing Logic (Graph Nodes)**:
+- `entry_node`: Analyzes intent using OCI GenAI Inference.
+- `router_node`: Directs flow to `db_agent`, `sec_agent`, etc.
+- `aggregator_node`: Synthesizes responses from multiple agents.
+- `human_node`: Asks clarifying questions if confidence is low.
 
-### 3.2 DB Troubleshoot Agent
-**Purpose**: Database performance analysis and troubleshooting
+### 3.2 Specialized OCI Agents (Managed)
+These are instances of **OCI Generative AI Agents**, configured with specific knowledge bases (RAG) and tools.
+#### DB Troubleshoot Agent
+- **Type**: OCI GenAI Agent
+- **Tools**: `oci-mcp-db` tools linked via OCI Agent Tool Definition.
+- **Knowledge**: Oracle Database documentation and internal runbooks.
 
-**Capabilities**:
-- AWR/ASH analysis
-- Wait event interpretation
-- SQL tuning recommendations
-- Resource bottleneck identification
-- Autonomous Database insights
+#### Log Analytics Agent
+- **Type**: OCI GenAI Agent
+- **Tools**: `oci-mcp-observability` tools.
+- **Knowledge**: Log patterns and error codes.
 
-**MCP Tools**:
-- `oci-mcp-db:get_autonomous_database`
-- `oci-mcp-db:get_db_metrics`
-- `oci-mcp-db:get_db_cpu_snapshot`
-- `sqlcl:run-sql`
+#### Security & Threat Agent
+- **Type**: OCI GenAI Agent
+- **Tools**: `oci-mcp-security` tools.
+- **Knowledge**: MITRE ATT&CK, OCI Security Guidelines.
 
-### 3.3 Log Analytics Agent
-**Purpose**: Log search, analysis, and correlation
+#### FinOps Agent
+- **Type**: OCI GenAI Agent
+- **Tools**: `oci-mcp-cost` tools.
+- **Knowledge**: OCI Pricing, Cost optimization strategies.
 
-**Capabilities**:
-- Log Analytics query construction
-- Error pattern detection
-- Cross-service log correlation
-- Anomaly detection
-- MITRE ATT&CK mapping
-
-**MCP Tools**:
-- `oci-mcp-observability:run_log_analytics_query`
-- `oci-mcp-observability:search_security_events`
-- `oci-mcp-observability:correlate_metrics_with_logs`
-- `oci-mcp-observability:execute_advanced_analytics`
-
-### 3.4 Security & Threat Agent
-**Purpose**: Security monitoring, threat hunting, and compliance
-
-**Capabilities**:
-- Threat indicator correlation
-- MITRE ATT&CK technique detection
-- Cloud Guard problem analysis
-- Data Safe findings review
-- Security posture assessment
-
-**MCP Tools**:
-- `oci-mcp-observability:get_mitre_techniques`
-- `oci-mcp-observability:correlate_threat_intelligence`
-- `oci-mcp-security:list_cloud_guard_problems`
-- `oci-mcp-security:list_data_safe_findings`
-
-### 3.5 FinOps Agent
-**Purpose**: Cost analysis, optimization, and forecasting
-
-**Capabilities**:
-- Cost breakdown by service/compartment
-- Anomaly detection in spending
-- Budget tracking and alerts
-- Resource rightsizing recommendations
-- Usage pattern analysis
-
-**MCP Tools**:
-- `oci-mcp-cost:cost_by_compartment_daily`
-- `oci-mcp-cost:service_cost_drilldown`
-- `oci-mcp-cost:top_cost_spikes_explain`
-- `oci-mcp-cost:skill_generate_cost_optimization_report`
-
-### 3.6 Infrastructure Agent
-**Purpose**: Compute, network, and storage operations
-
-**Capabilities**:
-- Instance lifecycle management
-- Network topology analysis
-- Security group management
-- Capacity planning
-
-**MCP Tools**:
-- `oci-mcp-compute:list_instances`
-- `oci-mcp-network:list_vcns`
-- `oci-mcp-unified:skill_generate_infrastructure_audit`
+#### Infrastructure Agent
+- **Type**: OCI GenAI Agent
+- **Tools**: `oci-mcp-compute`, `oci-mcp-network` tools.
+- **Knowledge**: OCI Architecture Framework.
 
 ---
 
