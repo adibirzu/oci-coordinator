@@ -48,7 +48,7 @@ Documentation and architecture planning completed to establish project foundatio
 
 ## Phase 2: Unified MCP Layer (Skills & Tools)
 
-- [ ] Task: Initialize Unified FastMCP Server structure (tools/, resources/, skills/)
+- [x] Task: Initialize Unified FastMCP Server structure (tools/, resources/, skills/) (ac1394a)
 - [ ] Task: Implement Progressive Disclosure (search_capabilities tool)
 - [ ] Task: Port Compute & Network domains to Unified Server (Markdown output, pagination)
 - [ ] Task: Port Cost, Security & Observability domains to Unified Server
