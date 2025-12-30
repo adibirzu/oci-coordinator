@@ -46,14 +46,14 @@ Documentation and architecture planning completed to establish project foundatio
 
 ---
 
-## Phase 2: Unified MCP Layer (Skills & Tools)
+## Phase 2: Unified MCP Layer (Skills & Tools) [checkpoint: 647b9ab]
 
 - [x] Task: Initialize Unified FastMCP Server structure (tools/, resources/, skills/) (ac1394a)
 - [x] Task: Implement Progressive Disclosure (search_capabilities tool) (b99243c)
 - [x] Task: Port Compute & Network domains to Unified Server (Markdown output, pagination) (721e4bd)
-- [x] Task: Port Cost, Security & Observability domains to Unified Server (6ac39c9)
-- [x] Task: Implement 'Troubleshoot' Workflow Skill (Deterministic logic) (4aa23d6)
-- [ ] Task: Conductor - User Manual Verification 'Unified MCP Layer' (Protocol in workflow.md)
+- [x] Task: Port Cost, Security & Observability domains to Unified Server (4c75bfb)
+- [x] Task: Implement 'Troubleshoot' Workflow Skill (Deterministic logic) (4c75bfb)
+- [x] Task: Conductor - User Manual Verification 'Unified MCP Layer' (Protocol in workflow.md) (647b9ab)
 
 ---
 
