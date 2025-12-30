@@ -1,3 +1,4 @@
+
 import pytest
 from unittest.mock import MagicMock, patch
 from src.mcp.server.main import mcp, _search_capabilities_logic
@@ -94,3 +95,32 @@ async def test_troubleshoot_instance_logic():
         assert "broken-instance" in result
         assert "STOPPED" in result
         assert "Root Cause Analysis" in result
+
+@pytest.mark.asyncio
+async def test_list_users_logic():
+    """Verify list_users tool logic."""
+    from src.mcp.server.tools.security import _list_users_logic
+    
+    mock_identity = MagicMock()
+    mock_user = MagicMock()
+    mock_user.name = "test-user"
+    mock_user.id = "ocid1.user.123"
+    mock_user.lifecycle_state = "ACTIVE"
+    
+    mock_identity.list_users.return_value = MagicMock(data=[mock_user])
+    
+    with patch("src.mcp.server.tools.security.get_identity_client", return_value=mock_identity):
+        result = await _list_users_logic(compartment_id="test-comp", format="markdown")
+        assert "test-user" in result
+        assert "ACTIVE" in result
+
+@pytest.mark.asyncio
+async def test_get_metrics_logic():
+    """Verify get_metrics tool logic."""
+    from src.mcp.server.tools.observability import _get_metrics_logic
+    
+    mock_monitoring = MagicMock()
+    
+    with patch("src.mcp.server.tools.observability.get_monitoring_client", return_value=mock_monitoring):
+        result = await _get_metrics_logic(compartment_id="test-comp", namespace="oci_computeagent", query="CpuUtilization[1m].mean()")
+        assert "85% CPU Usage" in result
