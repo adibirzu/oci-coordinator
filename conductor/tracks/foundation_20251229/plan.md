@@ -51,7 +51,7 @@ Documentation and architecture planning completed to establish project foundatio
   - Port from: `analysis/oca-langchain-client/`
   - Target: `src/llm/oca.py`
 
-- [ ] Task: Implement Multi-LLM Factory
+- [x] Task: Implement Multi-LLM Factory (Factory pattern for OCA, OCI GenAI, Anthropic, OpenAI) (c0fe65e)
   - Factory pattern for: OCA, OCI GenAI, Anthropic, OpenAI, Ollama
   - Target: `src/llm/factory.py`
 
