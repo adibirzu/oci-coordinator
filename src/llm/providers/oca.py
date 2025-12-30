@@ -1,15 +1,8 @@
-
 import asyncio
-import hashlib
 import json
-import os
-import secrets
 import time
-import urllib.parse
-import webbrowser
-from base64 import urlsafe_b64encode
 from pathlib import Path
-from typing import Any, AsyncIterator, List, Optional, Dict, Union
+from typing import Any
 
 import aiohttp
 from langchain_core.callbacks import (
@@ -23,13 +16,9 @@ from langchain_core.messages import (
     ChatMessage,
     HumanMessage,
     SystemMessage,
-    ToolMessage,
-    AIMessageChunk,
 )
-from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
-from pydantic import Field, SecretStr
+from langchain_core.outputs import ChatGeneration, ChatResult
 
-from src.observability.tracing import truncate
 
 class OCAAuth:
     """Oracle Code Assist PKCE OAuth handler."""
@@ -41,14 +30,14 @@ class OCAAuth:
         self.idcs_url = idcs_url.rstrip("/")
         self.client_id = client_id
         self.redirect_uri = redirect_uri
-        self._token: Optional[dict] = None
+        self._token: dict | None = None
         self._load_cached_token()
 
     def _load_cached_token(self) -> None:
         """Load token from cache file."""
         if self.TOKEN_CACHE_FILE.exists():
             try:
-                with open(self.TOKEN_CACHE_FILE) as f:
+                with self.TOKEN_CACHE_FILE.open() as f:
                     self._token = json.load(f)
                     if self._is_token_expired():
                         self._token = None
@@ -59,9 +48,9 @@ class OCAAuth:
         """Save token to cache file."""
         self._token = token
         try:
-            with open(self.TOKEN_CACHE_FILE, "w") as f:
+            with self.TOKEN_CACHE_FILE.open("w") as f:
                 json.dump(token, f)
-            os.chmod(self.TOKEN_CACHE_FILE, 0o600)
+            self.TOKEN_CACHE_FILE.chmod(0o600)
         except Exception:
             pass
 
@@ -72,7 +61,7 @@ class OCAAuth:
         expires_at = self._token.get("expires_at", 0)
         return time.time() >= expires_at - 300  # 5 min buffer
 
-    async def refresh_token(self) -> Optional[dict]:
+    async def refresh_token(self) -> dict | None:
         """Refresh the access token."""
         if not self._token or "refresh_token" not in self._token:
             return None
@@ -94,7 +83,7 @@ class OCAAuth:
                     return token
                 return None
 
-    async def get_valid_token(self) -> Optional[str]:
+    async def get_valid_token(self) -> str | None:
         """Get a valid access token, refreshing if needed."""
         if self._is_token_expired():
             await self.refresh_token()
@@ -102,6 +91,7 @@ class OCAAuth:
         if self._token and "access_token" in self._token:
             return self._token["access_token"]
         return None
+
 
 class ChatOCA(BaseChatModel):
     """Oracle Code Assist Chat Model."""
@@ -113,8 +103,8 @@ class ChatOCA(BaseChatModel):
     model_name: str = "oci.generativeai.cohere.command-r-plus"
     temperature: float = 0.7
     max_tokens: int = 4096
-    
-    _auth: Optional[OCAAuth] = None
+
+    _auth: OCAAuth | None = None
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
@@ -126,23 +116,20 @@ class ChatOCA(BaseChatModel):
 
     def _generate(
         self,
-        messages: List[BaseMessage],
-        stop: Optional[List[str]] = None,
-        run_manager: Optional[CallbackManagerForLLMRun] = None,
-        **kwargs: Any,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: CallbackManagerForLLMRun | None = None,  # noqa: ARG002
+        **kwargs: Any,  # noqa: ARG002
     ) -> ChatResult:
         """Internal generate method."""
-        # Non-async version using asyncio.run or similar if needed, 
-        # but LangChain prefers async for chat models.
-        # For this tool, we'll focus on _agenerate.
-        return asyncio.run(self._agenerate(messages, stop, None, **kwargs))
+        return asyncio.run(self._agenerate(messages, stop, None))
 
     async def _agenerate(
         self,
-        messages: List[BaseMessage],
-        stop: Optional[List[str]] = None,
-        run_manager: Optional[AsyncCallbackManagerForLLMRun] = None,
-        **kwargs: Any,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: AsyncCallbackManagerForLLMRun | None = None,  # noqa: ARG002
+        **kwargs: Any,  # noqa: ARG002
     ) -> ChatResult:
         """Async generate method."""
         token = await self._auth.get_valid_token()
@@ -155,6 +142,8 @@ class ChatOCA(BaseChatModel):
             "temperature": self.temperature,
             "max_tokens": self.max_tokens,
         }
+        if stop:
+            payload["stop"] = stop
 
         async with aiohttp.ClientSession() as session:
             headers = {
@@ -174,15 +163,15 @@ class ChatOCA(BaseChatModel):
                 choice = data.get("choices", [{}])[0]
                 message_dict = choice.get("message", {})
                 content = message_dict.get("content", "")
-                
+
                 ai_message = AIMessage(
                     content=content,
                     additional_kwargs={"usage": data.get("usage", {})},
                 )
-                
+
                 return ChatResult(generations=[ChatGeneration(message=ai_message)])
 
-    def _convert_message_to_dict(self, message: BaseMessage) -> Dict[str, Any]:
+    def _convert_message_to_dict(self, message: BaseMessage) -> dict[str, Any]:
         if isinstance(message, ChatMessage):
             return {"role": message.role, "content": message.content}
         elif isinstance(message, HumanMessage):

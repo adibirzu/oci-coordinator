@@ -1,16 +1,16 @@
+import fastapi
+import httpx
+import langchain
+import langgraph
+import oci
+import opentelemetry
+import pydantic
+import redis
+import tenacity
+
 
 def test_imports():
     """Verify critical dependencies are installed."""
-    import langchain
-    import langgraph
-    import oci
-    import fastapi
-    import redis
-    import pydantic
-    import opentelemetry
-    import tenacity
-    import httpx
-    
     assert langchain is not None
     assert langgraph is not None
     assert oci is not None

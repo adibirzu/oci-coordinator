@@ -1,15 +1,17 @@
+from typing import Any
 
-from typing import Any, Dict, Union
-from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_anthropic import ChatAnthropic
+from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_openai import ChatOpenAI
+
 from src.llm.providers.oca import ChatOCA
+
 
 class LLMFactory:
     """Factory for creating LLM providers."""
 
     @staticmethod
-    def create_llm(config: Dict[str, Any]) -> BaseChatModel:
+    def create_llm(config: dict[str, Any]) -> BaseChatModel:
         """Create an LLM instance based on configuration.
 
         Args:
@@ -28,8 +30,12 @@ class LLMFactory:
                 api_url=config.get("api_url"),
                 idcs_url=config.get("idcs_url"),
                 client_id=config.get("client_id"),
-                redirect_uri=config.get("redirect_uri", "http://localhost:3001/api/oca/callback"),
-                model_name=config.get("model_name", "oci.generativeai.cohere.command-r-plus"),
+                redirect_uri=config.get(
+                    "redirect_uri", "http://localhost:3001/api/oca/callback"
+                ),
+                model_name=config.get(
+                    "model_name", "oci.generativeai.cohere.command-r-plus"
+                ),
                 temperature=config.get("temperature", 0.7),
                 max_tokens=config.get("max_tokens", 4096),
             )

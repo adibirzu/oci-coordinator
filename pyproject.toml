@@ -105,6 +105,7 @@ build-backend = "poetry.core.masonry.api"
 target-version = "py311"
 line-length = 88
 fix = true
+exclude = ["analysis"]
 
 [tool.ruff.lint]
 select = [
@@ -143,6 +144,7 @@ known-first-party = ["src"]
 [tool.black]
 target-version = ["py311"]
 line-length = 88
+extend-exclude = 'analysis/'
 
 # ========================================
 # MyPy Configuration
