@@ -1,4 +1,3 @@
-
 import oci
 import os
 from typing import Optional
@@ -23,3 +22,29 @@ def get_network_client():
     """Get OCI Virtual Network client."""
     config = get_oci_config()
     return oci.core.VirtualNetworkClient(config)
+
+def get_usage_client():
+    """Get OCI Usage client."""
+    config = get_oci_config()
+    return oci.usage_api.UsageapiClient(config)
+
+def get_identity_client():
+    """Get OCI Identity client."""
+    config = get_oci_config()
+    return oci.identity.IdentityClient(config)
+
+def get_monitoring_client():
+    """Get OCI Monitoring client."""
+    config = get_oci_config()
+    return oci.monitoring.MonitoringClient(config)
+
+def get_logging_client():
+    """Get OCI Logging Management client."""
+    config = get_oci_config()
+    return oci.loggingingestion.LoggingClient(config) # For ingestion
+    # Note: Logging search uses loggingsearch client
+    
+def get_logging_search_client():
+    """Get OCI Logging Search client."""
+    config = get_oci_config()
+    return oci.loggingsearch.LogSearchClient(config)
