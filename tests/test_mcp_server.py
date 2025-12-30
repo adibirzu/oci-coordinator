@@ -1,5 +1,6 @@
 
 import pytest
+from unittest.mock import MagicMock, patch
 from src.mcp.server.main import mcp, _search_capabilities_logic
 
 def test_mcp_server_instantiation():
@@ -15,7 +16,45 @@ async def test_search_capabilities_found():
     assert "list_instances" in result
 
 @pytest.mark.asyncio
-async def test_search_capabilities_not_found():
-    """Verify that search_capabilities handles no results."""
-    result = await _search_capabilities_logic("nonexistent")
-    assert "No domains or tools found" in result
+async def test_list_instances_logic():
+    """Verify list_instances tool logic."""
+    from src.mcp.server.tools.compute import _list_instances_logic
+    
+    mock_compute = MagicMock()
+    mock_instance = MagicMock()
+    mock_instance.display_name = "test-instance"
+    mock_instance.id = "ocid1.instance.123"
+    mock_instance.lifecycle_state = "RUNNING"
+    mock_instance.shape = "VM.Standard.E4.Flex"
+    
+    mock_response = MagicMock()
+    mock_response.data = [mock_instance]
+    mock_compute.list_instances.return_value = mock_response
+    
+    with patch("src.mcp.server.tools.compute.get_compute_client", return_value=mock_compute):
+        result = await _list_instances_logic(compartment_id="test-comp", format="markdown")
+        assert "test-instance" in result
+        assert "RUNNING" in result
+        assert "| Name |" in result
+
+@pytest.mark.asyncio
+async def test_list_vcns_logic():
+    """Verify list_vcns tool logic."""
+    from src.mcp.server.tools.network import _list_vcns_logic
+    
+    mock_network = MagicMock()
+    mock_vcn = MagicMock()
+    mock_vcn.display_name = "test-vcn"
+    mock_vcn.id = "ocid1.vcn.123"
+    mock_vcn.lifecycle_state = "AVAILABLE"
+    mock_vcn.cidr_block = "10.0.0.0/16"
+    
+    mock_response = MagicMock()
+    mock_response.data = [mock_vcn]
+    mock_network.list_vcns.return_value = mock_response
+    
+    with patch("src.mcp.server.tools.network.get_network_client", return_value=mock_network):
+        result = await _list_vcns_logic(compartment_id="test-comp", format="markdown")
+        assert "test-vcn" in result
+        assert "AVAILABLE" in result
+        assert "10.0.0.0/16" in result

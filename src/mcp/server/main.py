@@ -76,5 +76,12 @@ async def search_capabilities(query: str, domain: Optional[str] = None) -> str:
     """
     return await _search_capabilities_logic(query, domain)
 
+from src.mcp.server.tools.compute import register_compute_tools
+from src.mcp.server.tools.network import register_network_tools
+
+# Register tools
+register_compute_tools(mcp)
+register_network_tools(mcp)
+
 if __name__ == "__main__":
     mcp.run()
