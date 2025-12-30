@@ -73,6 +73,7 @@ redis = ">=5.0.0"
 slack-sdk = ">=3.26.0"
 slack-bolt = ">=1.18.0"
 # botbuilder-core = ">=4.14.0"  # Optional: Microsoft Teams
+fastmcp = "^2.14.1"
 
 [tool.poetry.group.dev.dependencies]
 pytest = ">=8.0.0"
