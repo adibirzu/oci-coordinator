@@ -32,14 +32,7 @@ Documentation and architecture planning completed to establish project foundatio
 ### Completed
 - [x] Task: Initialize Python project with Poetry and install dependencies (74d77a1)
 - [x] Task: Configure Environment (Copy .env.local) (30d5ac2)
-
-### In Progress
-- [x] Task: Implement OCI APM Tracing (Python port of OtelTracing.ts logic) (5581ec3)
-  - Port from: `analysis/observability_service/OtelTracing.ts`
-  - Target: `src/observability/tracing.py`
-
-### Pending
-- [ ] Task: Create src/ directory structure
+- [x] Task: Create src/ directory structure (5d3c47b)
   - `src/core/` - Logger, config, exceptions
   - `src/agents/coordinator/` - LangGraph coordinator
   - `src/mcp/` - MCP client, registry, catalog
@@ -47,6 +40,12 @@ Documentation and architecture planning completed to establish project foundatio
   - `src/observability/` - OTEL tracing
   - `src/api/` - FastAPI endpoints
 
+### In Progress
+- [x] Task: Implement OCI APM Tracing (Python port of OtelTracing.ts logic) (5581ec3)
+  - Port from: `analysis/observability_service/OtelTracing.ts`
+  - Target: `src/observability/tracing.py`
+
+### Pending
 - [x] Task: Implement OCA LangChain Wrapper (Python) based on referenced client (118ca1a)
   - Port from: `analysis/oca-langchain-client/`
   - Target: `src/llm/oca.py`
