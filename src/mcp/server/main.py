@@ -81,6 +81,7 @@ from src.mcp.server.tools.network import register_network_tools
 from src.mcp.server.tools.cost import register_cost_tools
 from src.mcp.server.tools.security import register_security_tools
 from src.mcp.server.tools.observability import register_observability_tools
+from src.mcp.server.skills.troubleshoot import register_troubleshoot_skills
 
 # Register tools
 register_compute_tools(mcp)
@@ -88,6 +89,9 @@ register_network_tools(mcp)
 register_cost_tools(mcp)
 register_security_tools(mcp)
 register_observability_tools(mcp)
+
+# Register skills
+register_troubleshoot_skills(mcp)
 
 if __name__ == "__main__":
     mcp.run()

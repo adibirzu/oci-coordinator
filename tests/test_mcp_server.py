@@ -1,4 +1,3 @@
-
 import pytest
 from unittest.mock import MagicMock, patch
 from src.mcp.server.main import mcp, _search_capabilities_logic
@@ -65,14 +64,11 @@ async def test_get_cost_summary_logic():
     from src.mcp.server.tools.cost import _get_cost_summary_logic
     
     mock_usage = MagicMock()
-    # Mock the return value to have .data.items
     mock_item = MagicMock()
     mock_item.computed_amount = 100.5
     mock_item.currency = "USD"
-    
     mock_collection = MagicMock()
     mock_collection.items = [mock_item]
-    
     mock_response = MagicMock()
     mock_response.data = mock_collection
     mock_usage.request_summarized_usages.return_value = mock_response
@@ -81,3 +77,20 @@ async def test_get_cost_summary_logic():
         result = await _get_cost_summary_logic(compartment_id="test-comp", format="markdown")
         assert "100.5" in result
         assert "USD" in result
+
+@pytest.mark.asyncio
+async def test_troubleshoot_instance_logic():
+    """Verify troubleshoot_instance skill logic."""
+    from src.mcp.server.skills.troubleshoot import _troubleshoot_instance_logic
+    
+    mock_compute = MagicMock()
+    mock_instance = MagicMock()
+    mock_instance.display_name = "broken-instance"
+    mock_instance.lifecycle_state = "STOPPED"
+    mock_compute.get_instance.return_value = MagicMock(data=mock_instance)
+    
+    with patch("src.mcp.server.skills.troubleshoot.get_compute_client", return_value=mock_compute):
+        result = await _troubleshoot_instance_logic(instance_id="ocid1.instance.123")
+        assert "broken-instance" in result
+        assert "STOPPED" in result
+        assert "Root Cause Analysis" in result
