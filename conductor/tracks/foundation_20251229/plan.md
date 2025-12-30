@@ -55,7 +55,7 @@ Documentation and architecture planning completed to establish project foundatio
   - Factory pattern for: OCA, OCI GenAI, Anthropic, OpenAI, Ollama
   - Target: `src/llm/factory.py`
 
-- [ ] Task: Configure linting and formatting with Ruff and Black
+- [x] Task: Configure linting and formatting with Ruff and Black (f4b805b)
   - Config: pyproject.toml (already configured)
   - Action: Run `ruff check src/` and `black src/`
 
