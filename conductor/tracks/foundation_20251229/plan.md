@@ -33,35 +33,15 @@ Documentation and architecture planning completed to establish project foundatio
 - [x] Task: Initialize Python project with Poetry and install dependencies (74d77a1)
 - [x] Task: Configure Environment (Copy .env.local) (30d5ac2)
 - [x] Task: Create src/ directory structure (5d3c47b)
-  - `src/core/` - Logger, config, exceptions
-  - `src/agents/coordinator/` - LangGraph coordinator
-  - `src/mcp/` - MCP client, registry, catalog
-  - `src/llm/` - Multi-LLM factory
-  - `src/observability/` - OTEL tracing
-  - `src/api/` - FastAPI endpoints
+- [x] Task: Implement OCI APM Tracing (Python port of OtelTracing.ts logic) (5581ec3)
+- [x] Task: Implement OCA LangChain Wrapper (Python) based on referenced client (118ca1a)
+- [x] Task: Implement Multi-LLM Factory (Factory pattern for OCA, OCI GenAI, Anthropic, OpenAI) (c0fe65e)
+- [x] Task: Configure linting and formatting with Ruff and Black (f4b805b)
+- [x] Task: Set up testing framework with Pytest and coverage reporting (94d5106)
 
 ### In Progress
-- [x] Task: Implement OCI APM Tracing (Python port of OtelTracing.ts logic) (5581ec3)
-  - Port from: `analysis/observability_service/OtelTracing.ts`
-  - Target: `src/observability/tracing.py`
 
 ### Pending
-- [x] Task: Implement OCA LangChain Wrapper (Python) based on referenced client (118ca1a)
-  - Port from: `analysis/oca-langchain-client/`
-  - Target: `src/llm/oca.py`
-
-- [x] Task: Implement Multi-LLM Factory (Factory pattern for OCA, OCI GenAI, Anthropic, OpenAI) (c0fe65e)
-  - Factory pattern for: OCA, OCI GenAI, Anthropic, OpenAI, Ollama
-  - Target: `src/llm/factory.py`
-
-- [x] Task: Configure linting and formatting with Ruff and Black (f4b805b)
-  - Config: pyproject.toml (already configured)
-  - Action: Run `ruff check src/` and `black src/`
-
-- [x] Task: Set up testing framework with Pytest and coverage reporting (94d5106)
-  - Config: pyproject.toml (already configured)
-  - Action: Create `tests/conftest.py`, run `pytest --cov=src`
-
 - [ ] Task: Conductor - User Manual Verification 'Project Environment' (Protocol in workflow.md)
 
 ---
