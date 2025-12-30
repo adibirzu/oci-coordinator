@@ -52,7 +52,7 @@ Documentation and architecture planning completed to establish project foundatio
 - [x] Task: Implement Progressive Disclosure (search_capabilities tool) (b99243c)
 - [x] Task: Port Compute & Network domains to Unified Server (Markdown output, pagination) (721e4bd)
 - [x] Task: Port Cost, Security & Observability domains to Unified Server (6ac39c9)
-- [ ] Task: Implement 'Troubleshoot' Workflow Skill (Deterministic logic)
+- [x] Task: Implement 'Troubleshoot' Workflow Skill (Deterministic logic) (4aa23d6)
 - [ ] Task: Conductor - User Manual Verification 'Unified MCP Layer' (Protocol in workflow.md)
 
 ---
