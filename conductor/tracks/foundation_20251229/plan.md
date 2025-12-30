@@ -47,7 +47,7 @@ Documentation and architecture planning completed to establish project foundatio
   - `src/observability/` - OTEL tracing
   - `src/api/` - FastAPI endpoints
 
-- [ ] Task: Implement OCA LangChain Wrapper (Python)
+- [x] Task: Implement OCA LangChain Wrapper (Python) based on referenced client (118ca1a)
   - Port from: `analysis/oca-langchain-client/`
   - Target: `src/llm/oca.py`
 
