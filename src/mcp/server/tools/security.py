@@ -28,6 +28,15 @@ async def _list_users_logic(
 
 def register_security_tools(mcp):
     @mcp.tool()
-    async def list_users(compartment_id: str, limit: int = 20, format: str = "markdown") -> str:
-        """List IAM users."""
+    async def oci_security_list_users(compartment_id: str, limit: int = 20, format: str = "markdown") -> str:
+        """List IAM users in a compartment.
+
+        Args:
+            compartment_id: OCID of the compartment
+            limit: Maximum users to return (default 20)
+            format: Output format ('json' or 'markdown')
+
+        Returns:
+            List of IAM users with name, state, and OCID
+        """
         return await _list_users_logic(compartment_id, limit, format)

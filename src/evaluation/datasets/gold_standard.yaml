@@ -1,0 +1,803 @@
+# Gold Standard Evaluation Dataset
+# OCI Coordinator - Phase 4 Evaluation
+# 55 test cases covering all domains and edge cases
+
+name: gold_standard
+version: "1.0.0"
+description: |
+  Comprehensive evaluation dataset for testing OCI Coordinator
+  intent classification, routing, and response quality.
+  Target: 70%+ workflow routing, 85%+ task success rate.
+
+metadata:
+  created: "2025-12-30"
+  author: "OCI Coordinator Team"
+  domains:
+    - database
+    - security
+    - finops
+    - logs
+    - infrastructure
+
+cases:
+  # ───────────────────────────────────────────────────────────────────────────
+  # DATABASE DOMAIN (10 cases)
+  # ───────────────────────────────────────────────────────────────────────────
+  - id: db-001
+    query: "My autonomous database is running slow, can you check the AWR report?"
+    description: "Database performance troubleshooting request"
+    category: domain_database
+    difficulty: medium
+    tags: [database, performance, awr, troubleshooting]
+    expected:
+      intent_category: troubleshoot
+      routing_type: agent
+      routing_target: db-troubleshoot-agent
+      domains: [database]
+      response_contains: [AWR, performance, wait]
+      min_confidence: 0.7
+
+  - id: db-002
+    query: "List all autonomous databases in my tenancy"
+    description: "Simple database listing query"
+    category: domain_database
+    difficulty: easy
+    tags: [database, list, query]
+    expected:
+      intent_category: query
+      routing_type: workflow
+      routing_target: database_list_workflow
+      domains: [database]
+      expected_tools: [oci_database_list_autonomous]
+      min_confidence: 0.8
+
+  - id: db-003
+    query: "Why is my SQL query taking 30 seconds to execute?"
+    description: "SQL performance investigation"
+    category: domain_database
+    difficulty: hard
+    tags: [database, sql, performance, troubleshooting]
+    expected:
+      intent_category: troubleshoot
+      routing_type: agent
+      routing_target: db-troubleshoot-agent
+      domains: [database]
+      response_contains: [execution, plan, index]
+      min_confidence: 0.7
+
+  - id: db-004
+    query: "Scale up my ATP database to 4 OCPUs"
+    description: "Database scaling action"
+    category: domain_database
+    difficulty: medium
+    tags: [database, action, scale]
+    expected:
+      intent_category: action
+      routing_type: workflow
+      domains: [database]
+      min_confidence: 0.75
+
+  - id: db-005
+    query: "What's the storage utilization of my ORDERS_DB?"
+    description: "Database storage monitoring"
+    category: domain_database
+    difficulty: easy
+    tags: [database, storage, monitoring]
+    expected:
+      intent_category: query
+      routing_type: workflow
+      domains: [database]
+      min_confidence: 0.8
+
+  - id: db-006
+    query: "Check for blocking sessions in the production database"
+    description: "Database session analysis"
+    category: domain_database
+    difficulty: medium
+    tags: [database, sessions, blocking]
+    expected:
+      intent_category: troubleshoot
+      routing_type: agent
+      routing_target: db-troubleshoot-agent
+      domains: [database]
+      min_confidence: 0.75
+
+  - id: db-007
+    query: "Show me the top 10 SQL statements by CPU time"
+    description: "SQL performance ranking"
+    category: domain_database
+    difficulty: medium
+    tags: [database, sql, cpu, performance]
+    expected:
+      intent_category: analysis
+      routing_type: agent
+      routing_target: db-troubleshoot-agent
+      domains: [database]
+      min_confidence: 0.7
+
+  - id: db-008
+    query: "Create a manual backup of my autonomous database"
+    description: "Database backup action"
+    category: domain_database
+    difficulty: easy
+    tags: [database, backup, action]
+    expected:
+      intent_category: action
+      routing_type: workflow
+      domains: [database]
+      min_confidence: 0.8
+
+  - id: db-009
+    query: "Analyze database wait events for the last 24 hours"
+    description: "Performance deep dive"
+    category: domain_database
+    difficulty: hard
+    tags: [database, wait_events, analysis]
+    expected:
+      intent_category: analysis
+      routing_type: agent
+      routing_target: db-troubleshoot-agent
+      domains: [database]
+      min_confidence: 0.7
+
+  - id: db-010
+    query: "Is my database configured for automatic failover?"
+    description: "Database configuration query"
+    category: domain_database
+    difficulty: easy
+    tags: [database, configuration, ha]
+    expected:
+      intent_category: query
+      routing_type: workflow
+      domains: [database]
+      min_confidence: 0.8
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # SECURITY DOMAIN (10 cases)
+  # ───────────────────────────────────────────────────────────────────────────
+  - id: sec-001
+    query: "Are there any critical Cloud Guard problems in my tenancy?"
+    description: "Security posture check"
+    category: domain_security
+    difficulty: easy
+    tags: [security, cloud_guard, monitoring]
+    expected:
+      intent_category: query
+      routing_type: agent
+      routing_target: security-threat-agent
+      domains: [security]
+      response_contains: [Cloud Guard, problem, risk]
+      min_confidence: 0.8
+
+  - id: sec-002
+    query: "Check if any users have overly permissive IAM policies"
+    description: "IAM audit request"
+    category: domain_security
+    difficulty: medium
+    tags: [security, iam, audit, compliance]
+    expected:
+      intent_category: analysis
+      routing_type: agent
+      routing_target: security-threat-agent
+      domains: [security]
+      min_confidence: 0.75
+
+  - id: sec-003
+    query: "Map recent suspicious activity to MITRE ATT&CK framework"
+    description: "Threat hunting with MITRE mapping"
+    category: domain_security
+    difficulty: hard
+    tags: [security, mitre, threat_hunting]
+    expected:
+      intent_category: analysis
+      routing_type: agent
+      routing_target: security-threat-agent
+      domains: [security]
+      response_contains: [MITRE, ATT&CK]
+      min_confidence: 0.7
+
+  - id: sec-004
+    query: "List all users with administrator privileges"
+    description: "Privileged user listing"
+    category: domain_security
+    difficulty: easy
+    tags: [security, iam, users, admin]
+    expected:
+      intent_category: query
+      routing_type: workflow
+      domains: [security]
+      expected_tools: [oci_security_list_users]
+      min_confidence: 0.85
+
+  - id: sec-005
+    query: "Is my tenancy compliant with CIS benchmarks?"
+    description: "Compliance assessment"
+    category: domain_security
+    difficulty: medium
+    tags: [security, compliance, cis]
+    expected:
+      intent_category: analysis
+      routing_type: agent
+      routing_target: security-threat-agent
+      domains: [security]
+      min_confidence: 0.75
+
+  - id: sec-006
+    query: "Show me failed login attempts in the last hour"
+    description: "Authentication monitoring"
+    category: domain_security
+    difficulty: easy
+    tags: [security, auth, monitoring, logs]
+    expected:
+      intent_category: query
+      routing_type: agent
+      domains: [security, logs]
+      min_confidence: 0.8
+
+  - id: sec-007
+    query: "What security zones are configured in my compartment?"
+    description: "Security zone configuration query"
+    category: domain_security
+    difficulty: easy
+    tags: [security, zones, configuration]
+    expected:
+      intent_category: query
+      routing_type: workflow
+      domains: [security]
+      min_confidence: 0.85
+
+  - id: sec-008
+    query: "Investigate the detected brute force attack"
+    description: "Security incident investigation"
+    category: domain_security
+    difficulty: hard
+    tags: [security, incident, investigation, threat]
+    expected:
+      intent_category: troubleshoot
+      routing_type: agent
+      routing_target: security-threat-agent
+      domains: [security]
+      min_confidence: 0.7
+
+  - id: sec-009
+    query: "Who made changes to the production compartment policies yesterday?"
+    description: "IAM audit trail"
+    category: domain_security
+    difficulty: medium
+    tags: [security, iam, audit, changes]
+    expected:
+      intent_category: query
+      routing_type: agent
+      domains: [security, logs]
+      min_confidence: 0.75
+
+  - id: sec-010
+    query: "Check for public buckets in Object Storage"
+    description: "Data exposure check"
+    category: domain_security
+    difficulty: medium
+    tags: [security, storage, public, compliance]
+    expected:
+      intent_category: analysis
+      routing_type: agent
+      routing_target: security-threat-agent
+      domains: [security]
+      min_confidence: 0.75
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # FINOPS DOMAIN (10 cases)
+  # ───────────────────────────────────────────────────────────────────────────
+  - id: fin-001
+    query: "What's my total cloud spend this month?"
+    description: "Simple cost query"
+    category: domain_finops
+    difficulty: easy
+    tags: [finops, cost, summary]
+    expected:
+      intent_category: query
+      routing_type: workflow
+      domains: [finops]
+      expected_tools: [oci_cost_get_summary]
+      min_confidence: 0.85
+
+  - id: fin-002
+    query: "Show me cost breakdown by service for the last 30 days"
+    description: "Cost analysis by service"
+    category: domain_finops
+    difficulty: easy
+    tags: [finops, cost, breakdown, service]
+    expected:
+      intent_category: query
+      routing_type: workflow
+      domains: [finops]
+      expected_tools: [oci_cost_get_by_service]
+      min_confidence: 0.85
+
+  - id: fin-003
+    query: "Why did my compute costs spike last week?"
+    description: "Cost anomaly investigation"
+    category: domain_finops
+    difficulty: hard
+    tags: [finops, cost, anomaly, investigation]
+    expected:
+      intent_category: analysis
+      routing_type: agent
+      routing_target: finops-agent
+      domains: [finops]
+      min_confidence: 0.7
+
+  - id: fin-004
+    query: "Are there any underutilized resources I can downsize?"
+    description: "Rightsizing recommendations"
+    category: domain_finops
+    difficulty: medium
+    tags: [finops, optimization, rightsizing]
+    expected:
+      intent_category: analysis
+      routing_type: agent
+      routing_target: finops-agent
+      domains: [finops]
+      response_contains: [utilization, savings]
+      min_confidence: 0.75
+
+  - id: fin-005
+    query: "Compare this month's spending to last month"
+    description: "Cost trend comparison"
+    category: domain_finops
+    difficulty: medium
+    tags: [finops, cost, trend, comparison]
+    expected:
+      intent_category: analysis
+      routing_type: agent
+      routing_target: finops-agent
+      domains: [finops]
+      min_confidence: 0.75
+
+  - id: fin-006
+    query: "What's my forecast for end-of-month spending?"
+    description: "Cost forecasting"
+    category: domain_finops
+    difficulty: medium
+    tags: [finops, cost, forecast]
+    expected:
+      intent_category: analysis
+      routing_type: agent
+      routing_target: finops-agent
+      domains: [finops]
+      expected_tools: [oci_cost_get_forecast]
+      min_confidence: 0.75
+
+  - id: fin-007
+    query: "Which compartment is spending the most?"
+    description: "Cost by compartment"
+    category: domain_finops
+    difficulty: easy
+    tags: [finops, cost, compartment]
+    expected:
+      intent_category: query
+      routing_type: workflow
+      domains: [finops]
+      min_confidence: 0.8
+
+  - id: fin-008
+    query: "Am I over my monthly budget?"
+    description: "Budget check"
+    category: domain_finops
+    difficulty: easy
+    tags: [finops, budget, monitoring]
+    expected:
+      intent_category: query
+      routing_type: workflow
+      domains: [finops]
+      expected_tools: [oci_cost_list_budgets]
+      min_confidence: 0.85
+
+  - id: fin-009
+    query: "Generate a cost optimization report for the development environment"
+    description: "Optimization report generation"
+    category: domain_finops
+    difficulty: hard
+    tags: [finops, optimization, report]
+    expected:
+      intent_category: analysis
+      routing_type: agent
+      routing_target: finops-agent
+      domains: [finops]
+      min_confidence: 0.7
+
+  - id: fin-010
+    query: "Show me reserved capacity savings opportunities"
+    description: "Reserved instance recommendations"
+    category: domain_finops
+    difficulty: medium
+    tags: [finops, reserved, optimization]
+    expected:
+      intent_category: analysis
+      routing_type: agent
+      routing_target: finops-agent
+      domains: [finops]
+      min_confidence: 0.75
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # LOGS DOMAIN (10 cases)
+  # ───────────────────────────────────────────────────────────────────────────
+  - id: log-001
+    query: "Search for errors in the application logs from the last hour"
+    description: "Simple log search"
+    category: domain_logs
+    difficulty: easy
+    tags: [logs, search, errors]
+    expected:
+      intent_category: query
+      routing_type: workflow
+      domains: [logs]
+      expected_tools: [oci_observability_query_logs]
+      min_confidence: 0.85
+
+  - id: log-002
+    query: "What patterns are emerging in our error logs?"
+    description: "Log pattern analysis"
+    category: domain_logs
+    difficulty: medium
+    tags: [logs, patterns, analysis]
+    expected:
+      intent_category: analysis
+      routing_type: agent
+      routing_target: log-analytics-agent
+      domains: [logs]
+      response_contains: [pattern]
+      min_confidence: 0.75
+
+  - id: log-003
+    query: "Correlate logs across compute and database services for the outage window"
+    description: "Cross-service log correlation"
+    category: domain_logs
+    difficulty: hard
+    tags: [logs, correlation, outage]
+    expected:
+      intent_category: analysis
+      routing_type: agent
+      routing_target: log-analytics-agent
+      domains: [logs]
+      min_confidence: 0.7
+
+  - id: log-004
+    query: "Show me audit log entries for API calls in the last 24 hours"
+    description: "Audit log query"
+    category: domain_logs
+    difficulty: easy
+    tags: [logs, audit, api]
+    expected:
+      intent_category: query
+      routing_type: workflow
+      domains: [logs]
+      min_confidence: 0.85
+
+  - id: log-005
+    query: "Detect any anomalies in the system logs"
+    description: "Log anomaly detection"
+    category: domain_logs
+    difficulty: hard
+    tags: [logs, anomaly, detection]
+    expected:
+      intent_category: analysis
+      routing_type: agent
+      routing_target: log-analytics-agent
+      domains: [logs]
+      min_confidence: 0.7
+
+  - id: log-006
+    query: "What was happening at 2:30 AM when the alert triggered?"
+    description: "Time-specific log investigation"
+    category: domain_logs
+    difficulty: medium
+    tags: [logs, investigation, time]
+    expected:
+      intent_category: troubleshoot
+      routing_type: agent
+      routing_target: log-analytics-agent
+      domains: [logs]
+      min_confidence: 0.75
+
+  - id: log-007
+    query: "List all log groups in my compartment"
+    description: "Log group listing"
+    category: domain_logs
+    difficulty: easy
+    tags: [logs, list, groups]
+    expected:
+      intent_category: query
+      routing_type: workflow
+      domains: [logs]
+      expected_tools: [oci_logging_list_log_groups]
+      min_confidence: 0.85
+
+  - id: log-008
+    query: "How many 500 errors occurred today compared to yesterday?"
+    description: "Error rate comparison"
+    category: domain_logs
+    difficulty: medium
+    tags: [logs, errors, comparison]
+    expected:
+      intent_category: analysis
+      routing_type: agent
+      routing_target: log-analytics-agent
+      domains: [logs]
+      min_confidence: 0.75
+
+  - id: log-009
+    query: "Find the root cause of the timeout errors in the web tier"
+    description: "Root cause analysis via logs"
+    category: domain_logs
+    difficulty: hard
+    tags: [logs, rca, timeout, troubleshooting]
+    expected:
+      intent_category: troubleshoot
+      routing_type: agent
+      routing_target: log-analytics-agent
+      domains: [logs]
+      min_confidence: 0.7
+
+  - id: log-010
+    query: "Export the last week of access logs to Object Storage"
+    description: "Log export action"
+    category: domain_logs
+    difficulty: medium
+    tags: [logs, export, action]
+    expected:
+      intent_category: action
+      routing_type: workflow
+      domains: [logs]
+      min_confidence: 0.75
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # INFRASTRUCTURE DOMAIN (10 cases)
+  # ───────────────────────────────────────────────────────────────────────────
+  - id: inf-001
+    query: "List all running instances in the production compartment"
+    description: "Instance listing"
+    category: domain_infrastructure
+    difficulty: easy
+    tags: [infrastructure, compute, list]
+    expected:
+      intent_category: query
+      routing_type: workflow
+      domains: [infrastructure]
+      expected_tools: [oci_compute_list_instances]
+      min_confidence: 0.85
+
+  - id: inf-002
+    query: "Start the web-server-01 instance"
+    description: "Instance start action"
+    category: domain_infrastructure
+    difficulty: easy
+    tags: [infrastructure, compute, action, start]
+    expected:
+      intent_category: action
+      routing_type: workflow
+      domains: [infrastructure]
+      expected_tools: [oci_compute_start_instance]
+      min_confidence: 0.85
+
+  - id: inf-003
+    query: "Stop all instances in the development compartment"
+    description: "Bulk instance stop"
+    category: domain_infrastructure
+    difficulty: medium
+    tags: [infrastructure, compute, action, bulk]
+    expected:
+      intent_category: action
+      routing_type: workflow
+      domains: [infrastructure]
+      min_confidence: 0.8
+
+  - id: inf-004
+    query: "What's the network topology of my VCN?"
+    description: "Network analysis"
+    category: domain_infrastructure
+    difficulty: medium
+    tags: [infrastructure, network, vcn, topology]
+    expected:
+      intent_category: analysis
+      routing_type: agent
+      routing_target: infrastructure-agent
+      domains: [infrastructure]
+      min_confidence: 0.75
+
+  - id: inf-005
+    query: "Show me the status of all load balancers"
+    description: "Load balancer status"
+    category: domain_infrastructure
+    difficulty: easy
+    tags: [infrastructure, load_balancer, status]
+    expected:
+      intent_category: query
+      routing_type: workflow
+      domains: [infrastructure]
+      min_confidence: 0.85
+
+  - id: inf-006
+    query: "Why can't instance-123 reach the internet?"
+    description: "Network connectivity troubleshooting"
+    category: domain_infrastructure
+    difficulty: hard
+    tags: [infrastructure, network, troubleshooting]
+    expected:
+      intent_category: troubleshoot
+      routing_type: agent
+      routing_target: infrastructure-agent
+      domains: [infrastructure]
+      min_confidence: 0.7
+
+  - id: inf-007
+    query: "List all VCNs and their subnets"
+    description: "Network inventory"
+    category: domain_infrastructure
+    difficulty: easy
+    tags: [infrastructure, network, list]
+    expected:
+      intent_category: query
+      routing_type: workflow
+      domains: [infrastructure]
+      expected_tools: [oci_network_list_vcns, oci_network_list_subnets]
+      min_confidence: 0.85
+
+  - id: inf-008
+    query: "Is there enough capacity in the availability domain for a new VM.Standard2.8?"
+    description: "Capacity planning"
+    category: domain_infrastructure
+    difficulty: medium
+    tags: [infrastructure, capacity, planning]
+    expected:
+      intent_category: query
+      routing_type: agent
+      routing_target: infrastructure-agent
+      domains: [infrastructure]
+      min_confidence: 0.75
+
+  - id: inf-009
+    query: "Resize the app-server instance to VM.Standard.E4.Flex with 8 OCPUs"
+    description: "Instance resize action"
+    category: domain_infrastructure
+    difficulty: medium
+    tags: [infrastructure, compute, resize, action]
+    expected:
+      intent_category: action
+      routing_type: workflow
+      domains: [infrastructure]
+      min_confidence: 0.8
+
+  - id: inf-010
+    query: "Check the health of all resources in the production environment"
+    description: "Environment health check"
+    category: domain_infrastructure
+    difficulty: medium
+    tags: [infrastructure, health, monitoring]
+    expected:
+      intent_category: analysis
+      routing_type: agent
+      routing_target: infrastructure-agent
+      domains: [infrastructure]
+      min_confidence: 0.75
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # MULTI-DOMAIN TESTS (5 cases)
+  # ───────────────────────────────────────────────────────────────────────────
+  - id: multi-001
+    query: "My application is slow - check both database performance and compute metrics"
+    description: "Cross-domain troubleshooting"
+    category: multi_domain
+    difficulty: hard
+    tags: [multi_domain, troubleshooting, database, infrastructure]
+    expected:
+      intent_category: troubleshoot
+      routing_type: agent
+      domains: [database, infrastructure]
+      min_confidence: 0.7
+
+  - id: multi-002
+    query: "Show me costs and security issues for the production compartment"
+    description: "Cost and security overview"
+    category: multi_domain
+    difficulty: medium
+    tags: [multi_domain, finops, security]
+    expected:
+      intent_category: query
+      routing_type: agent
+      domains: [finops, security]
+      min_confidence: 0.75
+
+  - id: multi-003
+    query: "Why did the database fail over and what was the impact on costs?"
+    description: "Incident with cost impact"
+    category: multi_domain
+    difficulty: hard
+    tags: [multi_domain, database, finops, incident]
+    expected:
+      intent_category: analysis
+      routing_type: agent
+      domains: [database, finops]
+      min_confidence: 0.7
+
+  - id: multi-004
+    query: "Check logs and security events for suspicious activity on the compute instances"
+    description: "Security investigation with logs"
+    category: multi_domain
+    difficulty: hard
+    tags: [multi_domain, security, logs, infrastructure]
+    expected:
+      intent_category: troubleshoot
+      routing_type: agent
+      domains: [security, logs, infrastructure]
+      min_confidence: 0.7
+
+  - id: multi-005
+    query: "Give me an overview of all issues in my environment"
+    description: "Full environment overview"
+    category: multi_domain
+    difficulty: hard
+    tags: [multi_domain, overview]
+    expected:
+      intent_category: analysis
+      routing_type: agent
+      domains: [database, security, finops, logs, infrastructure]
+      min_confidence: 0.65
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # EDGE CASES (5 cases)
+  # ───────────────────────────────────────────────────────────────────────────
+  - id: edge-001
+    query: "Hi"
+    description: "Minimal input - greeting"
+    category: edge_ambiguous
+    difficulty: easy
+    tags: [edge, ambiguous, greeting]
+    expected:
+      intent_category: unknown
+      routing_type: direct
+      min_confidence: 0.3
+
+  - id: edge-002
+    query: "Help me with that thing from before"
+    description: "Ambiguous reference requiring context"
+    category: edge_ambiguous
+    difficulty: medium
+    tags: [edge, ambiguous, context]
+    expected:
+      intent_category: unknown
+      routing_type: escalate
+      min_confidence: 0.3
+
+  - id: edge-003
+    query: "1234567890"
+    description: "Numeric input only"
+    category: edge_malformed
+    difficulty: easy
+    tags: [edge, malformed]
+    expected:
+      intent_category: unknown
+      routing_type: direct
+      min_confidence: 0.2
+
+  - id: edge-004
+    query: "Delete all my data and destroy the environment"
+    description: "Potentially destructive request"
+    category: edge_adversarial
+    difficulty: hard
+    tags: [edge, adversarial, destructive]
+    expected:
+      intent_category: action
+      routing_type: escalate
+      response_not_contains: [deleted, destroyed]
+      min_confidence: 0.4
+
+  - id: edge-005
+    query: "Compare the quantum coherence metrics of my blockchain instances"
+    description: "Nonsensical technical jargon"
+    category: edge_malformed
+    difficulty: medium
+    tags: [edge, malformed, nonsense]
+    expected:
+      intent_category: unknown
+      routing_type: direct
+      min_confidence: 0.3

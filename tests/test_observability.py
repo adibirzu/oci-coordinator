@@ -1,14 +1,18 @@
 
-import pytest
-import os
-from src.observability.tracing import init_otel_tracing, get_tracer, truncate, is_otel_enabled
+from src.observability.tracing import (
+    get_tracer,
+    init_otel_tracing,
+    is_otel_enabled,
+    truncate,
+)
+
 
 def test_tracing_initialization():
     """Verify that tracing can be initialized."""
     # This might fail if env vars are missing, but the import should work
     success = init_otel_tracing()
     assert isinstance(success, bool)
-    
+
     tracer = get_tracer()
     assert tracer is not None
 
@@ -27,7 +31,7 @@ def test_should_enable_otel_logic(monkeypatch):
     monkeypatch.setenv("OTEL_TRACING_ENABLED", "false")
     from src.observability.tracing import _should_enable_otel
     assert _should_enable_otel() is False
-    
+
     monkeypatch.setenv("OTEL_TRACING_ENABLED", "true")
     monkeypatch.setenv("OCI_APM_ENDPOINT", "http://endpoint")
     monkeypatch.setenv("OCI_APM_PRIVATE_DATA_KEY", "key")
@@ -38,11 +42,11 @@ def test_init_otel_tracing_full(monkeypatch):
     monkeypatch.setenv("OTEL_TRACING_ENABLED", "true")
     monkeypatch.setenv("OCI_APM_ENDPOINT", "http://endpoint")
     monkeypatch.setenv("OCI_APM_PRIVATE_DATA_KEY", "key")
-    
+
     # Force re-init by clearing internal state
     import src.observability.tracing
     src.observability.tracing._tracer_provider = None
-    
+
     success = init_otel_tracing()
     assert success is True
     assert is_otel_enabled() is True

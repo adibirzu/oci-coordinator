@@ -40,6 +40,15 @@ async def _get_cost_summary_logic(
 
 def register_cost_tools(mcp):
     @mcp.tool()
-    async def get_cost_summary(compartment_id: str, days: int = 30, format: str = "markdown") -> str:
-        """Get summarized cost for a compartment."""
+    async def oci_cost_get_summary(compartment_id: str, days: int = 30, format: str = "markdown") -> str:
+        """Get summarized cost for a compartment.
+
+        Args:
+            compartment_id: OCID of the compartment (or tenancy for full account)
+            days: Number of days to look back (default 30)
+            format: Output format ('json' or 'markdown')
+
+        Returns:
+            Cost summary with total spend
+        """
         return await _get_cost_summary_logic(compartment_id, days, format)

@@ -2,19 +2,18 @@ import pytest
 from langchain_anthropic import ChatAnthropic
 
 from src.llm.factory import LLMFactory
-from src.llm.providers.oca import ChatOCA
+from src.llm.oca import ChatOCA
 
 
 def test_factory_creates_oca():
     """Verify factory creates OCA provider."""
     config = {
         "provider": "oca",
-        "api_url": "http://localhost",
-        "idcs_url": "http://idcs",
-        "client_id": "test",
+        "model_name": "oca/gpt5",
     }
     llm = LLMFactory.create_llm(config)
     assert isinstance(llm, ChatOCA)
+    assert llm.model == "oca/gpt5"
 
 
 def test_factory_creates_anthropic():

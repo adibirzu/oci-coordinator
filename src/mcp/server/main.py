@@ -17,29 +17,37 @@ Use `search_capabilities` to discover available tools.
 )
 
 DOMAINS = {
+    "identity": {
+        "description": "Compartment listing, tenancy info, and IAM operations",
+        "tools": ["oci_list_compartments", "oci_search_compartments", "oci_get_compartment", "oci_get_tenancy", "oci_list_regions"],
+    },
     "compute": {
         "description": "Instance management, shapes, and performance metrics",
-        "tools": ["list_instances", "start_instance", "stop_instance", "restart_instance"],
+        "tools": ["oci_compute_list_instances", "oci_compute_get_instance", "oci_compute_start_instance", "oci_compute_stop_instance", "oci_compute_restart_instance"],
     },
     "cost": {
         "description": "Cost analysis, budgeting, and FinOps optimization",
-        "tools": ["get_cost_summary", "get_cost_by_service"],
+        "tools": ["oci_cost_get_summary"],
     },
     "db": {
         "description": "Autonomous Database and DB Systems management",
-        "tools": ["list_autonomous_db", "get_db_metrics"],
+        "tools": ["oci_db_list_autonomous", "oci_db_get_metrics"],
     },
     "network": {
         "description": "VCN, Subnet, and Security List management",
-        "tools": ["list_vcns", "list_subnets"],
+        "tools": ["oci_network_list_vcns", "oci_network_list_subnets", "oci_network_list_security_lists"],
     },
     "security": {
         "description": "IAM and Cloud Guard management",
-        "tools": ["list_users", "list_policies"],
+        "tools": ["oci_security_list_users"],
     },
     "observability": {
         "description": "Logs, metrics, and alarms",
-        "tools": ["get_metrics", "query_logs"],
+        "tools": ["oci_observability_get_metrics"],
+    },
+    "discovery": {
+        "description": "ShowOCI-style resource discovery, caching, and search",
+        "tools": ["oci_discovery_run", "oci_discovery_get_cached", "oci_discovery_refresh", "oci_discovery_summary", "oci_discovery_search", "oci_discovery_cache_status"],
     },
 }
 
@@ -76,19 +84,23 @@ async def search_capabilities(query: str, domain: Optional[str] = None) -> str:
     """
     return await _search_capabilities_logic(query, domain)
 
+from src.mcp.server.tools.identity import register_identity_tools
 from src.mcp.server.tools.compute import register_compute_tools
 from src.mcp.server.tools.network import register_network_tools
 from src.mcp.server.tools.cost import register_cost_tools
 from src.mcp.server.tools.security import register_security_tools
 from src.mcp.server.tools.observability import register_observability_tools
+from src.mcp.server.tools.discovery import register_discovery_tools
 from src.mcp.server.skills.troubleshoot import register_troubleshoot_skills
 
 # Register tools
+register_identity_tools(mcp)  # Register identity tools first for compartment discovery
 register_compute_tools(mcp)
 register_network_tools(mcp)
 register_cost_tools(mcp)
 register_security_tools(mcp)
 register_observability_tools(mcp)
+register_discovery_tools(mcp)  # ShowOCI-style discovery tools
 
 # Register skills
 register_troubleshoot_skills(mcp)

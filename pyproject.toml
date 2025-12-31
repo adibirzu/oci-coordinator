@@ -65,6 +65,7 @@ aiohttp = ">=3.9.0"
 tenacity = ">=8.2.0"
 python-dotenv = ">=1.0.0"
 orjson = ">=3.9.0"
+pyyaml = ">=6.0.0"
 
 # Redis (for state persistence)
 redis = ">=5.0.0"

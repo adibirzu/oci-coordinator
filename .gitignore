@@ -1,5 +1,8 @@
+# Environment files (contains secrets)
 .env*
-! .env.example
+!.env.example
+
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
@@ -13,3 +16,41 @@ ENV/
 .poetry/
 .python-version
 poetry.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# OCA (Oracle Code Assist) Authentication Cache
+# Contains OAuth tokens - NEVER commit
+.oca_cache/
+oca_cache/
+**/token.json
+**/verifier.txt
+
+# Analysis and logs (local development)
+analysis/
+logs/
+*.log
+firebase-debug.log
+
+# Process files
+.coordinator.pid
+*.pid
+
+# Snyk Security Extension - AI Rules (auto-generated)
+.github/instructions/snyk_rules.instructions.md
+
+# Config files that may contain secrets
+config/secrets.yaml
+config/*.secret.yaml
+**/credentials.json
+**/*_credentials.json
+
+# Build artifacts
+dist/
+build/
+*.egg-info/

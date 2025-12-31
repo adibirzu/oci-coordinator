@@ -6,7 +6,7 @@ def test_tool_catalog_initialization():
     """Verify ToolCatalog initialization."""
     catalog = ToolCatalog()
     assert catalog is not None
-    assert catalog.tools == {}
+    assert catalog.list_tools() == []
 
 @pytest.mark.asyncio
 async def test_tool_catalog_refresh():

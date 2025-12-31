@@ -21,6 +21,16 @@ async def _get_metrics_logic(
 
 def register_observability_tools(mcp):
     @mcp.tool()
-    async def get_metrics(compartment_id: str, namespace: str, query: str, format: str = "markdown") -> str:
-        """Get monitoring metrics."""
+    async def oci_observability_get_metrics(compartment_id: str, namespace: str, query: str, format: str = "markdown") -> str:
+        """Get monitoring metrics from OCI Monitoring service.
+
+        Args:
+            compartment_id: OCID of the compartment
+            namespace: Metric namespace (e.g., 'oci_computeagent')
+            query: MQL query string
+            format: Output format ('json' or 'markdown')
+
+        Returns:
+            Metric data points
+        """
         return await _get_metrics_logic(compartment_id, namespace, query, format)
