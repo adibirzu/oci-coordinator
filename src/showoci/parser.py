@@ -50,7 +50,7 @@ class ShowOCIParser:
             return {}
 
         try:
-            with open(path, "r") as f:
+            with open(path) as f:
                 data = json.load(f)
             self._logger.info("Parsed ShowOCI file", path=str(path))
             return data

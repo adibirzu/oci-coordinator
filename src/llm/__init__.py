@@ -26,8 +26,8 @@ from src.llm.factory import LLMFactory
 
 # Re-export OCA utilities
 from src.llm.oca import (
-    ChatOCA,
     OCA_CONFIG,
+    ChatOCA,
     get_oca_health,
     get_oca_llm,
     is_oca_authenticated,
@@ -99,7 +99,7 @@ def get_llm_config() -> dict:
     return config
 
 
-def get_llm() -> "BaseChatModel":
+def get_llm() -> BaseChatModel:
     """Get an LLM instance based on environment configuration.
 
     This is the primary entry point for getting an LLM in the application.

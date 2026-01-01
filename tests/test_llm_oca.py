@@ -125,6 +125,43 @@ class TestOCATokenManager:
         assert info["expires_in_seconds"] > 0
         assert info["refresh_expires_in_seconds"] > 0
 
+    def test_force_reload_from_disk(self, tmp_path):
+        """Verify force reload from disk clears memory and reloads."""
+        with patch.object(OCAConfig, "CACHE_DIR", tmp_path):
+            manager = OCATokenManager()
+
+            # Simulate stale in-memory token
+            manager._cached_token = {"access_token": "old_stale_token"}
+            manager._token_expires_at = time.time() - 100  # Expired
+
+            # Write a fresh token to disk (as if user just authenticated)
+            fresh_token = {
+                "access_token": "fresh_new_token",
+                "refresh_token": "refresh_token",
+                "expires_in": 3600,
+                "_cached_at": time.time(),
+                "_expires_at": time.time() + 3600,
+                "_refresh_expires_at": time.time() + 8 * 60 * 60,
+            }
+            token_file = tmp_path / "token.json"
+            token_file.write_text(json.dumps(fresh_token))
+
+            # Force reload should pick up the fresh token
+            result = manager.force_reload_from_disk()
+            assert result is True
+            assert manager._cached_token["access_token"] == "fresh_new_token"
+            assert manager.has_valid_token() is True
+
+    def test_force_reload_from_disk_no_file(self, tmp_path):
+        """Verify force reload returns False when no token file exists."""
+        with patch.object(OCAConfig, "CACHE_DIR", tmp_path):
+            manager = OCATokenManager()
+            manager._cached_token = {"access_token": "old"}
+
+            result = manager.force_reload_from_disk()
+            assert result is False
+            assert manager._cached_token is None
+
 
 class TestChatOCA:
     """Tests for ChatOCA LangChain model."""

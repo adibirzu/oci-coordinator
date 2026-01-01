@@ -437,21 +437,39 @@ defaults:
 
 ### 7.2 GitHub References for MCP Servers
 
+> **Disclaimer**: The external MCP servers listed below are personal projects created to demonstrate OCI AI integration capabilities. These are **NOT official Oracle products** and are not endorsed by Oracle Corporation.
+
 | Server | Description | GitHub Repository |
 |--------|-------------|-------------------|
-| **oci-unified** | Built-in unified server | `src/mcp/server/` (this project) |
-| **database-observatory** | OPSI, SQLcl, Logan Analytics | [oracle/mcp-oci-database-observatory](https://github.com/oracle/mcp-oci-database-observatory) |
-| **oci-infrastructure** | Full OCI management (mcp-oci) | [oracle/mcp-oci](https://github.com/oracle/mcp-oci) |
-| **finopsai** | Multicloud FinOps | Local (planned: finopsai-mcp) |
+| **oci-unified** | Built-in unified server with ShowOCI-style discovery | `src/mcp/server/` (this project) |
+| **database-observatory** | OPSI, SQLcl, Logan Analytics | [adibirzu/mcp-oci-database-observatory](https://github.com/adibirzu/mcp-oci-database-observatory) |
+| **oci-infrastructure** | Full OCI management (mcp-oci) | [adibirzu/mcp-oci](https://github.com/adibirzu/mcp-oci) |
+| **finopsai-mcp** | Multicloud FinOps with anomaly detection | [adibirzu/finopsai-mcp](https://github.com/adibirzu/finopsai-mcp) |
 
-### 7.3 Server Capabilities
+### 7.3 MCP Server Capabilities Comparison
+
+| Feature | oci-unified | mcp-oci | finopsai-mcp |
+|---------|-------------|---------|--------------|
+| **Compartment Discovery** | ✅ ShowOCI-style with Redis caching | ✅ Basic | - |
+| **Instance by Name** | ✅ find/start/stop/restart | ❌ Requires OCID | - |
+| **Resource Caching** | ✅ Redis-backed | ❌ Direct API | - |
+| **Compute Operations** | ✅ Basic | ✅ Full | - |
+| **Network Operations** | ✅ Basic | ✅ Full | - |
+| **Cost Analysis** | ✅ Basic summary | ✅ Basic | ✅ Advanced |
+| **Anomaly Detection** | ❌ | ❌ | ✅ Cost spikes |
+| **Rightsizing** | ❌ | ❌ | ✅ Recommendations |
+| **Budget Tracking** | ❌ | ❌ | ✅ Budget status |
+| **Multicloud** | ❌ | ❌ | ✅ OCI, AWS, Azure, GCP |
+| **Troubleshoot Skills** | ✅ | ❌ | ❌ |
+
+### 7.4 Server Capabilities
 
 The Database Observatory MCP server provides unified access to:
 - **OPSI** - Operations Insights for performance metrics
 - **SQLcl** - Direct SQL execution
 - **Logan** - Logging Analytics queries
 
-### 7.4 Database Observatory Tool Tiers
+### 7.5 Database Observatory Tool Tiers
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐

@@ -31,12 +31,12 @@ Usage:
 from __future__ import annotations
 
 import asyncio
-import json
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Any, Callable, Optional
+from typing import Any
 
 import structlog
 from pydantic import BaseModel, Field, field_validator
@@ -95,7 +95,7 @@ class AgentMessage(BaseModel):
         default="json",
         description="Expected response format: json, markdown, table",
     )
-    output_schema: Optional[dict[str, Any]] = Field(
+    output_schema: dict[str, Any] | None = Field(
         default=None,
         description="JSON schema for expected output",
     )
@@ -105,7 +105,7 @@ class AgentMessage(BaseModel):
         default_factory=dict,
         description="Shared context from previous agents",
     )
-    parent_task_id: Optional[str] = Field(
+    parent_task_id: str | None = Field(
         default=None,
         description="Parent task for subtask tracking",
     )
@@ -130,7 +130,7 @@ class AgentMessage(BaseModel):
         return self.model_dump(mode="json")
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "AgentMessage":
+    def from_dict(cls, data: dict[str, Any]) -> AgentMessage:
         """Deserialize from dictionary."""
         return cls(**data)
 
@@ -140,7 +140,7 @@ class AgentMessage(BaseModel):
         intent: str,
         payload: dict[str, Any],
         boundaries: list[str] | None = None,
-    ) -> "AgentMessage":
+    ) -> AgentMessage:
         """Create a subtask message from this message."""
         return AgentMessage(
             sender=self.recipient,  # Current recipient becomes sender
@@ -160,8 +160,8 @@ class AgentMessage(BaseModel):
         self,
         success: bool,
         result: Any,
-        error: Optional[str] = None,
-    ) -> "AgentResult":
+        error: str | None = None,
+    ) -> AgentResult:
         """Create a response to this message."""
         return AgentResult(
             message_id=self.message_id,
@@ -193,15 +193,15 @@ class AgentResult(BaseModel):
     # Result data
     success: bool
     result: Any = Field(default=None)
-    error: Optional[str] = Field(default=None)
+    error: str | None = Field(default=None)
 
     # Execution metadata
-    execution_time_ms: Optional[int] = Field(default=None)
+    execution_time_ms: int | None = Field(default=None)
     tool_calls: list[dict[str, Any]] = Field(default_factory=list)
-    tokens_used: Optional[int] = Field(default=None)
+    tokens_used: int | None = Field(default=None)
 
     # For aggregation
-    subtask_results: list["AgentResult"] = Field(default_factory=list)
+    subtask_results: list[AgentResult] = Field(default_factory=list)
 
     # Status tracking
     status: MessageStatus = Field(default=MessageStatus.COMPLETED)
@@ -212,11 +212,11 @@ class AgentResult(BaseModel):
         return self.model_dump(mode="json")
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "AgentResult":
+    def from_dict(cls, data: dict[str, Any]) -> AgentResult:
         """Deserialize from dictionary."""
         return cls(**data)
 
-    def aggregate_with(self, other: "AgentResult") -> "AgentResult":
+    def aggregate_with(self, other: AgentResult) -> AgentResult:
         """Aggregate this result with another (for parallel tasks)."""
         combined_result = {
             "results": [self.result, other.result],
@@ -247,7 +247,7 @@ class TaskSpecification:
     description: str
 
     # Decomposition
-    subtasks: list["TaskSpecification"] = field(default_factory=list)
+    subtasks: list[TaskSpecification] = field(default_factory=list)
     parallel: bool = False  # Can subtasks run in parallel?
 
     # Resource allocation
@@ -329,7 +329,7 @@ class MessageBus:
         self,
         message: AgentMessage,
         wait_for_result: bool = True,
-    ) -> Optional[AgentResult]:
+    ) -> AgentResult | None:
         """
         Send a message to an agent.
 
@@ -388,7 +388,7 @@ class MessageBus:
 
             return result
 
-        except asyncio.TimeoutError:
+        except TimeoutError:
             self._logger.error(
                 "Message timeout",
                 message_id=message.message_id,
@@ -514,7 +514,7 @@ class MessageBus:
         """Get count of pending messages."""
         return len(self._pending)
 
-    def get_result(self, message_id: str) -> Optional[AgentResult]:
+    def get_result(self, message_id: str) -> AgentResult | None:
         """Get cached result for a message."""
         return self._results.get(message_id)
 
@@ -524,7 +524,7 @@ class MessageBus:
 
 
 # Global message bus instance
-_message_bus: Optional[MessageBus] = None
+_message_bus: MessageBus | None = None
 
 
 def get_message_bus() -> MessageBus:

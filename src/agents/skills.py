@@ -19,9 +19,10 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Callable, Coroutine
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
@@ -329,7 +330,7 @@ class SkillExecutor:
                         handler(context, step_results),
                         timeout=step.timeout_seconds,
                     )
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     step_result = StepResult(
                         step_name=step.name,
                         success=False,
@@ -660,6 +661,40 @@ DB_SQL_ANALYSIS_WORKFLOW = SkillDefinition(
     estimated_duration_seconds=300,
 )
 
+# AWR Report Workflow - generates AWR HTML reports
+DB_AWR_REPORT_WORKFLOW = SkillDefinition(
+    name="db_awr_report_workflow",
+    description="Generate AWR report from DB Management or SQLcl",
+    steps=[
+        SkillStep(
+            name="find_database",
+            description="Find database by name using cache or DB Management",
+            required_tools=["search_databases", "search_managed_databases"],
+            timeout_seconds=30,
+        ),
+        SkillStep(
+            name="list_snapshots",
+            description="List available AWR snapshots",
+            required_tools=["list_awr_db_snapshots"],
+            timeout_seconds=30,
+        ),
+        SkillStep(
+            name="generate_report",
+            description="Generate AWR HTML report",
+            required_tools=["get_awr_db_report_auto"],
+            timeout_seconds=120,
+        ),
+    ],
+    required_tools=[
+        "search_databases",
+        "search_managed_databases",
+        "list_awr_db_snapshots",
+        "get_awr_db_report_auto",
+    ],
+    tags=["database", "awr", "performance", "report"],
+    estimated_duration_seconds=180,
+)
+
 # Legacy RCA Workflow (for compatibility)
 RCA_WORKFLOW = SkillDefinition(
     name="rca_workflow",
@@ -962,6 +997,7 @@ def register_default_skills() -> None:
     registry.register(DB_RCA_WORKFLOW)
     registry.register(DB_HEALTH_CHECK_WORKFLOW)
     registry.register(DB_SQL_ANALYSIS_WORKFLOW)
+    registry.register(DB_AWR_REPORT_WORKFLOW)
 
     # Infrastructure skills (oci-infrastructure MCP server)
     registry.register(INFRA_INVENTORY_WORKFLOW)

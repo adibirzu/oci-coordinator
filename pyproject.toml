@@ -44,6 +44,7 @@ langchain-openai = ">=0.2.0"
 
 # OCI SDK
 oci = ">=2.120.0"
+oracledb = ">=2.0.0"
 
 # MCP Client
 mcp = ">=1.0.0"
@@ -69,6 +70,7 @@ pyyaml = ">=6.0.0"
 
 # Redis (for state persistence)
 redis = ">=5.0.0"
+neo4j = ">=5.0.0"
 
 # Channel Integrations
 slack-sdk = ">=3.26.0"

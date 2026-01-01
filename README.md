@@ -135,7 +135,7 @@ poetry run python -m src.main --mode api --port 3001
 # Start both
 poetry run python -m src.main --mode both
 
-# Run tests (88 tests)
+# Run tests (212 tests)
 poetry run pytest --cov=src
 
 # Lint and format
@@ -150,8 +150,43 @@ poetry run black src/
 | **DB Troubleshoot** | Performance RCA, SQL analysis | `get_performance_summary`, `analyze_cpu_usage`, `execute_sql` | database, slow, AWR, wait events |
 | **Log Analytics** | Log search, pattern detection | `query_logs`, `search_audit` | logs, errors, audit |
 | **Security Threat** | MITRE mapping, compliance | `list_problems`, `get_findings` | security, threat, compliance |
-| **FinOps** | Cost analysis, optimization | `get_cost_summary`, `find_savings` | cost, budget, spending |
-| **Infrastructure** | Compute, network management | `list_instances`, `manage_vcn` | instance, VM, VCN |
+| **FinOps** | Cost analysis, optimization | `get_cost_summary`, `oci_cost_spikes`, `oci_cost_budget_status` | cost, budget, spending |
+| **Infrastructure** | Compute, network management | `list_instances`, `manage_vcn`, `start_by_name` | instance, VM, VCN |
+
+### FinOps AI Agent
+
+The FinOps agent provides advanced cost management through the **finopsai-mcp** server:
+
+```
+Agent capabilities from finopsai-mcp:
+- Cost spike detection with threshold alerts
+- Rightsizing recommendations for compute resources
+- Budget status tracking and alerts
+- Service drilldown with optimization suggestions
+- Multicloud support (OCI, AWS, Azure, GCP)
+```
+
+The FinOps agent workflow:
+1. **Analyze Query** - Extract time range and service filters
+2. **Get Costs** - Retrieve cost summary and breakdown by service
+3. **Detect Anomalies** - Use `oci_cost_spikes` for anomaly detection
+4. **Generate Recommendations** - Call `oci_cost_service_drilldown` for rightsizing
+
+### Instance Operations by Name
+
+The unified MCP server includes convenience tools for operating on instances by display name:
+
+```bash
+# Find instances by name (partial match supported)
+oci_compute_find_instance(instance_name="prod", compartment_id="ocid1...")
+
+# Start/Stop/Restart by name (auto-resolves to OCID)
+oci_compute_start_by_name(instance_name="my-instance", compartment_id="ocid1...")
+oci_compute_stop_by_name(instance_name="my-instance", compartment_id="ocid1...")
+oci_compute_restart_by_name(instance_name="my-instance", compartment_id="ocid1...")
+```
+
+These tools handle automatic OCID resolution, partial name matching (case-insensitive), and disambiguation when multiple instances match.
 
 ## Database Observatory Skills
 
@@ -182,45 +217,114 @@ servers:
     working_dir: /path/to/mcp-oci-database-observatory
     enabled: true
     domains: [database, opsi, logan, observability]
+    timeout_seconds: 60
+
+defaults:
+  timeout_seconds: 120  # Increased for large compartments (25+ resources)
+  retry_attempts: 3
+  backoff_multiplier: 2
 ```
+
+## API Server
+
+The FastAPI server provides REST endpoints for programmatic access:
+
+```bash
+# Start API server
+poetry run python -m src.main --mode api --port 3001
+```
+
+### Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/health` | GET | Health check with component status |
+| `/status` | GET | Detailed system status |
+| `/chat` | POST | Process chat message through coordinator |
+| `/chat/stream` | POST | Stream chat response (SSE) |
+| `/tools` | GET | List available tools with filtering |
+| `/tools/{name}` | GET | Get tool details |
+| `/tools/execute` | POST | Execute a specific tool |
+| `/agents` | GET | List registered agents |
+| `/agents/{role}` | GET | Get agent details |
+| `/mcp/servers` | GET | List MCP server status |
+| `/stats` | GET | System statistics |
+
+### Example Chat Request
+
+```bash
+curl -X POST http://localhost:3001/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message": "What is the cost summary for this month?"}'
+```
+
+### External MCP Server References
+
+> **Disclaimer**: The external MCP servers listed below are personal projects created to demonstrate OCI AI integration capabilities. These are **NOT official Oracle products** and are not endorsed by Oracle Corporation.
+
+| Server | Description | GitHub |
+|--------|-------------|--------|
+| **oci-unified** | Built-in server with ShowOCI-style discovery | `src/mcp/server/` (this project) |
+| **database-observatory** | OPSI, SQLcl, Logan Analytics | [adibirzu/mcp-oci-database-observatory](https://github.com/adibirzu/mcp-oci-database-observatory) |
+| **oci-infrastructure** | Full OCI management (mcp-oci) | [adibirzu/mcp-oci](https://github.com/adibirzu/mcp-oci) |
+| **finopsai-mcp** | Multicloud FinOps with anomaly detection | [adibirzu/finopsai-mcp](https://github.com/adibirzu/finopsai-mcp) |
+
+### Why oci-unified vs mcp-oci?
+
+| Feature | oci-unified | mcp-oci |
+|---------|-------------|---------|
+| ShowOCI-style discovery with Redis caching | ✅ | ❌ |
+| Instance operations by name | ✅ | ❌ (requires OCID) |
+| Troubleshoot skills | ✅ | ❌ |
+| Full OCI API coverage | Basic | ✅ Comprehensive |
+
+Use **oci-unified** for quick discovery and name-based operations. Use **mcp-oci** for comprehensive OCI management requiring full API access.
 
 ## Project Structure
 
 ```
 oci-coordinator/
 ├── src/
-│   ├── agents/              # LangGraph agent implementations
-│   │   ├── catalog.py       # Agent registry with auto-discovery
-│   │   ├── base.py          # BaseAgent class
-│   │   ├── skills.py        # Skill definitions and executor
-│   │   ├── database/        # DB Troubleshoot Agent
-│   │   ├── log_analytics/   # Log Analytics Agent
-│   │   ├── security/        # Security Threat Agent
-│   │   ├── finops/          # FinOps Agent
-│   │   └── infrastructure/  # Infrastructure Agent
-│   ├── channels/            # Input channel integrations
-│   │   └── slack.py         # Slack Bot handler
-│   ├── mcp/                 # MCP client infrastructure
-│   │   ├── client.py        # MCP client wrapper
-│   │   ├── registry.py      # Server registry
-│   │   ├── catalog.py       # Tool catalog
-│   │   └── config.py        # YAML config loader
-│   ├── llm/                 # Multi-LLM factory
-│   │   ├── factory.py       # LLM provider factory
-│   │   └── oca.py           # Oracle Code Assist integration
-│   ├── observability/       # Tracing and logging
-│   │   ├── tracing.py       # OpenTelemetry → OCI APM
-│   │   └── oci_logging.py   # OCI Logging with trace correlation
-│   ├── formatting/          # Response formatters
-│   │   ├── base.py          # Structured response models
-│   │   └── slack.py         # Slack Block Kit formatter
-│   ├── api/                 # FastAPI endpoints
-│   └── main.py              # Application entry point
-├── tests/                   # Pytest test suite (88 tests)
-├── config/                  # Configuration files
-│   └── mcp_servers.yaml     # MCP server definitions
-├── prompts/                 # Agent system prompts
-└── conductor/               # Project management
+│   ├── agents/                   # LangGraph agent implementations
+│   │   ├── catalog.py            # Agent registry with auto-discovery
+│   │   ├── base.py               # BaseAgent class
+│   │   ├── skills.py             # Skill definitions and executor
+│   │   ├── react_agent.py        # ReAct agent with dynamic tool discovery
+│   │   ├── coordinator/          # LangGraph coordinator
+│   │   │   ├── graph.py          # StateGraph with intent routing
+│   │   │   ├── orchestrator.py   # Parallel orchestration with loop prevention
+│   │   │   └── state.py          # Conversation state management
+│   │   ├── database/             # DB Troubleshoot Agent
+│   │   ├── log_analytics/        # Log Analytics Agent
+│   │   ├── security/             # Security Threat Agent
+│   │   ├── finops/               # FinOps Agent
+│   │   └── infrastructure/       # Infrastructure Agent
+│   ├── channels/                 # Input channel integrations
+│   │   └── slack.py              # Slack Bot with LangGraph integration
+│   ├── mcp/                      # MCP client infrastructure
+│   │   ├── client.py             # Multi-transport MCP client
+│   │   ├── registry.py           # Server registry with health checks
+│   │   ├── catalog.py            # Tool catalog with aliases & domain prefixes
+│   │   ├── config.py             # YAML config loader
+│   │   └── tools/                # Tool utilities
+│   │       └── converter.py      # MCP → LangChain tool converter
+│   ├── llm/                      # Multi-LLM factory
+│   │   ├── factory.py            # LLM provider factory
+│   │   └── oca.py                # Oracle Code Assist integration
+│   ├── observability/            # Tracing and logging
+│   │   ├── tracing.py            # OpenTelemetry → OCI APM
+│   │   └── oci_logging.py        # OCI Logging with trace correlation
+│   ├── formatting/               # Response formatters
+│   │   ├── base.py               # Structured response models
+│   │   └── slack.py              # Slack Block Kit + native tables
+│   ├── api/                      # FastAPI endpoints
+│   │   └── main.py               # REST API with chat, tools, agents
+│   └── main.py                   # Application entry point
+├── tests/                        # Pytest test suite (212 tests)
+├── config/                       # Configuration files
+│   └── mcp_servers.yaml          # MCP server definitions
+├── prompts/                      # Agent system prompts
+└── docs/                         # Architecture documentation
 ```
 
 ## Observability
@@ -254,36 +358,49 @@ View correlated logs in OCI Console:
 
 ## Development Status
 
-### Completed
+### Completed ✅
 - [x] Project structure and Poetry setup
-- [x] Multi-LLM factory (OCA, Anthropic, OpenAI)
+- [x] Multi-LLM factory (OCA, Anthropic, OpenAI, OCI GenAI)
 - [x] OpenTelemetry tracing → OCI APM
 - [x] OCI Logging with trace correlation
-- [x] MCP client infrastructure
+- [x] MCP client infrastructure with retry logic
+- [x] Tool-specific timeouts for large compartments
 - [x] Database Observatory MCP integration
 - [x] Agent catalog with auto-discovery
 - [x] Skill system with step execution
 - [x] DB Troubleshoot Agent with full workflow
-- [x] Slack Bot integration (Socket Mode)
+- [x] Log Analytics Agent
+- [x] Security Threat Agent
+- [x] FinOps Agent
+- [x] Infrastructure Agent
+- [x] Slack Bot integration (Socket Mode + LangGraph)
+- [x] Instance operations by name (`oci_compute_*_by_name`)
 - [x] Structured response formatting
-- [x] 88 tests passing (80%+ coverage target)
+- [x] **LangGraph coordinator with intent routing**
+- [x] **Multi-agent parallel orchestration with loop prevention**
+- [x] **FastAPI REST API server**
+- [x] **Tool aliases for backward compatibility**
+- [x] **Domain-based dynamic tool discovery**
+- [x] **ToolConverter for MCP → LangChain**
+- [x] **Slack 3-second ack pattern with thinking messages**
+- [x] **Duplicate capability detection in agent registration**
+- [x] 212+ tests passing (80%+ coverage target)
 
-### In Progress
-- [ ] LangGraph coordinator with intent routing
-- [ ] Log Analytics agent workflows
-- [ ] Security Threat agent workflows
+### In Progress 🔄
+- [ ] RAG integration for documentation context
+- [ ] Streaming responses for API
 
-### Planned
+### Planned 📋
 - [ ] Microsoft Teams integration
 - [ ] Web UI dashboard
 - [ ] LLM-as-a-Judge evaluation framework
 - [ ] Redis state persistence
-- [ ] Multi-agent collaboration
+- [ ] OKE deployment manifests
 
 ## Testing
 
 ```bash
-# Run all tests
+# Run all 212 tests
 poetry run pytest --cov=src
 
 # Run specific test file
@@ -291,6 +408,12 @@ poetry run pytest tests/test_all_agents.py -v
 
 # Run with coverage report
 poetry run pytest --cov=src --cov-report=html
+
+# Run API server tests
+poetry run pytest tests/test_api_server.py -v
+
+# Run MCP tests
+poetry run pytest tests/test_mcp_server.py tests/test_tool_converter.py -v
 ```
 
 ## Contributing

@@ -4,5 +4,5 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ---
 
-## [ ] Track: Foundation & Core Infrastructure
+## [~] Track: Foundation & Core Infrastructure
 *Link: [./conductor/tracks/foundation_20251229/](./conductor/tracks/foundation_20251229/)*

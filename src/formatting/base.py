@@ -123,6 +123,26 @@ class ActionButton:
 
 
 @dataclass
+class FileAttachment:
+    """A file attachment for the response (e.g., AWR HTML report).
+
+    Used for sending files to Slack/Teams alongside the formatted message.
+    """
+
+    content: bytes | str
+    filename: str
+    content_type: str = "text/html"
+    title: str | None = None
+    comment: str | None = None
+
+    def get_content_bytes(self) -> bytes:
+        """Get content as bytes."""
+        if isinstance(self.content, bytes):
+            return self.content
+        return self.content.encode("utf-8")
+
+
+@dataclass
 class Section:
     """A section of the response."""
 
@@ -157,6 +177,7 @@ class ResponseFooter:
     duration_ms: int | None = None
     next_steps: list[str] | None = None
     help_text: str | None = None
+    trace_id: str | None = None  # For APM correlation
 
 
 @dataclass
@@ -174,6 +195,7 @@ class StructuredResponse:
     raw_data: dict[str, Any] | None = None
     error: str | None = None
     success: bool = True
+    attachments: list[FileAttachment] = field(default_factory=list)
 
     def add_section(
         self,
@@ -185,7 +207,7 @@ class StructuredResponse:
         code_block: CodeBlock | None = None,
         actions: list[ActionButton] | None = None,
         divider_after: bool = False,
-    ) -> "StructuredResponse":
+    ) -> StructuredResponse:
         """Add a section to the response."""
         self.sections.append(
             Section(
@@ -203,34 +225,79 @@ class StructuredResponse:
 
     def add_metrics(
         self, title: str, metrics: list[MetricValue], divider_after: bool = False
-    ) -> "StructuredResponse":
+    ) -> StructuredResponse:
         """Add a metrics section."""
         return self.add_section(title=title, fields=metrics, divider_after=divider_after)
 
     def add_status_list(
         self, title: str, items: list[StatusIndicator], divider_after: bool = False
-    ) -> "StructuredResponse":
+    ) -> StructuredResponse:
         """Add a status list section."""
         return self.add_section(title=title, fields=items, divider_after=divider_after)
 
     def add_table(
         self, title: str, table: TableData, divider_after: bool = False
-    ) -> "StructuredResponse":
+    ) -> StructuredResponse:
         """Add a table section."""
         return self.add_section(title=title, table=table, divider_after=divider_after)
 
     def add_recommendations(
         self, items: list[ListItem], divider_after: bool = False
-    ) -> "StructuredResponse":
+    ) -> StructuredResponse:
         """Add a recommendations section."""
         return self.add_section(
             title="Recommendations", list_items=items, divider_after=divider_after
         )
 
-    def set_error(self, error: str) -> "StructuredResponse":
+    def set_error(self, error: str) -> StructuredResponse:
         """Mark response as error."""
         self.error = error
         self.success = False
+        return self
+
+    def add_attachment(self, attachment: FileAttachment) -> StructuredResponse:
+        """Add a file attachment to the response.
+
+        Args:
+            attachment: FileAttachment to add (e.g., AWR HTML report)
+
+        Returns:
+            Self for chaining
+        """
+        self.attachments.append(attachment)
+        return self
+
+    def add_file(
+        self,
+        content: bytes | str,
+        filename: str,
+        content_type: str = "text/html",
+        title: str | None = None,
+        comment: str | None = None,
+    ) -> StructuredResponse:
+        """Add a file attachment with content.
+
+        Convenience method for adding files without creating FileAttachment.
+
+        Args:
+            content: File content (bytes or string)
+            filename: Filename for the attachment
+            content_type: MIME type
+            title: Display title
+            comment: Comment/description
+
+        Returns:
+            Self for chaining
+        """
+        self.attachments.append(
+            FileAttachment(
+                content=content,
+                filename=filename,
+                content_type=content_type,
+                title=title,
+                comment=comment,
+            )
+        )
         return self
 
 

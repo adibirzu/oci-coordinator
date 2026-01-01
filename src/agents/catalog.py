@@ -14,18 +14,15 @@ Enhanced Features:
 from __future__ import annotations
 
 import importlib
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import httpx
 import structlog
 
 from src.agents.base import AgentDefinition, AgentStatus, BaseAgent
-
-if TYPE_CHECKING:
-    pass
 
 logger = structlog.get_logger(__name__)
 
@@ -46,6 +43,9 @@ DOMAIN_CAPABILITIES = {
         "awr-analysis",
         "ash-analysis",
         "opsi-diagnostics",
+        "autonomous-db-management",
+        "db-system-management",
+        "mysql-management",
     ],
     "security": [
         "threat-detection",
@@ -58,6 +58,9 @@ DOMAIN_CAPABILITIES = {
         "waf-analysis",
         "kms-management",
         "data-safe-analysis",
+        "iam-analysis",
+        "policy-analysis",
+        "security-audit",
     ],
     "finops": [
         "cost-analysis",
@@ -68,6 +71,9 @@ DOMAIN_CAPABILITIES = {
         "focus-data-analysis",
         "tag-based-costing",
         "unit-cost-analysis",
+        "cost-by-service",
+        "cost-by-compartment",
+        "monthly-trend-analysis",
     ],
     "observability": [
         "log-analysis",
@@ -76,6 +82,9 @@ DOMAIN_CAPABILITIES = {
         "pattern-detection",
         "trace-correlation",
         "alarm-management",
+        "log-query-execution",
+        "instance-metrics",
+        "observability-overview",
     ],
     "infrastructure": [
         "compute-management",
@@ -84,17 +93,271 @@ DOMAIN_CAPABILITIES = {
         "resource-scaling",
         "vcn-analysis",
         "instance-troubleshooting",
+        "security-list-analysis",
+        "subnet-management",
+        "instance-lifecycle",
     ],
 }
 
 # MCP Server to domain mapping
+# Maps each MCP server to the domains it handles for intelligent agent routing
 MCP_SERVER_DOMAINS = {
-    "mcp-oci": ["infrastructure", "observability", "database", "security", "finops"],
-    "oci-mcp-security": ["security"],
-    "finopsai-mcp": ["finops"],
-    "mcp-oci-database-observatory": ["database", "observability"],
-    "opsi": ["database"],
+    # mcp-oci: Reference implementation with core OCI services
+    "mcp-oci": [
+        "discovery",
+        "infrastructure",
+        "compute",
+        "network",
+        "database",
+        "observability",
+        "identity",
+        "feedback",
+    ],
+    # oci-mcp-security: Comprehensive security services
+    "oci-mcp-security": [
+        "security",
+        "cloudguard",
+        "vss",
+        "bastion",
+        "audit",
+        "kms",
+        "waf",
+        "datasafe",
+        "accessgov",
+        "zones",
+    ],
+    # finopsai-mcp: Cost management and FinOps
+    "finopsai-mcp": [
+        "finops",
+        "cost",
+        "budget",
+        "forecast",
+        "optimization",
+    ],
+    # database-observatory: Advanced database analytics
+    "database-observatory": [
+        "database",
+        "sql",
+        "performance",
+        "awr",
+        "schema",
+        "opsi",
+        "logan",
+        "tenancy",
+    ],
+    # Legacy server names for backward compatibility
+    "oci-unified": ["discovery", "infrastructure", "observability", "security", "finops"],
+    "oci-infrastructure": ["infrastructure", "observability", "database", "security", "finops"],
+    "finopsai": ["finops", "cost"],
+    "opsi": ["database", "opsi"],
+    "logan": ["observability"],
 }
+
+# Comprehensive MCP tool registry by domain
+# This maps domains to the actual MCP tools available
+MCP_DOMAIN_TOOLS = {
+    "discovery": [
+        "oci_ping",
+        "oci_list_domains",
+        "oci_search_tools",
+        "oci_get_cache_stats",
+        "search_capabilities",
+    ],
+    "infrastructure": [
+        # Compute
+        "oci_compute_list_instances",
+        "oci_compute_get_instance",
+        "oci_compute_start_instance",
+        "oci_compute_stop_instance",
+        "oci_compute_restart_instance",
+        # Network
+        "oci_network_list_vcns",
+        "oci_network_get_vcn",
+        "oci_network_list_subnets",
+        "oci_network_list_security_lists",
+        "oci_network_analyze_security",
+        # Identity
+        "oci_list_compartments",
+        "oci_search_compartments",
+        "oci_get_compartment",
+        "oci_get_tenancy",
+        "oci_list_regions",
+    ],
+    "database": [
+        "oci_database_list_autonomous",
+        "oci_database_get_autonomous",
+        "oci_database_start_autonomous",
+        "oci_database_stop_autonomous",
+        "oci_database_list_db_systems",
+        "oci_database_get_db_system",
+        "oci_database_list_mysql",
+        # Database Observatory - SQLcl
+        "oci_database_execute_sql",
+        "oci_database_get_schema",
+        "oci_database_list_connections",
+        "oci_database_get_status",
+        "oci_database_disconnect",
+        "oci_database_check_network",
+        "oci_database_get_ip",
+        "oci_database_ping",
+        "oci_database_health_check",
+        "oci_database_cache_status",
+        "oci_database_clear_cache",
+        # Database Observatory - OPSI
+        "oci_opsi_list_insights",
+        "oci_opsi_search_databases",
+        "oci_opsi_get_fleet_summary",
+        "oci_opsi_get_database",
+        "oci_opsi_get_statistics",
+        "oci_opsi_build_cache",
+        "oci_opsi_refresh_cache",
+        "oci_opsi_analyze_cpu",
+        "oci_opsi_analyze_memory",
+        "oci_opsi_analyze_io",
+        "oci_opsi_get_performance_summary",
+        "oci_opsi_find_cost_opportunities",
+        "oci_opsi_get_savings_summary",
+        "oci_opsi_list_skills",
+        "oci_opsi_get_skill_recommendations",
+        # Database Observatory - Tenancy
+        "oci_tenancy_list_profiles",
+        "oci_tenancy_get_profile",
+        "oci_tenancy_set_profile",
+        "oci_tenancy_list_compartments",
+    ],
+    "security": [
+        # mcp-oci IAM tools
+        "oci_security_list_users",
+        "oci_security_get_user",
+        "oci_security_list_groups",
+        "oci_security_list_policies",
+        "oci_security_list_cloud_guard_problems",
+        "oci_security_audit",
+        # oci-mcp-security Cloud Guard
+        "oci_security_cloudguard_list_problems",
+        "oci_security_cloudguard_get_problem",
+        "oci_security_cloudguard_remediate_problem",
+        "oci_security_cloudguard_list_detectors",
+        "oci_security_cloudguard_list_responders",
+        "oci_security_cloudguard_get_security_score",
+        "oci_security_cloudguard_list_recommendations",
+        # oci-mcp-security VSS
+        "oci_security_vss_list_host_scans",
+        "oci_security_vss_get_host_scan",
+        "oci_security_vss_list_container_scans",
+        "oci_security_vss_list_vulnerabilities",
+        # oci-mcp-security Security Zones
+        "oci_security_zones_list",
+        "oci_security_zones_get",
+        "oci_security_zones_list_policies",
+        # oci-mcp-security Bastion
+        "oci_security_bastion_list",
+        "oci_security_bastion_get",
+        "oci_security_bastion_list_sessions",
+        "oci_security_bastion_terminate_session",
+        # oci-mcp-security Data Safe
+        "oci_security_datasafe_list_targets",
+        "oci_security_datasafe_list_assessments",
+        "oci_security_datasafe_get_assessment",
+        "oci_security_datasafe_list_findings",
+        # oci-mcp-security WAF
+        "oci_security_waf_list_firewalls",
+        "oci_security_waf_get_firewall",
+        "oci_security_waf_list_policies",
+        "oci_security_waf_get_policy",
+        # oci-mcp-security Audit
+        "oci_security_audit_list_events",
+        "oci_security_audit_get_configuration",
+        # oci-mcp-security Access Governance
+        "oci_security_accessgov_list_instances",
+        "oci_security_accessgov_get_instance",
+        # oci-mcp-security KMS
+        "oci_security_kms_list_vaults",
+        "oci_security_kms_get_vault",
+        "oci_security_kms_list_keys",
+        "oci_security_kms_get_key",
+        # oci-mcp-security Skills
+        "oci_security_skill_posture_summary",
+        "oci_security_skill_vulnerability_overview",
+        "oci_security_skill_audit_digest",
+    ],
+    "finops": [
+        "oci_cost_get_summary",
+        "oci_cost_by_service",
+        "oci_cost_by_compartment",
+        "oci_cost_monthly_trend",
+        "oci_cost_detect_anomalies",
+        "oci_cost_service_drilldown",
+        "oci_cost_by_tag",
+        "oci_cost_object_storage",
+        "oci_cost_unit_cost",
+    ],
+    "observability": [
+        "oci_observability_get_instance_metrics",
+        "oci_observability_execute_log_query",
+        "oci_observability_list_alarms",
+        "oci_observability_get_alarm_history",
+        "oci_observability_list_log_sources",
+        "oci_observability_overview",
+        # Database Observatory - Logan
+        "oci_logan_execute_query",
+        "oci_logan_list_sources",
+        "oci_logan_list_entities",
+        "oci_logan_list_parsers",
+        "oci_logan_list_labels",
+        "oci_logan_list_groups",
+        "oci_logan_run_security_query",
+        "oci_logan_detect_anomalies",
+        "oci_logan_get_summary",
+        "oci_logan_suggest_query",
+        "oci_logan_list_active_sources",
+        "oci_logan_get_entity_logs",
+        "oci_logan_list_skills",
+    ],
+    "skills": [
+        "oci_skill_troubleshoot_instance",
+    ],
+    "feedback": [
+        "set_feedback",
+        "append_feedback",
+        "get_feedback",
+    ],
+}
+
+# Tool aliases for backward compatibility
+TOOL_ALIASES = {
+    # Compute
+    "list_instances": "oci_compute_list_instances",
+    "start_instance": "oci_compute_start_instance",
+    "stop_instance": "oci_compute_stop_instance",
+    "restart_instance": "oci_compute_restart_instance",
+    "get_instance_metrics": "oci_observability_get_instance_metrics",
+    # Database Observatory - SQLcl (legacy names)
+    "execute_sql": "oci_database_execute_sql",
+    "get_schema_info": "oci_database_get_schema",
+    "list_connections": "oci_database_list_connections",
+    "database_status": "oci_database_get_status",
+    # Database Observatory - OPSI (legacy names)
+    "list_database_insights": "oci_opsi_list_insights",
+    "search_databases": "oci_opsi_search_databases",
+    "get_fleet_summary": "oci_opsi_get_fleet_summary",
+    "analyze_cpu_usage": "oci_opsi_analyze_cpu",
+    "analyze_memory_usage": "oci_opsi_analyze_memory",
+    "analyze_io_usage": "oci_opsi_analyze_io",
+    # Database Observatory - Logan (legacy names)
+    "execute_logan_query": "oci_logan_execute_query",
+    "list_log_sources": "oci_logan_list_sources",
+    "list_active_log_sources": "oci_logan_list_active_sources",
+}
+
+
+def _normalize_tool_name(tool_name: str) -> str:
+    """Normalize tool names for catalog lookups."""
+    if ":" in tool_name:
+        tool_name = tool_name.split(":", 1)[1]
+    if "__" in tool_name:
+        tool_name = tool_name.split("__", 1)[1]
+    return tool_name
 
 # Default priority scores by domain (higher = preferred for that domain)
 DOMAIN_PRIORITY = {
@@ -338,6 +601,7 @@ class AgentCatalog:
 
         The agent's definition is extracted via get_definition() and stored.
         Also builds the domain index for fast domain-based lookups.
+        Warns about duplicate capabilities across agents.
 
         Args:
             agent_class: Agent class inheriting from BaseAgent
@@ -345,6 +609,15 @@ class AgentCatalog:
         try:
             agent_def = agent_class.get_definition()
             agent_def.registered_at = datetime.utcnow()
+
+            # Check for duplicate capabilities across existing agents
+            duplicate_caps = self._check_duplicate_capabilities(agent_def)
+            if duplicate_caps:
+                self._logger.warning(
+                    "Duplicate capabilities detected during agent registration",
+                    agent=agent_def.role,
+                    duplicates=duplicate_caps,
+                )
 
             self._agents[agent_def.role] = agent_def
             self._agent_classes[agent_def.role] = agent_class
@@ -362,6 +635,7 @@ class AgentCatalog:
                 role=agent_def.role,
                 agent_class=agent_class.__name__,
                 domains=self._get_agent_domains(agent_def),
+                capabilities_count=len(agent_def.capabilities),
             )
         except Exception as e:
             self._logger.error(
@@ -369,6 +643,31 @@ class AgentCatalog:
                 agent_class=agent_class.__name__,
                 error=str(e),
             )
+
+    def _check_duplicate_capabilities(
+        self, new_agent: AgentDefinition
+    ) -> dict[str, list[str]]:
+        """
+        Check for duplicate capabilities with existing agents.
+
+        Args:
+            new_agent: Agent definition being registered
+
+        Returns:
+            Dict of {capability: [existing_agents_with_cap]}
+        """
+        duplicates: dict[str, list[str]] = {}
+
+        for cap in new_agent.capabilities:
+            existing_agents = []
+            for role, agent_def in self._agents.items():
+                if cap in agent_def.capabilities:
+                    existing_agents.append(role)
+
+            if existing_agents:
+                duplicates[cap] = existing_agents
+
+        return duplicates
 
     def _get_agent_domains(self, agent: AgentDefinition) -> list[str]:
         """Get domains for an agent based on its capabilities."""
@@ -908,6 +1207,79 @@ class AgentCatalog:
             Dictionary of role -> AgentMetrics
         """
         return dict(self._agent_metrics)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # MCP Tool Helpers
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def get_tools_for_domain(self, domain: str) -> list[str]:
+        """
+        Get MCP tools available for a domain.
+
+        Args:
+            domain: Domain name (e.g., "database", "security", "finops")
+
+        Returns:
+            List of MCP tool names for the domain
+        """
+        return MCP_DOMAIN_TOOLS.get(domain, [])
+
+    def get_all_tools(self) -> dict[str, list[str]]:
+        """
+        Get all MCP tools organized by domain.
+
+        Returns:
+            Dictionary of domain -> list of tool names
+        """
+        return dict(MCP_DOMAIN_TOOLS)
+
+    def resolve_tool_alias(self, tool_name: str) -> str:
+        """
+        Resolve a tool alias to canonical name.
+
+        Args:
+            tool_name: Tool name or alias
+
+        Returns:
+            Canonical tool name
+        """
+        canonical = _normalize_tool_name(tool_name)
+        return TOOL_ALIASES.get(canonical, canonical)
+
+    def find_tool_domain(self, tool_name: str) -> str | None:
+        """
+        Find which domain a tool belongs to.
+
+        Args:
+            tool_name: MCP tool name
+
+        Returns:
+            Domain name or None if not found
+        """
+        # Resolve alias first
+        canonical = self.resolve_tool_alias(tool_name)
+
+        for domain, tools in MCP_DOMAIN_TOOLS.items():
+            if canonical in tools:
+                return domain
+        return None
+
+    def get_agent_for_tool(self, tool_name: str) -> AgentDefinition | None:
+        """
+        Find the best agent for a specific tool.
+
+        Args:
+            tool_name: MCP tool name
+
+        Returns:
+            Best matching AgentDefinition or None
+        """
+        domain = self.find_tool_domain(tool_name)
+        if not domain:
+            return None
+
+        result = self.find_best_agent(domains=[domain])
+        return result.agent if result else None
 
     def get_metrics_summary(self) -> dict[str, Any]:
         """

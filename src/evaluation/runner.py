@@ -9,10 +9,10 @@ from __future__ import annotations
 
 import asyncio
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import structlog
 
@@ -293,7 +293,7 @@ class EvaluationRunner:
                 # Mock result for testing without coordinator
                 actual_result = self._create_mock_result(case)
 
-        except asyncio.TimeoutError:
+        except TimeoutError:
             error = f"Timeout after {self._config.timeout_seconds}s"
             self._logger.warning("Case timed out", case_id=case.id)
         except Exception as e:

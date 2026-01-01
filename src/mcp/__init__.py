@@ -37,6 +37,7 @@ from src.mcp.config import (
     load_mcp_config_from_env,
     quick_setup,
 )
+from src.mcp.connection_manager import MCPConnectionManager, get_mcp_catalog
 from src.mcp.registry import ServerInfo, ServerRegistry, ServerStatus
 
 __all__ = [
@@ -63,4 +64,7 @@ __all__ = [
     "load_mcp_config_from_env",
     "initialize_mcp_from_config",
     "quick_setup",
+    # Connection Manager (persistent connections)
+    "MCPConnectionManager",
+    "get_mcp_catalog",
 ]

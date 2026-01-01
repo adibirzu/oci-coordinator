@@ -354,10 +354,13 @@ class SlackHandler:
 
         self._app = None
         self._coordinator = None
-        self._tracer = trace.get_tracer("oci-slack-handler")
 
-        # Initialize observability for Slack handler
+        # Initialize observability FIRST - sets up tracer provider with OCI APM export
+        # This MUST happen before getting the tracer to ensure spans are exported
         init_observability(agent_name="slack-handler")
+
+        # Now get tracer from the properly configured provider
+        self._tracer = trace.get_tracer("oci-slack-handler")
 
     @property
     def app(self):
@@ -397,6 +400,21 @@ class SlackHandler:
         a single event loop across all handlers. This prevents MCP
         connection issues that occur when creating new event loops.
         """
+        # Ensure AsyncRuntime is started before registering handlers
+        from src.channels.async_runtime import AsyncRuntime
+        import time
+
+        runtime = AsyncRuntime.get_instance()
+        # Wait for loop to be fully started
+        for _ in range(10):
+            if runtime.is_running:
+                break
+            time.sleep(0.1)
+
+        if not runtime.is_running:
+            logger.error("Failed to start AsyncRuntime - Slack handlers may not work")
+        else:
+            logger.info("AsyncRuntime started successfully", loop_id=id(runtime.loop))
 
         @app.event("app_mention")
         def handle_mention(event: dict, say: Callable, client: Any) -> None:
@@ -528,33 +546,60 @@ class SlackHandler:
                     print("[SLACK] Auth message sent", flush=True)
                     return
 
-                # Send typing indicator (ignore if already reacted)
+                # 3-second ack pattern: Send immediate "thinking" message
+                # This ensures Slack doesn't timeout while we process
+                thinking_ts = None
                 try:
-                    client.reactions_add(
+                    thinking_response = client.chat_postMessage(
                         channel=channel,
-                        timestamp=event.get("ts"),
-                        name="hourglass_flowing_sand",
+                        thread_ts=thread_ts,
+                        text=":hourglass_flowing_sand: Processing your request...",
+                        blocks=[
+                            {
+                                "type": "context",
+                                "elements": [
+                                    {
+                                        "type": "mrkdwn",
+                                        "text": ":hourglass_flowing_sand: *Processing your request...* | Analyzing intent and routing to agents",
+                                    }
+                                ],
+                            }
+                        ],
                     )
-                except Exception:
-                    pass  # Ignore already_reacted or other errors
+                    thinking_ts = thinking_response.get("ts")
+                    print(f"[SLACK] Sent thinking message: {thinking_ts}", flush=True)
+                except Exception as e:
+                    logger.warning("Failed to send thinking message", error=str(e))
 
-                # Process with coordinator
-                response = await self._invoke_coordinator(
-                    text=text,
-                    user_id=user,
-                    channel_id=channel,
-                    thread_ts=thread_ts,
-                )
-
-                # Remove typing indicator
+                # Process with coordinator (may take time)
+                response = None
+                error_msg = None
                 try:
-                    client.reactions_remove(
-                        channel=channel,
-                        timestamp=event.get("ts"),
-                        name="hourglass_flowing_sand",
+                    response = await self._invoke_coordinator(
+                        text=text,
+                        user_id=user,
+                        channel_id=channel,
+                        thread_ts=thread_ts,
                     )
-                except Exception:
-                    pass  # Ignore if reaction was already removed
+                except Exception as e:
+                    error_msg = str(e)
+                    logger.error("Coordinator failed", error=error_msg)
+
+                # Delete the thinking message now that we have a response
+                if thinking_ts:
+                    try:
+                        client.chat_delete(channel=channel, ts=thinking_ts)
+                    except Exception:
+                        pass  # Ignore if delete fails (e.g., already deleted)
+
+                # Handle coordinator error
+                if error_msg:
+                    say(
+                        text=f"Error processing request: {error_msg[:100]}",
+                        blocks=build_error_blocks(f"Request failed: {error_msg}"),
+                        thread_ts=thread_ts,
+                    )
+                    return
 
                 # Format and send response
                 print(f"[SLACK] Got response: {response}", flush=True)
@@ -585,14 +630,50 @@ class SlackHandler:
                     else:
                         # Format successful response
                         formatted = self._format_response(response)
-                        msg_text = response.get("message", "Response from OCI Coordinator")
-                        print("[SLACK] Sending formatted response", flush=True)
+                        msg_text = response.get("message", "")
+
+                        # Handle empty or whitespace-only responses
+                        if not msg_text or not msg_text.strip():
+                            msg_text = (
+                                "I processed your request but the response was empty. "
+                                "Please try rephrasing your question."
+                            )
+                            print(f"[SLACK] Warning: Empty response received", flush=True)
+
+                        print(f"[SLACK] Sending formatted response (length={len(msg_text)})", flush=True)
                         say(
                             text=msg_text[:200] if isinstance(msg_text, str) else "Response",
-                            blocks=formatted.get("blocks", []),
+                            blocks=formatted.get("blocks", []) if formatted.get("blocks") else None,
                             thread_ts=thread_ts,
                         )
                         print("[SLACK] Response sent", flush=True)
+
+                        # Send file attachments if present
+                        attachments = response.get("attachments", [])
+                        if attachments:
+                            print(f"[SLACK] Sending {len(attachments)} file attachment(s)", flush=True)
+                            for attachment in attachments:
+                                if isinstance(attachment, dict):
+                                    self._send_file_attachment(
+                                        client=client,
+                                        channel=channel,
+                                        file_content=attachment.get("content", ""),
+                                        filename=attachment.get("filename", "attachment"),
+                                        thread_ts=thread_ts,
+                                        title=attachment.get("title"),
+                                        comment=attachment.get("comment"),
+                                    )
+                                else:
+                                    # FileAttachment dataclass
+                                    self._send_file_attachment(
+                                        client=client,
+                                        channel=channel,
+                                        file_content=attachment.content,
+                                        filename=attachment.filename,
+                                        thread_ts=thread_ts,
+                                        title=attachment.title,
+                                        comment=attachment.comment,
+                                    )
 
                         # Add success reaction
                         client.reactions_add(
@@ -818,6 +899,10 @@ class SlackHandler:
     ) -> dict | None:
         """Invoke the coordinator to process a request.
 
+        Tries LangGraph coordinator first for intent classification and
+        workflow-first routing. Falls back to keyword routing if coordinator
+        is not available or fails.
+
         Args:
             text: User message text
             user_id: Slack user ID
@@ -827,7 +912,6 @@ class SlackHandler:
         Returns:
             Agent response or None
         """
-        # Import coordinator lazily to avoid circular imports
         from src.agents.catalog import AgentCatalog
 
         with self._tracer.start_as_current_span("invoke_coordinator") as span:
@@ -835,13 +919,44 @@ class SlackHandler:
             span.set_attribute("user.id", user_id)
 
             try:
-                # Get the coordinator and ensure agents are discovered
+                # Try LangGraph coordinator first (if enabled)
+                use_langgraph = os.getenv("USE_LANGGRAPH_COORDINATOR", "true").lower() == "true"
+
+                if use_langgraph:
+                    try:
+                        result = await self._invoke_langgraph_coordinator(
+                            text=text,
+                            user_id=user_id,
+                            thread_id=thread_ts,
+                        )
+                        if result and result.get("success"):
+                            span.set_attribute("routing.type", result.get("routing_type", "langgraph"))
+                            span.set_attribute("routing.method", "langgraph")
+                            return {
+                                "type": "agent_response",
+                                "agent_id": result.get("routing_type", "coordinator"),
+                                "query": text,
+                                "message": result.get("response", ""),
+                                "sections": [],
+                            }
+                        elif result and result.get("error"):
+                            # LangGraph returned error, fall through to keyword routing
+                            logger.warning(
+                                "LangGraph coordinator returned error, falling back to keyword routing",
+                                error=result.get("error"),
+                            )
+                    except Exception as e:
+                        logger.warning(
+                            "LangGraph coordinator failed, falling back to keyword routing",
+                            error=str(e),
+                        )
+
+                # Fall back to keyword-based routing
+                span.set_attribute("routing.method", "keyword")
                 catalog = AgentCatalog.get_instance()
                 if not catalog.list_all():
                     catalog.auto_discover()
 
-                # For now, route based on simple keyword matching
-                # In production, this would use the full LangGraph coordinator
                 agent_response = await self._route_to_agent(
                     text=text,
                     catalog=catalog,
@@ -854,6 +969,82 @@ class SlackHandler:
                 logger.error("Coordinator invocation failed", error=str(e))
                 span.set_attribute("error", True)
                 return None
+
+    async def _invoke_langgraph_coordinator(
+        self,
+        text: str,
+        user_id: str,
+        thread_id: str | None = None,
+    ) -> dict | None:
+        """Invoke the LangGraph coordinator for workflow-first routing.
+
+        The LangGraph coordinator provides:
+        - Intent classification with confidence scoring
+        - Workflow-first routing (70%+ requests go to deterministic workflows)
+        - Agent delegation for complex queries
+        - Parallel orchestration for cross-domain queries
+
+        Args:
+            text: User message text
+            user_id: User ID
+            thread_id: Thread ID for conversation continuity
+
+        Returns:
+            Coordinator result dict or None
+        """
+        from src.agents.catalog import AgentCatalog
+        from src.agents.coordinator.graph import LangGraphCoordinator
+        from src.llm import get_llm
+        from src.mcp.catalog import ToolCatalog
+        from src.memory.manager import SharedMemoryManager
+
+        with self._tracer.start_as_current_span("langgraph_coordinator") as span:
+            span.set_attribute("query.text", text[:200])
+            span.set_attribute("user.id", user_id)
+
+            try:
+                # Get or create coordinator instance
+                if not hasattr(self, "_langgraph_coordinator") or self._langgraph_coordinator is None:
+                    # Initialize coordinator components
+                    llm = get_llm()
+                    tool_catalog = ToolCatalog.get_instance()
+                    agent_catalog = AgentCatalog.get_instance()
+
+                    # Initialize memory manager
+                    redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
+                    memory = SharedMemoryManager(redis_url=redis_url)
+
+                    # Create coordinator
+                    self._langgraph_coordinator = LangGraphCoordinator(
+                        llm=llm,
+                        tool_catalog=tool_catalog,
+                        agent_catalog=agent_catalog,
+                        memory=memory,
+                        max_iterations=10,
+                    )
+
+                    # Initialize the graph
+                    await self._langgraph_coordinator.initialize()
+                    logger.info("LangGraph coordinator initialized for Slack")
+
+                # Invoke coordinator
+                result = await self._langgraph_coordinator.invoke(
+                    query=text,
+                    thread_id=thread_id,
+                    user_id=user_id,
+                )
+
+                span.set_attribute("response.success", result.get("success", False))
+                span.set_attribute("response.routing_type", result.get("routing_type", "unknown"))
+                span.set_attribute("response.iterations", result.get("iterations", 0))
+
+                return result
+
+            except Exception as e:
+                logger.error("LangGraph coordinator invocation failed", error=str(e))
+                span.set_attribute("error", True)
+                span.set_attribute("error.message", str(e))
+                return {"success": False, "error": str(e)}
 
     async def _route_to_agent(
         self,
@@ -963,38 +1154,21 @@ class SlackHandler:
             # Get LLM for agent
             llm = get_llm()
 
-            # Get tool catalog for MCP tools
-            # NOTE: MCP connections are bound to the event loop where they were created.
-            # Since Slack Bolt uses asyncio.run() which creates a new event loop for each
-            # handler invocation, we need to reinitialize MCP connections in this event loop.
-            # The singletons must be reset to ensure connections are established in the
-            # current event loop.
+            # Get tool catalog for MCP tools using persistent connection manager.
+            # The MCPConnectionManager maintains connections across messages,
+            # avoiding the 2-5s reconnection overhead on every request.
             tool_catalog = None
             try:
-                from src.mcp.catalog import ToolCatalog as ToolCatalogClass
-                from src.mcp.config import initialize_mcp_from_config, load_mcp_config
-                from src.mcp.registry import ServerRegistry
+                from src.mcp.connection_manager import MCPConnectionManager
 
-                # Get existing registry to cleanup old connections
-                old_registry = ServerRegistry._instance
-                if old_registry:
-                    try:
-                        # Disconnect all servers from old event loop
-                        # Note: This may fail if in different event loop, but that's ok
-                        await old_registry.disconnect_all()
-                    except Exception:
-                        pass  # Ignore errors during cleanup
+                manager = await MCPConnectionManager.get_instance()
+                tool_catalog = await manager.get_tool_catalog()
 
-                # Reset singletons to force reinitialization in this event loop
-                ServerRegistry.reset_instance()
-                ToolCatalogClass.reset_instance()
-
-                # Initialize MCP connections in this handler's event loop
-                config = load_mcp_config()
-                _, tool_catalog = await initialize_mcp_from_config(config)
-
-                span.set_attribute("tools.available", len(tool_catalog.list_tools()))
-                span.set_attribute("mcp.initialized_in_handler", True)
+                if tool_catalog:
+                    span.set_attribute("tools.available", len(tool_catalog.list_tools()))
+                    span.set_attribute("mcp.persistent_connection", True)
+                    status = manager.get_status()
+                    span.set_attribute("mcp.connected_servers", len(status["connected_servers"]))
             except Exception as e:
                 logger.warning("Tool catalog not available", error=str(e))
 
@@ -1249,7 +1423,33 @@ class SlackHandler:
             if extracted_answer:
                 message = extracted_answer
 
-        # Remove all raw JSON objects from the message
+        # Check for structured JSON responses FIRST (cost_summary, etc.)
+        # These have a "type" field and should be parsed specially
+        if "{" in message and '"type"' in message:
+            try:
+                # Find JSON object in message
+                start = message.find("{")
+                end = message.rfind("}") + 1
+                json_part = message[start:end]
+                parsed = json_module.loads(json_part)
+
+                if isinstance(parsed, dict) and "type" in parsed:
+                    # Handle cost_summary type
+                    if parsed.get("type") == "cost_summary":
+                        if "error" in parsed:
+                            message = parsed["error"]
+                        else:
+                            summary = parsed.get("summary", {})
+                            services = parsed.get("services", [])
+                            # Build header text with summary
+                            message = f"*Total (last {summary.get('days', 30)} days):* {summary.get('total', 'N/A')}\n*Period:* {summary.get('period', 'N/A')}"
+                            if services:
+                                table_data = services
+                        return message.strip(), table_data
+            except (json_module.JSONDecodeError, IndexError, KeyError):
+                pass
+
+        # Remove all raw JSON objects from the message (React agent artifacts)
         if '"thought"' in message or message.strip().startswith("{"):
             # Remove JSON blocks but keep any non-JSON text
             message = re.sub(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', '', message)
@@ -1283,6 +1483,10 @@ class SlackHandler:
 
         first_item = data[0]
         keys = list(first_item.keys())
+
+        # Detect cost data (from cost_summary)
+        if "service" in keys and ("cost" in keys or "percent" in keys):
+            return "Cost by Service"
 
         # Detect common OCI resource types
         if "compartment_id" in keys or "compartment_ocid" in keys:
@@ -1460,6 +1664,64 @@ Always format your response with:
         # Remove <@BOTID> mentions
         text = re.sub(r"<@[A-Z0-9]+>", "", text)
         return text.strip()
+
+    def _send_file_attachment(
+        self,
+        client: Any,
+        channel: str,
+        file_content: bytes | str,
+        filename: str,
+        thread_ts: str | None = None,
+        title: str | None = None,
+        comment: str | None = None,
+    ) -> dict | None:
+        """Upload a file attachment to Slack.
+
+        Uses the files.upload API to send files (e.g., AWR HTML reports).
+
+        Args:
+            client: Slack WebClient
+            channel: Channel ID to send to
+            file_content: File content (bytes or string)
+            filename: Filename for the upload
+            thread_ts: Thread timestamp for threading
+            title: Display title for the file
+            comment: Initial comment with the file
+
+        Returns:
+            Response from Slack API or None on failure
+        """
+        try:
+            # Convert string to bytes if needed
+            if isinstance(file_content, str):
+                file_content = file_content.encode("utf-8")
+
+            # Use files_upload_v2 for better reliability
+            response = client.files_upload_v2(
+                file=file_content,
+                filename=filename,
+                channel=channel,
+                thread_ts=thread_ts,
+                title=title or filename,
+                initial_comment=comment or f"📎 {title or filename}",
+            )
+
+            logger.info(
+                "File uploaded to Slack",
+                filename=filename,
+                size_bytes=len(file_content),
+                channel=channel,
+            )
+
+            return response
+
+        except Exception as e:
+            logger.error(
+                "Failed to upload file to Slack",
+                filename=filename,
+                error=str(e),
+            )
+            return None
 
     async def _handle_drill_down(
         self,

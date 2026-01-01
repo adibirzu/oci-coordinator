@@ -288,7 +288,7 @@ class StdioTransport(MCPTransport):
             self._process.terminate()
             try:
                 await asyncio.wait_for(self._process.wait(), timeout=5.0)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 self._process.kill()
 
         self._connected = False
@@ -327,7 +327,7 @@ class StdioTransport(MCPTransport):
                 future, timeout=self.config.timeout_seconds
             )
             return response
-        except asyncio.TimeoutError:
+        except TimeoutError:
             del self._pending_requests[request_id]
             raise MCPError(-32000, f"Request timeout: {method}")
 
@@ -640,7 +640,7 @@ class MCPClient:
                         duration_ms=duration_ms,
                     )
 
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     last_error = f"Timeout after {timeout}s (attempt {attempt + 1}/{self.config.retry_attempts})"
                     self._logger.warning(
                         "Tool call timeout, retrying",

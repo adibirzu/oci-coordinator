@@ -13,11 +13,15 @@ Implements the graph nodes:
 
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import TYPE_CHECKING, Any
 
+import os
+
 import structlog
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from opentelemetry import trace
 
 from src.agents.coordinator.state import (
     AgentContext,
@@ -30,12 +34,15 @@ from src.agents.coordinator.state import (
     determine_routing,
 )
 
+# Get tracer for coordinator nodes
+_tracer = trace.get_tracer("oci-coordinator")
+
 if TYPE_CHECKING:
     from langchain_core.language_models import BaseChatModel
 
     from src.agents.catalog import AgentCatalog
-    from src.memory.manager import SharedMemoryManager
     from src.mcp.catalog import ToolCatalog
+    from src.memory.manager import SharedMemoryManager
 
 logger = structlog.get_logger(__name__)
 
@@ -51,10 +58,10 @@ class CoordinatorNodes:
 
     def __init__(
         self,
-        llm: "BaseChatModel",
-        tool_catalog: "ToolCatalog",
-        agent_catalog: "AgentCatalog",
-        memory: "SharedMemoryManager",
+        llm: BaseChatModel,
+        tool_catalog: ToolCatalog,
+        agent_catalog: AgentCatalog,
+        memory: SharedMemoryManager,
         workflow_registry: dict[str, Any] | None = None,
     ):
         """
@@ -90,22 +97,27 @@ class CoordinatorNodes:
         Returns:
             State updates
         """
-        self._logger.debug("Processing input", message_count=len(state.messages))
+        with _tracer.start_as_current_span("coordinator.input") as span:
+            span.set_attribute("message_count", len(state.messages))
+            self._logger.debug("Processing input", message_count=len(state.messages))
 
-        # Extract query from last human message
-        query = ""
-        for msg in reversed(state.messages):
-            if isinstance(msg, HumanMessage):
-                query = msg.content
-                break
+            # Extract query from last human message
+            query = ""
+            for msg in reversed(state.messages):
+                if isinstance(msg, HumanMessage):
+                    query = msg.content
+                    break
 
-        if not query:
-            return {"error": "No query found in messages"}
+            if not query:
+                span.set_attribute("error", "no_query")
+                return {"error": "No query found in messages"}
 
-        return {
-            "query": query,
-            "iteration": 0,
-        }
+            span.set_attribute("query_length", len(query))
+            span.set_attribute("query_preview", query[:100])
+            return {
+                "query": query,
+                "iteration": 0,
+            }
 
     # ─────────────────────────────────────────────────────────────────────────
     # Classifier Node
@@ -127,38 +139,47 @@ class CoordinatorNodes:
         Returns:
             State updates with intent classification
         """
-        self._logger.info("Classifying intent", query=state.query[:100])
+        with _tracer.start_as_current_span("coordinator.classifier") as span:
+            span.set_attribute("query_preview", state.query[:100] if state.query else "")
+            self._logger.info("Classifying intent", query=state.query[:100])
 
-        # Build classification prompt
-        classification_prompt = self._build_classification_prompt(state.query)
+            # Build classification prompt
+            classification_prompt = self._build_classification_prompt(state.query)
 
-        try:
-            response = await self.llm.ainvoke([HumanMessage(content=classification_prompt)])
+            try:
+                response = await self.llm.ainvoke([HumanMessage(content=classification_prompt)])
 
-            # Parse classification from response
-            intent = self._parse_classification(response.content, state.query)
+                # Parse classification from response
+                intent = self._parse_classification(response.content, state.query)
 
-            self._logger.info(
-                "Intent classified",
-                intent=intent.intent,
-                category=intent.category.value,
-                confidence=intent.confidence,
-                domains=intent.domains,
-            )
+                span.set_attribute("intent.name", intent.intent)
+                span.set_attribute("intent.category", intent.category.value)
+                span.set_attribute("intent.confidence", intent.confidence)
+                span.set_attribute("intent.domains", ",".join(intent.domains))
 
-            return {"intent": intent}
-
-        except Exception as e:
-            self._logger.error("Classification failed", error=str(e))
-            # Return low-confidence fallback
-            return {
-                "intent": IntentClassification(
-                    intent="unknown",
-                    category=IntentCategory.UNKNOWN,
-                    confidence=0.3,
-                    domains=[],
+                self._logger.info(
+                    "Intent classified",
+                    intent=intent.intent,
+                    category=intent.category.value,
+                    confidence=intent.confidence,
+                    domains=intent.domains,
                 )
-            }
+
+                return {"intent": intent}
+
+            except Exception as e:
+                span.set_attribute("error", True)
+                span.set_attribute("error.message", str(e)[:200])
+                self._logger.error("Classification failed", error=str(e))
+                # Return low-confidence fallback
+                return {
+                    "intent": IntentClassification(
+                        intent="unknown",
+                        category=IntentCategory.UNKNOWN,
+                        confidence=0.3,
+                        domains=[],
+                    )
+                }
 
     def _build_classification_prompt(self, query: str) -> str:
         """Build the intent classification prompt."""
@@ -258,37 +279,43 @@ Return only the JSON object, no other text."""
         Returns:
             State updates with routing decision
         """
-        if not state.intent:
-            self._logger.warning("No intent for routing")
-            return {
-                "error": "No intent classification available",
-            }
+        with _tracer.start_as_current_span("coordinator.router") as span:
+            if not state.intent:
+                span.set_attribute("error", "no_intent")
+                self._logger.warning("No intent for routing")
+                return {
+                    "error": "No intent classification available",
+                }
 
-        routing = determine_routing(state.intent)
+            routing = determine_routing(state.intent)
 
-        self._logger.info(
-            "Routing decision",
-            routing_type=routing.routing_type.value,
-            target=routing.target,
-            confidence=routing.confidence,
-            reasoning=routing.reasoning,
-        )
+            span.set_attribute("routing.type", routing.routing_type.value)
+            span.set_attribute("routing.target", routing.target or "none")
+            span.set_attribute("routing.confidence", routing.confidence)
 
-        # Prepare agent context if routing to agent
-        agent_context = None
-        if routing.routing_type == RoutingType.AGENT:
-            agent_context = AgentContext(
-                query=state.query,
-                intent=state.intent,
-                previous_results=state.tool_results,
+            self._logger.info(
+                "Routing decision",
+                routing_type=routing.routing_type.value,
+                target=routing.target,
+                confidence=routing.confidence,
+                reasoning=routing.reasoning,
             )
 
-        return {
-            "routing": routing,
-            "agent_context": agent_context,
-            "current_agent": routing.target if routing.routing_type == RoutingType.AGENT else None,
-            "workflow_name": routing.target if routing.routing_type == RoutingType.WORKFLOW else None,
-        }
+            # Prepare agent context if routing to agent
+            agent_context = None
+            if routing.routing_type == RoutingType.AGENT:
+                agent_context = AgentContext(
+                    query=state.query,
+                    intent=state.intent,
+                    previous_results=state.tool_results,
+                )
+
+            return {
+                "routing": routing,
+                "agent_context": agent_context,
+                "current_agent": routing.target if routing.routing_type == RoutingType.AGENT else None,
+                "workflow_name": routing.target if routing.routing_type == RoutingType.WORKFLOW else None,
+            }
 
     # ─────────────────────────────────────────────────────────────────────────
     # Workflow Node
@@ -307,59 +334,68 @@ Return only the JSON object, no other text."""
         Returns:
             State updates with workflow result
         """
-        workflow_name = state.workflow_name
+        with _tracer.start_as_current_span("coordinator.workflow") as span:
+            workflow_name = state.workflow_name
+            span.set_attribute("workflow.name", workflow_name or "none")
 
-        if not workflow_name:
-            return {"error": "No workflow specified"}
+            if not workflow_name:
+                span.set_attribute("error", "no_workflow")
+                return {"error": "No workflow specified"}
 
-        workflow = self.workflow_registry.get(workflow_name)
-        if not workflow:
-            self._logger.warning("Workflow not found", workflow=workflow_name)
-            # Fallback to agentic
-            return {
-                "routing": state.routing._replace(routing_type=RoutingType.AGENT)
-                if state.routing
-                else None,
-                "error": f"Workflow '{workflow_name}' not found",
-            }
-
-        self._logger.info("Executing workflow", workflow=workflow_name)
-
-        try:
-            start_time = time.time()
-            result = await workflow(
-                query=state.query,
-                entities=state.intent.entities if state.intent else {},
-                tool_catalog=self.tool_catalog,
-                memory=self.memory,
-            )
-            duration_ms = int((time.time() - start_time) * 1000)
-
-            self._logger.info(
-                "Workflow completed",
-                workflow=workflow_name,
-                duration_ms=duration_ms,
-            )
-
-            return {
-                "final_response": result,
-                "workflow_state": {"completed": True, "duration_ms": duration_ms},
-            }
-
-        except Exception as e:
-            self._logger.error(
-                "Workflow failed",
-                workflow=workflow_name,
-                error=str(e),
-            )
-            # Try fallback if available
-            if state.routing and state.routing.fallback:
+            workflow = self.workflow_registry.get(workflow_name)
+            if not workflow:
+                span.set_attribute("error", "workflow_not_found")
+                self._logger.warning("Workflow not found", workflow=workflow_name)
+                # Fallback to agentic
                 return {
-                    "routing": state.routing.fallback,
-                    "workflow_name": None,
-                    "current_agent": state.routing.fallback.target,
+                    "routing": state.routing._replace(routing_type=RoutingType.AGENT)
+                    if state.routing
+                    else None,
+                    "error": f"Workflow '{workflow_name}' not found",
                 }
-            return {"error": f"Workflow failed: {e}"}
+
+            self._logger.info("Executing workflow", workflow=workflow_name)
+
+            try:
+                start_time = time.time()
+                result = await workflow(
+                    query=state.query,
+                    entities=state.intent.entities if state.intent else {},
+                    tool_catalog=self.tool_catalog,
+                    memory=self.memory,
+                )
+                duration_ms = int((time.time() - start_time) * 1000)
+
+                span.set_attribute("workflow.duration_ms", duration_ms)
+                span.set_attribute("workflow.success", True)
+
+                self._logger.info(
+                    "Workflow completed",
+                    workflow=workflow_name,
+                    duration_ms=duration_ms,
+                )
+
+                return {
+                    "final_response": result,
+                    "workflow_state": {"completed": True, "duration_ms": duration_ms},
+                }
+
+            except Exception as e:
+                span.set_attribute("error", True)
+                span.set_attribute("error.message", str(e)[:200])
+                self._logger.error(
+                    "Workflow failed",
+                    workflow=workflow_name,
+                    error=str(e),
+                )
+                # Try fallback if available
+                if state.routing and state.routing.fallback:
+                    return {
+                        "routing": state.routing.fallback,
+                        "workflow_name": None,
+                        "current_agent": state.routing.fallback.target,
+                    }
+                return {"error": f"Workflow failed: {e}"}
 
     # ─────────────────────────────────────────────────────────────────────────
     # Agent Node
@@ -375,18 +411,24 @@ Return only the JSON object, no other text."""
         Returns:
             State updates with agent response
         """
-        self._logger.debug(
-            "Agent node",
-            iteration=state.iteration,
-            current_agent=state.current_agent,
-        )
+        with _tracer.start_as_current_span("coordinator.agent") as span:
+            span.set_attribute("iteration", state.iteration)
+            span.set_attribute("current_agent", state.current_agent or "coordinator-llm")
 
-        # If delegating to specialized agent
-        if state.current_agent:
-            return await self._invoke_specialized_agent(state)
+            self._logger.debug(
+                "Agent node",
+                iteration=state.iteration,
+                current_agent=state.current_agent,
+            )
 
-        # Otherwise, use coordinator LLM
-        return await self._invoke_coordinator_llm(state)
+            # If delegating to specialized agent
+            if state.current_agent:
+                span.set_attribute("delegation", "specialized_agent")
+                return await self._invoke_specialized_agent(state)
+
+            # Otherwise, use coordinator LLM
+            span.set_attribute("delegation", "coordinator_llm")
+            return await self._invoke_coordinator_llm(state)
 
     async def _invoke_specialized_agent(
         self, state: CoordinatorState
@@ -397,72 +439,118 @@ Return only the JSON object, no other text."""
         if not agent_role:
             return {"error": "No agent specified"}
 
-        # Get agent from catalog with output format config
-        agent_config = {
-            "output_format": state.output_format,
-            "channel_type": state.channel_type,
-        }
+        with _tracer.start_as_current_span(f"agent.invoke.{agent_role}") as span:
+            span.set_attribute("agent.role", agent_role)
 
-        agent_instance = self.agent_catalog.instantiate(
-            role=agent_role,
-            memory_manager=self.memory,
-            tool_catalog=self.tool_catalog,
-            config=agent_config,
-        )
-
-        if not agent_instance:
-            self._logger.warning("Agent not found", role=agent_role)
-            return {"error": f"Agent '{agent_role}' not available"}
-
-        self._logger.info(
-            "Delegating to agent",
-            agent_role=agent_role,
-            output_format=state.output_format,
-        )
-
-        try:
-            start_time = time.time()
-            context = state.agent_context.to_dict() if state.agent_context else {}
-            context["output_format"] = state.output_format
-            context["channel_type"] = state.channel_type
-
-            result = await agent_instance.invoke(state.query, context)
-            duration_ms = int((time.time() - start_time) * 1000)
-
-            # Record metrics
-            self.agent_catalog.record_invocation(
-                role=agent_role,
-                duration_ms=duration_ms,
-                success=True,
-            )
-
-            self._logger.info(
-                "Agent completed",
-                agent_role=agent_role,
-                duration_ms=duration_ms,
-            )
-
-            return {
-                "agent_response": result,
-                "final_response": result,
+            # Get agent from catalog with output format config
+            agent_config = {
+                "output_format": state.output_format,
+                "channel_type": state.channel_type,
             }
 
-        except Exception as e:
-            duration_ms = int((time.time() - start_time) * 1000)
-
-            # Record failed invocation
-            self.agent_catalog.record_invocation(
+            agent_instance = self.agent_catalog.instantiate(
                 role=agent_role,
-                duration_ms=duration_ms,
-                success=False,
+                memory_manager=self.memory,
+                tool_catalog=self.tool_catalog,
+                config=agent_config,
             )
 
-            self._logger.error(
-                "Agent failed",
-                agent_role=agent_role,
-                error=str(e),
+            if not agent_instance:
+                span.set_attribute("error", "agent_not_found")
+                self._logger.warning("Agent not found", role=agent_role)
+                return {"error": f"Agent '{agent_role}' not available"}
+
+            # Get agent timeout from definition (default 120s, max 180s)
+            agent_def = agent_instance.get_definition()
+            timeout_seconds = min(
+                agent_def.metadata.timeout_seconds if agent_def.metadata else 120,
+                180  # Hard cap to prevent runaway agents
             )
-            return {"error": f"Agent failed: {e}"}
+            span.set_attribute("agent.timeout_seconds", timeout_seconds)
+
+            self._logger.info(
+                "Delegating to agent",
+                agent_role=agent_role,
+                output_format=state.output_format,
+                timeout_seconds=timeout_seconds,
+            )
+
+            start_time = time.time()
+            try:
+                context = state.agent_context.to_dict() if state.agent_context else {}
+                context["output_format"] = state.output_format
+                context["channel_type"] = state.channel_type
+
+                # Wrap agent invocation with timeout
+                result = await asyncio.wait_for(
+                    agent_instance.invoke(state.query, context),
+                    timeout=timeout_seconds,
+                )
+                duration_ms = int((time.time() - start_time) * 1000)
+
+                span.set_attribute("agent.duration_ms", duration_ms)
+                span.set_attribute("agent.success", True)
+
+                # Record metrics
+                self.agent_catalog.record_invocation(
+                    role=agent_role,
+                    duration_ms=duration_ms,
+                    success=True,
+                )
+
+                self._logger.info(
+                    "Agent completed",
+                    agent_role=agent_role,
+                    duration_ms=duration_ms,
+                )
+
+                return {
+                    "agent_response": result,
+                    "final_response": result,
+                }
+
+            except asyncio.TimeoutError:
+                duration_ms = int((time.time() - start_time) * 1000)
+                span.set_attribute("error", "timeout")
+                span.set_attribute("agent.duration_ms", duration_ms)
+
+                # Record timeout as failed invocation
+                self.agent_catalog.record_invocation(
+                    role=agent_role,
+                    duration_ms=duration_ms,
+                    success=False,
+                )
+
+                self._logger.error(
+                    "Agent timed out",
+                    agent_role=agent_role,
+                    timeout_seconds=timeout_seconds,
+                    duration_ms=duration_ms,
+                )
+                return {
+                    "error": f"Agent '{agent_role}' timed out after {timeout_seconds}s",
+                    "final_response": f"The request took too long to process (>{timeout_seconds}s). Please try a simpler query or try again later.",
+                }
+
+            except Exception as e:
+                duration_ms = int((time.time() - start_time) * 1000)
+                span.set_attribute("error", True)
+                span.set_attribute("error.message", str(e)[:200])
+                span.set_attribute("agent.duration_ms", duration_ms)
+
+                # Record failed invocation
+                self.agent_catalog.record_invocation(
+                    role=agent_role,
+                    duration_ms=duration_ms,
+                    success=False,
+                )
+
+                self._logger.error(
+                    "Agent failed",
+                    agent_role=agent_role,
+                    error=str(e),
+                )
+                return {"error": f"Agent failed: {e}"}
 
     async def _invoke_coordinator_llm(
         self, state: CoordinatorState
@@ -470,6 +558,40 @@ Return only the JSON object, no other text."""
         """Invoke the coordinator's LLM for reasoning."""
         # Build messages for LLM
         messages = list(state.messages)
+
+        # Optional RAG context injection
+        if os.getenv("RAG_ENABLED", "false").lower() == "true" and state.query:
+            try:
+                from src.rag import get_retriever
+
+                namespace = os.getenv("RAG_NAMESPACE", "oci-docs")
+                retriever = await get_retriever(namespace)
+                result = await retriever.retrieve(state.query)
+                if result.context:
+                    messages.insert(
+                        0,
+                        SystemMessage(
+                            content=(
+                                "Relevant documentation context:\n"
+                                f"{result.context}"
+                            )
+                        ),
+                    )
+            except Exception as e:
+                self._logger.warning("RAG retrieval failed", error=str(e))
+
+        # Runtime feedback injection
+        try:
+            feedback_text = await self.memory.get_feedback_text()
+            if feedback_text:
+                messages.insert(
+                    0,
+                    SystemMessage(
+                        content=f"Runtime feedback directives:\n{feedback_text}"
+                    ),
+                )
+        except Exception as e:
+            self._logger.warning("Feedback retrieval failed", error=str(e))
 
         # Add tool results as messages
         for result in state.tool_results:
@@ -483,12 +605,24 @@ Return only the JSON object, no other text."""
         try:
             response = await self.llm.ainvoke(messages)
 
-            self._logger.debug(
-                "LLM response",
+            # Log response details for debugging
+            response_content = response.content if hasattr(response, "content") else ""
+            self._logger.info(
+                "LLM response received",
+                content_length=len(response_content) if response_content else 0,
+                content_preview=response_content[:100] if response_content else "(empty)",
                 has_tool_calls=bool(
                     hasattr(response, "tool_calls") and response.tool_calls
                 ),
             )
+
+            # Check for empty response
+            if not response_content or not response_content.strip():
+                self._logger.warning(
+                    "LLM returned empty response",
+                    llm_type=type(self.llm).__name__,
+                    query_preview=state.query[:100] if state.query else "",
+                )
 
             # Extract tool calls if any
             tool_calls = []
@@ -621,20 +755,45 @@ Return only the JSON object, no other text."""
             has_error=bool(state.error),
         )
 
-        # If we already have a final response, return it
-        if state.final_response:
+        # If we already have a final response (and it's not empty), return it
+        if state.final_response and state.final_response.strip():
             return {}
 
         # Extract from last AI message
         for msg in reversed(state.messages):
             if isinstance(msg, AIMessage):
-                return {"final_response": msg.content}
+                content = msg.content if msg.content else ""
+                # Check for non-empty, meaningful response
+                if content.strip():
+                    return {"final_response": content}
+                else:
+                    self._logger.warning(
+                        "AI message has empty content",
+                        message_type=type(msg).__name__,
+                    )
 
-        # Fallback
+        # Fallback for errors
         if state.error:
             return {"final_response": f"Error: {state.error}"}
 
-        return {"final_response": "No response generated."}
+        # Enhanced fallback with context about what was attempted
+        routing_info = ""
+        if state.routing:
+            routing_info = f" (routing: {state.routing.routing_type.value})"
+
+        self._logger.warning(
+            "No meaningful response from AI",
+            iterations=state.iteration,
+            routing=routing_info,
+            query_preview=state.query[:100] if state.query else "",
+        )
+
+        return {
+            "final_response": (
+                "I processed your request but couldn't generate a complete response. "
+                "Please try rephrasing your question or check the system logs for details."
+            )
+        }
 
 
 # ─────────────────────────────────────────────────────────────────────────────

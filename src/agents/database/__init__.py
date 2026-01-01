@@ -11,7 +11,7 @@ from src.agents.database.troubleshoot import (
 )
 
 __all__ = [
+    "DbAnalysisResult",
     "DbTroubleshootAgent",
     "TroubleshootState",
-    "DbAnalysisResult",
 ]

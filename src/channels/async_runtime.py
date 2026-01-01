@@ -16,8 +16,9 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from collections.abc import Coroutine
 from concurrent.futures import Future, ThreadPoolExecutor
-from typing import Any, Coroutine, TypeVar
+from typing import Any, TypeVar
 
 import structlog
 
@@ -41,7 +42,7 @@ class AsyncRuntime:
     """
 
     _instance: AsyncRuntime | None = None
-    _lock = threading.Lock()
+    _lock = threading.RLock()  # RLock allows reentrant acquisition (get_instance -> start)
 
     def __init__(self):
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -119,7 +120,7 @@ class AsyncRuntime:
 
             self._logger.info("Async runtime stopped")
 
-    def run_coroutine(self, coro: Coroutine[Any, Any, T]) -> T:
+    def run_coroutine(self, coro: Coroutine[Any, Any, T], timeout: float = 300) -> T:
         """
         Run a coroutine in the shared event loop.
 
@@ -127,12 +128,14 @@ class AsyncRuntime:
 
         Args:
             coro: Coroutine to execute
+            timeout: Timeout in seconds (default 300 = 5 minutes)
 
         Returns:
             Result of the coroutine
 
         Raises:
             RuntimeError: If the runtime is not started
+            TimeoutError: If the coroutine times out
             Exception: Any exception raised by the coroutine
         """
         if not self._started or not self._loop:
@@ -141,12 +144,31 @@ class AsyncRuntime:
         # Submit the coroutine to the event loop
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
 
-        # Wait for result with a reasonable timeout
+        # Wait for result with timeout
         try:
-            return future.result(timeout=300)  # 5 minute default timeout
-        except Exception:
-            # Cancel if still running
+            return future.result(timeout=timeout)
+        except TimeoutError:
+            # Cancel the future and log
             future.cancel()
+            self._logger.warning(
+                "Coroutine timed out",
+                timeout=timeout,
+            )
+            raise TimeoutError(f"Coroutine timed out after {timeout}s")
+        except asyncio.CancelledError:
+            # Handle cancellation gracefully
+            self._logger.warning("Coroutine was cancelled")
+            raise TimeoutError("Coroutine was cancelled")
+        except Exception as e:
+            # Cancel if still running and re-raise
+            if not future.done():
+                future.cancel()
+            # Log the error
+            self._logger.error(
+                "Coroutine failed",
+                error=str(e),
+                error_type=type(e).__name__,
+            )
             raise
 
     def run_coroutine_nowait(self, coro: Coroutine[Any, Any, T]) -> Future[T]:
@@ -193,7 +215,7 @@ class AsyncRuntime:
 
 
 # Convenience functions
-def run_async(coro: Coroutine[Any, Any, T]) -> T:
+def run_async(coro: Coroutine[Any, Any, T], timeout: float = 300) -> T:
     """
     Run an async function from sync code.
 
@@ -201,11 +223,39 @@ def run_async(coro: Coroutine[Any, Any, T]) -> T:
 
     Args:
         coro: Coroutine to execute
+        timeout: Timeout in seconds (default 300 = 5 minutes)
 
     Returns:
         Result of the coroutine
+
+    Raises:
+        TimeoutError: If the coroutine times out or is cancelled
+        RuntimeError: If the runtime cannot be started
     """
-    return AsyncRuntime.get_instance().run_coroutine(coro)
+    runtime = AsyncRuntime.get_instance()
+
+    # Ensure runtime is started
+    if not runtime.is_running:
+        logger.warning("AsyncRuntime not running, attempting to start...")
+        runtime.start()
+        # Wait for loop to be ready
+        import time
+        for _ in range(10):
+            if runtime.is_running:
+                break
+            time.sleep(0.1)
+
+    if not runtime.is_running:
+        raise RuntimeError("Failed to start AsyncRuntime")
+
+    try:
+        return runtime.run_coroutine(coro, timeout=timeout)
+    except TimeoutError:
+        # Re-raise with more context
+        raise
+    except asyncio.CancelledError:
+        # Convert to TimeoutError for consistent handling
+        raise TimeoutError("Request was cancelled")
 
 
 def get_shared_loop() -> asyncio.AbstractEventLoop:

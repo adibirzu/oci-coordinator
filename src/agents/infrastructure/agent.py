@@ -31,8 +31,8 @@ from src.agents.base import (
 from src.observability import get_trace_id
 
 if TYPE_CHECKING:
-    from src.memory.manager import SharedMemoryManager
     from src.mcp.catalog import ToolCatalog
+    from src.memory.manager import SharedMemoryManager
 
 logger = structlog.get_logger(__name__)
 
@@ -239,8 +239,8 @@ class InfrastructureAgent(BaseAgent):
 
     def __init__(
         self,
-        memory_manager: "SharedMemoryManager | None" = None,
-        tool_catalog: "ToolCatalog | None" = None,
+        memory_manager: SharedMemoryManager | None = None,
+        tool_catalog: ToolCatalog | None = None,
         config: dict[str, Any] | None = None,
         llm: Any = None,
     ):
@@ -394,15 +394,97 @@ class InfrastructureAgent(BaseAgent):
                 if ocid_match:
                     resource_id = ocid_match.group(0)
 
+            # Resolve compartment name to OCID if not already set
+            compartment_id = state.compartment_id
+            if not compartment_id:
+                compartment_id = await self._resolve_compartment_from_query(state.query)
+
             span.set_attribute("action_type", action_type.value)
             span.set_attribute("has_resource_id", resource_id is not None)
+            span.set_attribute("compartment_resolved", compartment_id is not None)
 
             return {
                 "action_type": action_type,
                 "resource_id": resource_id,
+                "compartment_id": compartment_id,
                 "phase": "gather_inventory",
                 "iteration": state.iteration + 1,
             }
+
+    async def _resolve_compartment_from_query(self, query: str) -> str | None:
+        """
+        Extract and resolve compartment name from user query.
+
+        Handles patterns like:
+        - "in Adrian_birzu compartment"
+        - "compartment Adrian_birzu"
+        - "in the dev compartment"
+        - Just "Adrian_birzu" as a potential compartment name
+
+        Returns:
+            Compartment OCID if found, None otherwise
+        """
+        import re
+        from src.oci.tenancy_manager import TenancyManager
+
+        query_lower = query.lower()
+
+        # Try to extract compartment name from common patterns
+        # \w includes word chars and underscore; also allow hyphens with [\w-]+
+        patterns = [
+            r"(?:in|from|for)\s+(?:the\s+)?([\w-]+)\s+compartment",  # "in Adrian_birzu compartment"
+            r"compartment\s+([\w-]+)",  # "compartment Adrian_birzu"
+            r"(?:in|from|for)\s+compartment\s+([\w-]+)",  # "in compartment dev"
+        ]
+
+        compartment_name = None
+        for pattern in patterns:
+            match = re.search(pattern, query_lower)
+            if match:
+                compartment_name = match.group(1)
+                break
+
+        if not compartment_name:
+            # No pattern matched, try to find any word that might be a compartment
+            # by checking against known compartments
+            pass
+
+        if compartment_name:
+            try:
+                manager = TenancyManager.get_instance()
+                if not manager._initialized:
+                    await manager.initialize()
+
+                # Try exact match first
+                ocid = await manager.get_compartment_ocid(compartment_name)
+                if ocid:
+                    self._logger.info(
+                        "Resolved compartment name to OCID",
+                        name=compartment_name,
+                        ocid=ocid[:40] + "...",
+                    )
+                    return ocid
+
+                # Try search for partial match
+                matches = await manager.search_compartments(compartment_name)
+                if matches:
+                    # Return first match
+                    self._logger.info(
+                        "Found compartment via search",
+                        query=compartment_name,
+                        match=matches[0].name,
+                        ocid=matches[0].id[:40] + "...",
+                    )
+                    return matches[0].id
+
+            except Exception as e:
+                self._logger.warning(
+                    "Compartment resolution failed",
+                    name=compartment_name,
+                    error=str(e),
+                )
+
+        return None
 
     async def _gather_inventory_node(self, state: InfrastructureState) -> dict[str, Any]:
         """Gather infrastructure inventory using MCP tools."""
@@ -630,7 +712,6 @@ class InfrastructureAgent(BaseAgent):
     async def _output_node(self, state: InfrastructureState) -> dict[str, Any]:
         """Prepare infrastructure report with structured formatting."""
         from src.formatting import (
-            ActionButton,
             ListItem,
             MetricValue,
             ResponseFooter,

@@ -22,10 +22,10 @@ import structlog
 if TYPE_CHECKING:
     from langgraph.graph import StateGraph
 
-    from src.agents.skills import SkillDefinition, SkillExecutionResult, SkillExecutor
-    from src.formatting.base import OutputFormat, StructuredResponse
-    from src.memory.manager import SharedMemoryManager
+    from src.agents.skills import SkillExecutionResult, SkillExecutor
+    from src.formatting.base import StructuredResponse
     from src.mcp.catalog import ToolCatalog
+    from src.memory.manager import SharedMemoryManager
 
 logger = structlog.get_logger(__name__)
 

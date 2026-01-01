@@ -79,7 +79,7 @@ class DirectoryLoader:
 
     def _load_file(self, file_path: str) -> Document | None:
         """Load a single file."""
-        with open(file_path, "r", encoding="utf-8") as f:
+        with open(file_path, encoding="utf-8") as f:
             content = f.read()
 
         if not content.strip():
@@ -156,7 +156,7 @@ class MarkdownLoader:
 
     def load_file(self, file_path: str) -> list[Document]:
         """Load a markdown file, optionally splitting by headers."""
-        with open(file_path, "r", encoding="utf-8") as f:
+        with open(file_path, encoding="utf-8") as f:
             content = f.read()
 
         return self.load_text(content, source=file_path)
@@ -317,7 +317,7 @@ class StructuredDataLoader:
             text_field: Field to use as document content (None = full document)
             id_field: Field to use as document ID
         """
-        with open(file_path, "r") as f:
+        with open(file_path) as f:
             data = json.load(f)
 
         if isinstance(data, list):

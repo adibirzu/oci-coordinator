@@ -8,7 +8,12 @@ starting, stopping, and getting instance details.
 import json
 from typing import Any
 
+from opentelemetry import trace
+
 from src.mcp.server.auth import get_compute_client
+
+# Get tracer for compute tools
+_tracer = trace.get_tracer("mcp-oci-compute")
 
 
 async def _list_instances_logic(
@@ -18,50 +23,59 @@ async def _list_instances_logic(
     format: str = "json",
 ) -> str:
     """Internal logic for listing instances."""
-    client = get_compute_client()
-
-    try:
-        kwargs = {"compartment_id": compartment_id, "limit": limit}
+    with _tracer.start_as_current_span("mcp.compute.list_instances") as span:
+        span.set_attribute("compartment_id", compartment_id)
+        span.set_attribute("limit", limit)
         if lifecycle_state:
-            kwargs["lifecycle_state"] = lifecycle_state
+            span.set_attribute("lifecycle_state", lifecycle_state)
 
-        response = client.list_instances(**kwargs)
-        instances = response.data
+        client = get_compute_client()
 
-        if format == "json":
-            return json.dumps(
-                [
-                    {
-                        "name": i.display_name,
-                        "id": i.id,
-                        "state": i.lifecycle_state,
-                        "shape": i.shape,
-                        "availability_domain": i.availability_domain,
-                        "fault_domain": i.fault_domain,
-                        "time_created": str(i.time_created) if i.time_created else None,
-                    }
-                    for i in instances
-                ],
-                indent=2,
-            )
+        try:
+            kwargs = {"compartment_id": compartment_id, "limit": limit}
+            if lifecycle_state:
+                kwargs["lifecycle_state"] = lifecycle_state
 
-        # Markdown table for display
-        if not instances:
-            return "No compute instances found in this compartment."
+            response = client.list_instances(**kwargs)
+            instances = response.data
+            span.set_attribute("instance_count", len(instances))
 
-        lines = [
-            f"Found {len(instances)} compute instances:\n",
-            "| Name | State | Shape | Availability Domain |",
-            "| --- | --- | --- | --- |",
-        ]
-        for i in instances:
-            ad_short = i.availability_domain.split(":")[-1] if i.availability_domain else "N/A"
-            lines.append(f"| {i.display_name} | {i.lifecycle_state} | {i.shape} | {ad_short} |")
+            if format == "json":
+                return json.dumps(
+                    [
+                        {
+                            "name": i.display_name,
+                            "id": i.id,
+                            "state": i.lifecycle_state,
+                            "shape": i.shape,
+                            "availability_domain": i.availability_domain,
+                            "fault_domain": i.fault_domain,
+                            "time_created": str(i.time_created) if i.time_created else None,
+                        }
+                        for i in instances
+                    ],
+                    indent=2,
+                )
 
-        return "\n".join(lines)
+            # Markdown table for display
+            if not instances:
+                return "No compute instances found in this compartment."
 
-    except Exception as e:
-        return f"Error listing instances: {e}"
+            lines = [
+                f"Found {len(instances)} compute instances:\n",
+                "| Name | State | Shape | Availability Domain |",
+                "| --- | --- | --- | --- |",
+            ]
+            for i in instances:
+                ad_short = i.availability_domain.split(":")[-1] if i.availability_domain else "N/A"
+                lines.append(f"| {i.display_name} | {i.lifecycle_state} | {i.shape} | {ad_short} |")
+
+            return "\n".join(lines)
+
+        except Exception as e:
+            span.set_attribute("error", str(e))
+            span.record_exception(e)
+            return f"Error listing instances: {e}"
 
 
 async def _get_instance_logic(instance_id: str, format: str = "json") -> str:
@@ -173,15 +187,14 @@ async def _find_instance_by_name(
                         "shape": i.shape,
                         "compartment_id": i.compartment_id,
                     })
-            else:
-                if search_name in display_name:
-                    matches.append({
-                        "name": i.display_name,
-                        "id": i.id,
-                        "state": i.lifecycle_state,
-                        "shape": i.shape,
-                        "compartment_id": i.compartment_id,
-                    })
+            elif search_name in display_name:
+                matches.append({
+                    "name": i.display_name,
+                    "id": i.id,
+                    "state": i.lifecycle_state,
+                    "shape": i.shape,
+                    "compartment_id": i.compartment_id,
+                })
 
         return matches
 

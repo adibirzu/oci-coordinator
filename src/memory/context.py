@@ -20,11 +20,10 @@ Usage:
 
 from __future__ import annotations
 
-import hashlib
 import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
@@ -54,7 +53,7 @@ class ContextWindow:
     """A window of conversation context."""
 
     thread_id: str
-    summary: Optional[str]  # Summary of older messages
+    summary: str | None  # Summary of older messages
     recent_messages: list[dict[str, Any]]  # Recent messages (uncompressed)
     total_messages: int
     estimated_tokens: int
@@ -83,8 +82,8 @@ class ContextManager:
 
     def __init__(
         self,
-        memory: "SharedMemoryManager",
-        llm: Optional["BaseChatModel"] = None,
+        memory: SharedMemoryManager,
+        llm: BaseChatModel | None = None,
         max_tokens: int = MAX_CONTEXT_TOKENS,
         recent_messages_count: int = RECENT_MESSAGES_TO_KEEP,
     ):

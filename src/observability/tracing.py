@@ -18,18 +18,21 @@ Usage:
 """
 
 import json
-import logging
 import os
-from typing import Any, Sequence
+from collections.abc import Sequence
+from typing import Any
 
 import requests
+import structlog
 from opentelemetry import trace
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
-from opentelemetry.sdk.trace.export import BatchSpanProcessor, SpanExporter, SpanExportResult
+from opentelemetry.sdk.trace.export import (
+    BatchSpanProcessor,
+    SpanExporter,
+    SpanExportResult,
+)
 from opentelemetry.semconv.resource import ResourceAttributes
-
-import structlog
 
 logger = structlog.get_logger(__name__)
 
@@ -255,7 +258,9 @@ def init_tracing(
     if endpoint:
         try:
             # Try OTLP exporter first (preferred)
-            from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+            from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
+                OTLPSpanExporter,
+            )
 
             # Construct OTLP endpoint
             otlp_endpoint = endpoint.rstrip("/")

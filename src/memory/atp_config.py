@@ -55,6 +55,7 @@ class ATPConfig:
         - ATP_USER: Database user (default: ADMIN)
         - ATP_PASSWORD: Database password
         - ATP_CONNECTION_STRING: Alternative full connection string
+        - ATP_THICK_MODE: Set true to force thick mode (requires Instant Client)
 
         Returns:
             ATPConfig instance
@@ -167,11 +168,14 @@ async def create_atp_pool(config: ATPConfig | None = None):
     )
 
     try:
-        # Set wallet location for thick mode if needed
-        if config.wallet_dir:
+        # Use thick mode only if explicitly requested
+        use_thick = os.getenv("ATP_THICK_MODE", "false").lower() == "true"
+        if use_thick and config.wallet_dir:
             oracledb.init_oracle_client(config_dir=config.wallet_dir)
 
-        pool = await oracledb.create_pool_async(
+        # Note: create_pool_async is NOT a coroutine - it returns the pool directly
+        # The "async" refers to the pool type (async-capable), not the creation method
+        pool = oracledb.create_pool_async(
             user=config.user,
             password=config.password,
             dsn=config.get_dsn(),
@@ -212,10 +216,13 @@ async def test_atp_connection(config: ATPConfig | None = None) -> bool:
         return False
 
     try:
-        if config.wallet_dir:
+        use_thick = os.getenv("ATP_THICK_MODE", "false").lower() == "true"
+        if use_thick and config.wallet_dir:
             oracledb.init_oracle_client(config_dir=config.wallet_dir)
 
-        async with await oracledb.connect_async(
+        # Note: connect_async is NOT a coroutine - it returns the connection directly
+        # The "async" refers to the connection type (async-capable), not the creation
+        conn = oracledb.connect_async(
             user=config.user,
             password=config.password,
             dsn=config.get_dsn(),
@@ -223,7 +230,8 @@ async def test_atp_connection(config: ATPConfig | None = None) -> bool:
                 "config_dir": config.wallet_dir,
                 "wallet_password": config.wallet_password,
             } if config.wallet_dir else {}),
-        ) as conn:
+        )
+        async with conn:
             async with conn.cursor() as cursor:
                 await cursor.execute("SELECT 'ATP Connection OK' FROM DUAL")
                 row = await cursor.fetchone()
@@ -238,7 +246,7 @@ async def test_atp_connection(config: ATPConfig | None = None) -> bool:
 # SQL scripts for initializing ATP tables
 INIT_SCHEMA_SQL = """
 -- Agent Memory Table
-CREATE TABLE IF NOT EXISTS agent_memory (
+CREATE TABLE agent_memory (
     id RAW(16) DEFAULT SYS_GUID() PRIMARY KEY,
     key VARCHAR2(512) NOT NULL UNIQUE,
     value CLOB NOT NULL,
@@ -249,7 +257,7 @@ CREATE TABLE IF NOT EXISTS agent_memory (
 );
 
 -- Conversation History Table
-CREATE TABLE IF NOT EXISTS conversation_history (
+CREATE TABLE conversation_history (
     id RAW(16) DEFAULT SYS_GUID() PRIMARY KEY,
     thread_id VARCHAR2(256) NOT NULL,
     message_index NUMBER NOT NULL,
@@ -260,11 +268,11 @@ CREATE TABLE IF NOT EXISTS conversation_history (
     CONSTRAINT conversation_metadata_json CHECK (metadata IS JSON)
 );
 
-CREATE INDEX IF NOT EXISTS idx_conversation_thread
+CREATE INDEX idx_conversation_thread
 ON conversation_history(thread_id, message_index);
 
 -- Agent Registry Table
-CREATE TABLE IF NOT EXISTS agent_registry (
+CREATE TABLE agent_registry (
     agent_id VARCHAR2(256) PRIMARY KEY,
     role VARCHAR2(128) NOT NULL,
     definition CLOB NOT NULL,
@@ -275,7 +283,7 @@ CREATE TABLE IF NOT EXISTS agent_registry (
 );
 
 -- Audit Log Table
-CREATE TABLE IF NOT EXISTS agent_audit_log (
+CREATE TABLE agent_audit_log (
     id RAW(16) DEFAULT SYS_GUID() PRIMARY KEY,
     agent_id VARCHAR2(256),
     action VARCHAR2(256) NOT NULL,
@@ -287,7 +295,7 @@ CREATE TABLE IF NOT EXISTS agent_audit_log (
     created_at TIMESTAMP DEFAULT SYSTIMESTAMP
 );
 
-CREATE INDEX IF NOT EXISTS idx_audit_agent
+CREATE INDEX idx_audit_agent
 ON agent_audit_log(agent_id, created_at DESC);
 """
 
@@ -316,10 +324,12 @@ async def init_atp_schema(config: ATPConfig | None = None) -> bool:
     logger.info("Initializing ATP schema")
 
     try:
-        if config.wallet_dir:
+        use_thick = os.getenv("ATP_THICK_MODE", "false").lower() == "true"
+        if use_thick and config.wallet_dir:
             oracledb.init_oracle_client(config_dir=config.wallet_dir)
 
-        async with await oracledb.connect_async(
+        # Note: connect_async is NOT a coroutine - it returns the connection directly
+        conn = oracledb.connect_async(
             user=config.user,
             password=config.password,
             dsn=config.get_dsn(),
@@ -327,7 +337,8 @@ async def init_atp_schema(config: ATPConfig | None = None) -> bool:
                 "config_dir": config.wallet_dir,
                 "wallet_password": config.wallet_password,
             } if config.wallet_dir else {}),
-        ) as conn:
+        )
+        async with conn:
             async with conn.cursor() as cursor:
                 # Execute each statement separately
                 for statement in INIT_SCHEMA_SQL.split(";"):
@@ -340,7 +351,11 @@ async def init_atp_schema(config: ATPConfig | None = None) -> bool:
                             error, = e.args
                             # ORA-00955: name already used - table exists
                             # ORA-01408: index already exists
-                            if error.code not in (955, 1408):
+                            statement_upper = statement.upper()
+                            ignore_codes = {955, 1408}
+                            if error.code == 942 and statement_upper.startswith("CREATE INDEX"):
+                                continue
+                            if error.code not in ignore_codes:
                                 raise
                 await conn.commit()
 

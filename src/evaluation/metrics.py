@@ -12,7 +12,7 @@ from typing import Any
 
 import structlog
 
-from src.evaluation.dataset import Difficulty, EvaluationDataset, TestCategory
+from src.evaluation.dataset import EvaluationDataset
 from src.evaluation.judge import JudgmentResult, JudgmentScore
 
 logger = structlog.get_logger(__name__)
@@ -213,8 +213,8 @@ class MetricsReport:
             "",
             "## Summary",
             "",
-            f"| Metric | Value | Target |",
-            f"|--------|-------|--------|",
+            "| Metric | Value | Target |",
+            "|--------|-------|--------|",
             f"| Total Cases | {self.total_cases} | - |",
             f"| Pass Rate | {self.overall_pass_rate:.1%} | {self.task_success_target:.0%} |",
             f"| Workflow Routing | {self.workflow_routing_ratio:.1%} | {self.workflow_routing_target:.0%} |",
@@ -222,8 +222,8 @@ class MetricsReport:
             "",
             "### Score Breakdown",
             "",
-            f"| Score Type | Value |",
-            f"|------------|-------|",
+            "| Score Type | Value |",
+            "|------------|-------|",
             f"| Passed | {self.passed} |",
             f"| Partial | {self.partial} |",
             f"| Failed | {self.failed} |",
@@ -231,8 +231,8 @@ class MetricsReport:
             "",
             "### Score Components",
             "",
-            f"| Component | Score |",
-            f"|-----------|-------|",
+            "| Component | Score |",
+            "|-----------|-------|",
             f"| Correctness | {self.avg_correctness_score:.2f} |",
             f"| Quality | {self.avg_quality_score:.2f} |",
             f"| Safety | {self.avg_safety_score:.2f} |",
@@ -240,8 +240,8 @@ class MetricsReport:
             "",
             "### Latency",
             "",
-            f"| Percentile | Value |",
-            f"|------------|-------|",
+            "| Percentile | Value |",
+            "|------------|-------|",
             f"| Average | {self.avg_latency_ms:.0f}ms |",
             f"| P50 | {self.p50_latency_ms:.0f}ms |",
             f"| P95 | {self.p95_latency_ms:.0f}ms |",

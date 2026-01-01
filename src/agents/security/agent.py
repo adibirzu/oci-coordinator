@@ -8,7 +8,7 @@ and compliance monitoring in OCI.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import structlog
 from langgraph.graph import END, StateGraph
@@ -19,10 +19,6 @@ from src.agents.base import (
     BaseAgent,
     KafkaTopics,
 )
-
-if TYPE_CHECKING:
-    from src.memory.manager import SharedMemoryManager
-    from src.mcp.catalog import ToolCatalog
 
 logger = structlog.get_logger(__name__)
 

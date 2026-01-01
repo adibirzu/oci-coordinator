@@ -8,7 +8,7 @@ and optimization recommendations in OCI.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import structlog
 from langgraph.graph import END, StateGraph
@@ -19,10 +19,6 @@ from src.agents.base import (
     BaseAgent,
     KafkaTopics,
 )
-
-if TYPE_CHECKING:
-    from src.memory.manager import SharedMemoryManager
-    from src.mcp.catalog import ToolCatalog
 
 logger = structlog.get_logger(__name__)
 
@@ -97,12 +93,12 @@ class FinOpsAgent(BaseAgent):
                 "and optimization recommendations in OCI."
             ),
             mcp_tools=[
-                "oci_cost_get_summary",
-                "oci_cost_get_by_service",
-                "oci_cost_get_forecast",
-                "oci_cost_list_budgets",
+                "oci_cost_get_summary",  # Built-in tool
+                # Additional tools from finopsai server (if available):
+                # "oci_cost_get_by_service", "oci_cost_get_forecast",
+                # "oci_cost_list_budgets", "oci_cost_spikes"
             ],
-            mcp_servers=["oci-unified", "finopsai-mcp"],
+            mcp_servers=["oci-unified", "finopsai"],  # finopsai, not finopsai-mcp
         )
 
     def build_graph(self) -> StateGraph:
@@ -147,6 +143,8 @@ class FinOpsAgent(BaseAgent):
 
     async def _get_costs_node(self, state: FinOpsState) -> dict[str, Any]:
         """Get cost data from OCI."""
+        import json
+
         self._logger.info("Getting cost data", time_range=state.time_range)
 
         cost_summary = {}
@@ -154,28 +152,71 @@ class FinOpsAgent(BaseAgent):
         total_cost = 0.0
 
         if self.tools:
+            # Parse days from time_range (e.g., "30d" -> 30)
+            days = 30
+            if state.time_range:
+                try:
+                    days = int(state.time_range.replace("d", ""))
+                except ValueError:
+                    pass
+
+            # Get cost summary (the main tool that exists)
             try:
-                summary = await self.call_tool(
+                summary_result = await self.call_tool(
                     "oci_cost_get_summary",
                     {
-                        "compartment_id": state.compartment_id or "default",
-                        "time_range": state.time_range,
+                        "compartment_id": state.compartment_id or "ocid1.tenancy.oc1..example",
+                        "days": days,
                     },
                 )
-                if isinstance(summary, dict):
-                    cost_summary = summary
-                    total_cost = summary.get("total", 0.0)
 
-                by_service = await self.call_tool(
-                    "oci_cost_get_by_service",
-                    {
-                        "compartment_id": state.compartment_id or "default",
-                        "time_range": state.time_range,
-                    },
-                )
-                if isinstance(by_service, list):
-                    cost_by_service = by_service
+                # Parse JSON response
+                if isinstance(summary_result, str):
+                    try:
+                        summary_data = json.loads(summary_result)
+                    except json.JSONDecodeError:
+                        summary_data = {}
+                elif isinstance(summary_result, dict):
+                    summary_data = summary_result
+                else:
+                    summary_data = {}
 
+                # Check for error in response
+                if summary_data.get("error"):
+                    self._logger.warning("Cost API returned error", error=summary_data["error"])
+                else:
+                    cost_summary = summary_data.get("summary", {})
+
+                    # Parse total from the formatted string (e.g., "1,234.56 USD")
+                    total_str = cost_summary.get("total", "0")
+                    try:
+                        total_cost = float(total_str.replace(",", "").split()[0])
+                    except (ValueError, IndexError):
+                        total_cost = 0.0
+
+                    # Extract service breakdown
+                    services = summary_data.get("services", [])
+                    for svc in services:
+                        cost_str = svc.get("cost", "0")
+                        try:
+                            cost_val = float(cost_str.replace(",", "").split()[0])
+                        except (ValueError, IndexError):
+                            cost_val = 0.0
+                        cost_by_service.append({
+                            "name": svc.get("service", "Unknown"),
+                            "cost": cost_val,
+                            "percent": svc.get("percent", "0%"),
+                        })
+
+                    self._logger.info(
+                        "Cost data retrieved",
+                        total=total_cost,
+                        services_count=len(cost_by_service),
+                    )
+
+            except ValueError as e:
+                # Tool not found - this is expected if only built-in tools available
+                self._logger.warning("Cost tool not available", error=str(e))
             except Exception as e:
                 self._logger.warning("Cost retrieval failed", error=str(e))
 
@@ -187,21 +228,21 @@ class FinOpsAgent(BaseAgent):
         }
 
     async def _detect_anomalies_node(self, state: FinOpsState) -> dict[str, Any]:
-        """Detect cost anomalies using finopsai-mcp tools."""
+        """Detect cost anomalies - uses finopsai tools if available, otherwise analyzes service data."""
         self._logger.info("Detecting cost anomalies")
 
         anomalies = []
         cost_trend = "stable"
 
-        if self.tools:
+        # Try finopsai spike detection if tool is available
+        if self.tools and self.tools.get_tool("oci_cost_spikes"):
             try:
-                # Use finopsai-mcp spike detection tool
                 result = await self.call_tool(
                     "oci_cost_spikes",
                     {
                         "compartment_id": state.compartment_id or "default",
                         "time_range": state.time_range,
-                        "threshold_percent": 20,  # Flag spikes > 20%
+                        "threshold_percent": 20,
                     },
                 )
                 if isinstance(result, dict):
@@ -216,7 +257,6 @@ class FinOpsAgent(BaseAgent):
                             "severity": "high" if spike.get("percent_change", 0) > 50 else "medium",
                         })
 
-                    # Determine trend from spike data
                     if spikes:
                         avg_change = sum(s.get("percent_change", 0) for s in spikes) / len(spikes)
                         if avg_change > 10:
@@ -225,21 +265,21 @@ class FinOpsAgent(BaseAgent):
                             cost_trend = "decreasing"
 
             except Exception as e:
-                self._logger.warning("Anomaly detection failed", error=str(e))
+                self._logger.debug("Spike detection tool not available", error=str(e))
 
-            # Fallback: analyze cost by service for anomalies
-            if not anomalies and state.cost_by_service:
-                # Flag services consuming > 40% of budget
-                for service in state.cost_by_service:
-                    cost = service.get("cost", 0)
-                    if state.total_cost > 0 and cost / state.total_cost > 0.4:
-                        anomalies.append({
-                            "type": "high_concentration",
-                            "description": f"{service.get('name', 'Unknown')} accounts for {cost/state.total_cost*100:.1f}% of total cost",
-                            "service": service.get("name"),
-                            "amount": cost,
-                            "severity": "medium",
-                        })
+        # Fallback: analyze cost by service for anomalies (always run if no anomalies found)
+        if not anomalies and state.cost_by_service:
+            # Flag services consuming > 40% of budget
+            for service in state.cost_by_service:
+                cost = service.get("cost", 0)
+                if state.total_cost > 0 and cost / state.total_cost > 0.4:
+                    anomalies.append({
+                        "type": "high_concentration",
+                        "description": f"{service.get('name', 'Unknown')} accounts for {cost/state.total_cost*100:.1f}% of total cost",
+                        "service": service.get("name"),
+                        "amount": cost,
+                        "severity": "medium",
+                    })
 
         return {
             "cost_anomalies": anomalies,
@@ -250,15 +290,14 @@ class FinOpsAgent(BaseAgent):
     async def _generate_recommendations_node(
         self, state: FinOpsState
     ) -> dict[str, Any]:
-        """Generate optimization recommendations using finopsai-mcp rightsizing tools."""
+        """Generate optimization recommendations - uses finopsai tools if available."""
         self._logger.info("Generating optimization recommendations")
 
         recommendations = []
 
-        if self.tools:
-            # Try to get rightsizing recommendations from finopsai-mcp
+        # Try rightsizing recommendations from finopsai if tool is available
+        if self.tools and self.tools.get_tool("oci_cost_service_drilldown"):
             try:
-                # Get compute rightsizing recommendations
                 result = await self.call_tool(
                     "oci_cost_service_drilldown",
                     {
@@ -283,7 +322,8 @@ class FinOpsAgent(BaseAgent):
             except Exception as e:
                 self._logger.debug("Rightsizing API not available", error=str(e))
 
-            # Try budget status check
+        # Try budget status check if tool is available
+        if self.tools and self.tools.get_tool("oci_cost_budget_status"):
             try:
                 budget_result = await self.call_tool(
                     "oci_cost_budget_status",

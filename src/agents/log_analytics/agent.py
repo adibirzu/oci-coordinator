@@ -8,7 +8,7 @@ log search, pattern detection, and correlation analysis.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import structlog
 from langgraph.graph import END, StateGraph
@@ -19,10 +19,6 @@ from src.agents.base import (
     BaseAgent,
     KafkaTopics,
 )
-
-if TYPE_CHECKING:
-    from src.memory.manager import SharedMemoryManager
-    from src.mcp.catalog import ToolCatalog
 
 logger = structlog.get_logger(__name__)
 
@@ -97,12 +93,27 @@ class LogAnalyticsAgent(BaseAgent):
                 "and correlation analysis across services."
             ),
             mcp_tools=[
+                # OCI Unified observability tools
                 "oci_logging_list_log_groups",
                 "oci_logging_search_logs",
                 "oci_logging_get_log",
                 "oci_observability_query_logs",
+                # Database Observatory Logan tools
+                "oci_logan_execute_query",
+                "oci_logan_list_sources",
+                "oci_logan_list_entities",
+                "oci_logan_list_parsers",
+                "oci_logan_list_labels",
+                "oci_logan_list_groups",
+                "oci_logan_run_security_query",
+                "oci_logan_detect_anomalies",
+                "oci_logan_get_summary",
+                "oci_logan_suggest_query",
+                "oci_logan_list_active_sources",
+                "oci_logan_get_entity_logs",
+                "oci_logan_list_skills",
             ],
-            mcp_servers=["oci-unified", "logan"],
+            mcp_servers=["oci-unified", "database-observatory"],
         )
 
     def build_graph(self) -> StateGraph:

@@ -50,6 +50,9 @@ _catalog: ToolCatalog | None = None
 def configure_logging() -> None:
     """Configure structlog to route through Python logging for OCI Logging integration."""
     # Shared processors for structlog
+    # Note: format_exc_info is NOT included because ConsoleRenderer handles exceptions
+    # Including it would cause the warning:
+    # "Remove format_exc_info from your processor chain if you want pretty exceptions"
     shared_processors = [
         structlog.contextvars.merge_contextvars,
         structlog.stdlib.add_logger_name,
@@ -57,7 +60,6 @@ def configure_logging() -> None:
         structlog.stdlib.PositionalArgumentsFormatter(),
         structlog.processors.TimeStamper(fmt="iso"),
         structlog.processors.StackInfoRenderer(),
-        structlog.processors.format_exc_info,
         structlog.processors.UnicodeDecoder(),
     ]
 
@@ -82,6 +84,7 @@ def configure_logging() -> None:
     console_handler.setLevel(logging.DEBUG)
 
     # Use structlog's ProcessorFormatter for nice console output
+    # ConsoleRenderer handles exception formatting automatically
     formatter = structlog.stdlib.ProcessorFormatter(
         processor=structlog.dev.ConsoleRenderer(colors=True),
         foreign_pre_chain=shared_processors,
@@ -99,9 +102,27 @@ async def initialize_coordinator() -> None:
     """Initialize the coordinator and all components."""
     logger.info("Initializing OCI AI Agent Coordinator")
 
-    # Initialize observability first
+    # Initialize observability first (tracing + logging)
+    # This sets up the tracer provider for all components
     init_observability(agent_name="coordinator")
-    logger.info("Observability initialized")
+
+    # Initialize OCI Logging handlers for ALL agents
+    # Each agent gets its own log stream for filtering in OCI Logging
+    from src.observability.oci_logging import init_oci_logging
+    agent_names = [
+        "db-troubleshoot-agent",
+        "log-analytics-agent",
+        "security-threat-agent",
+        "finops-agent",
+        "infrastructure-agent",
+        "slack-handler",
+    ]
+    for agent_name in agent_names:
+        handler = init_oci_logging(agent_name=agent_name)
+        if handler:
+            logger.debug(f"OCI Logging initialized for {agent_name}")
+
+    logger.info("Observability initialized", agents=len(agent_names) + 1)
 
     # Start OCA callback server for OAuth authentication
     # This handles redirects from Oracle SSO when users log in via Slack

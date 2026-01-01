@@ -7,8 +7,6 @@ documentation, and other markdown-supporting environments.
 
 from __future__ import annotations
 
-from typing import Any
-
 from src.formatting.base import (
     BaseFormatter,
     CodeBlock,
@@ -277,7 +275,7 @@ class MarkdownFormatter(BaseFormatter):
 
         return lines
 
-    def _format_footer(self, footer: "ResponseFooter") -> list[str]:
+    def _format_footer(self, footer: ResponseFooter) -> list[str]:
         """Format footer."""
         lines = []
 

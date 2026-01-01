@@ -21,12 +21,11 @@ import logging
 import os
 import queue
 import threading
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
-from opentelemetry import trace
-
 import structlog
+from opentelemetry import trace
 
 logger = structlog.get_logger(__name__)
 
@@ -142,8 +141,9 @@ class OCILoggingHandler(logging.Handler):
     def _init_oci_client(self) -> None:
         """Initialize OCI Logging Ingestion client."""
         try:
-            import oci
             from oci.loggingingestion import LoggingClient
+
+            import oci
 
             config = oci.config.from_file(profile_name=self.profile)
 
@@ -212,7 +212,11 @@ class OCILoggingHandler(logging.Handler):
             return
 
         try:
-            from oci.loggingingestion.models import LogEntry, LogEntryBatch, PutLogsDetails
+            from oci.loggingingestion.models import (
+                LogEntry,
+                LogEntryBatch,
+                PutLogsDetails,
+            )
 
             log_entries = [
                 LogEntry(
@@ -229,7 +233,7 @@ class OCILoggingHandler(logging.Handler):
                 source=f"oci-ai-coordinator/{self.agent_name}",
                 type="agent-logs",
                 subject=AGENT_LOG_IDS.get(self.agent_name, self.agent_name),
-                defaultlogentrytime=datetime.now(timezone.utc).isoformat(),
+                defaultlogentrytime=datetime.now(UTC).isoformat(),
             )
 
             put_logs_details = PutLogsDetails(
@@ -269,7 +273,7 @@ class OCILoggingHandler(logging.Handler):
                 "agent": self.agent_name,
                 "component": getattr(record, "component", None),
                 "timestamp": datetime.fromtimestamp(
-                    record.created, tz=timezone.utc
+                    record.created, tz=UTC
                 ).isoformat(),
             }
 
@@ -281,7 +285,8 @@ class OCILoggingHandler(logging.Handler):
 
             # Add exception info if present
             if record.exc_info:
-                log_data["exception"] = self.formatException(record.exc_info)
+                import traceback
+                log_data["exception"] = "".join(traceback.format_exception(*record.exc_info))
 
             # Add extra fields from structlog and agent context
             extra_fields = [
@@ -296,7 +301,7 @@ class OCILoggingHandler(logging.Handler):
             entry = {
                 "id": f"{record.created}-{id(record)}",
                 "time": datetime.fromtimestamp(
-                    record.created, tz=timezone.utc
+                    record.created, tz=UTC
                 ).isoformat(),
                 "data": log_data,
             }

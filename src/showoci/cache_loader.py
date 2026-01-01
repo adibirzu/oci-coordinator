@@ -8,13 +8,13 @@ OCI Resource Cache for fast agent access.
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import structlog
 
 from src.cache.oci_resource_cache import OCIResourceCache
-from src.showoci.runner import ShowOCIRunner, ShowOCIResult, ShowOCIConfig
+from src.showoci.runner import ShowOCIConfig, ShowOCIResult, ShowOCIRunner
 
 logger = structlog.get_logger(__name__)
 
@@ -80,7 +80,7 @@ class ShowOCICacheLoader:
             Load statistics
         """
         self._logger.info("Loading profile", profile=profile)
-        start_time = datetime.now(timezone.utc)
+        start_time = datetime.now(UTC)
 
         config = ShowOCIConfig(
             profile=profile,
@@ -104,9 +104,9 @@ class ShowOCICacheLoader:
         stats = await self._load_result_to_cache(cache, result)
 
         # Update last load timestamp
-        self._last_load[profile] = datetime.now(timezone.utc).isoformat()
+        self._last_load[profile] = datetime.now(UTC).isoformat()
 
-        duration = (datetime.now(timezone.utc) - start_time).total_seconds()
+        duration = (datetime.now(UTC) - start_time).total_seconds()
 
         self._logger.info(
             "Profile loaded",
@@ -196,14 +196,14 @@ class ShowOCICacheLoader:
             Combined statistics for all profiles
         """
         self._logger.info("Starting full cache load", profiles=self.profiles)
-        start_time = datetime.now(timezone.utc)
+        start_time = datetime.now(UTC)
 
         results = []
         for profile in self.profiles:
             result = await self.load_profile(profile)
             results.append(result)
 
-        duration = (datetime.now(timezone.utc) - start_time).total_seconds()
+        duration = (datetime.now(UTC) - start_time).total_seconds()
 
         # Aggregate stats
         total_resources = {
@@ -228,7 +228,7 @@ class ShowOCICacheLoader:
             "total_duration_seconds": duration,
             "total_resources": total_resources,
             "profile_results": results,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
         }
 
         self._logger.info("Full cache load complete", summary=summary)

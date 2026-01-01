@@ -22,9 +22,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any, Iterator, Optional, Sequence, Tuple
+from typing import Any
 
 import structlog
 from langgraph.checkpoint.base import (
@@ -45,7 +46,7 @@ class CheckpointRecord:
     thread_id: str
     checkpoint_ns: str
     checkpoint_id: str
-    parent_checkpoint_id: Optional[str]
+    parent_checkpoint_id: str | None
     checkpoint_data: str  # JSON string
     metadata: dict
     created_at: datetime
@@ -95,7 +96,7 @@ class ATPCheckpointer(BaseCheckpointSaver):
         cls,
         atp_config: dict | None = None,
         redis_url: str | None = None,
-    ) -> "ATPCheckpointer":
+    ) -> ATPCheckpointer:
         """
         Factory method to create and initialize checkpointer.
 
@@ -162,20 +163,19 @@ class ATPCheckpointer(BaseCheckpointSaver):
             """,
         ]
 
-        async with self._pool.acquire() as conn:
-            async with conn.cursor() as cursor:
-                for ddl in ddl_statements:
-                    try:
-                        await cursor.execute(ddl)
-                    except Exception as e:
-                        # ORA-00955: table already exists
-                        # ORA-01408: index already exists
-                        if hasattr(e, "args") and len(e.args) > 0:
-                            err = e.args[0]
-                            if hasattr(err, "code") and err.code in (955, 1408):
-                                continue
-                        self._logger.debug("DDL already exists", error=str(e))
-                await conn.commit()
+        async with self._pool.acquire() as conn, conn.cursor() as cursor:
+            for ddl in ddl_statements:
+                try:
+                    await cursor.execute(ddl)
+                except Exception as e:
+                    # ORA-00955: table already exists
+                    # ORA-01408: index already exists
+                    if hasattr(e, "args") and len(e.args) > 0:
+                        err = e.args[0]
+                        if hasattr(err, "code") and err.code in (955, 1408):
+                            continue
+                    self._logger.debug("DDL already exists", error=str(e))
+            await conn.commit()
 
         self._logger.info("ATP checkpoint schema initialized")
 
@@ -187,7 +187,7 @@ class ATPCheckpointer(BaseCheckpointSaver):
 
     async def _get_from_cache(
         self, thread_id: str, checkpoint_ns: str, checkpoint_id: str = ""
-    ) -> Optional[str]:
+    ) -> str | None:
         """Get checkpoint from Redis cache."""
         if not self._redis:
             return None
@@ -222,13 +222,17 @@ class ATPCheckpointer(BaseCheckpointSaver):
 
     def _serialize_checkpoint(self, checkpoint: Checkpoint) -> str:
         """Serialize checkpoint to JSON string."""
-        return json.dumps(self.serde.dumps(checkpoint), default=str)
+        # dumps_typed returns (type_name, value_data)
+        type_name, value_data = self.serde.dumps_typed(checkpoint)
+        return json.dumps({"type": type_name, "data": value_data}, default=str)
 
     def _deserialize_checkpoint(self, data: str) -> Checkpoint:
         """Deserialize checkpoint from JSON string."""
-        return self.serde.loads(json.loads(data))
+        parsed = json.loads(data)
+        # loads_typed takes (type_name, value_data)
+        return self.serde.loads_typed((parsed["type"], parsed["data"]))
 
-    async def aget_tuple(self, config: dict) -> Optional[CheckpointTuple]:
+    async def aget_tuple(self, config: dict) -> CheckpointTuple | None:
         """
         Get checkpoint tuple for a thread.
 
@@ -413,10 +417,9 @@ class ATPCheckpointer(BaseCheckpointSaver):
         )
 
         # Save to ATP
-        async with self._pool.acquire() as conn:
-            async with conn.cursor() as cursor:
-                await cursor.execute(
-                    """
+        async with self._pool.acquire() as conn, conn.cursor() as cursor:
+            await cursor.execute(
+                """
                     MERGE INTO langgraph_checkpoints t
                     USING (SELECT :thread_id as thread_id,
                                   :checkpoint_ns as checkpoint_ns,
@@ -434,16 +437,16 @@ class ATPCheckpointer(BaseCheckpointSaver):
                         VALUES (:thread_id, :checkpoint_ns, :checkpoint_id,
                                 :parent_id, :checkpoint_data, :metadata)
                     """,
-                    {
-                        "thread_id": thread_id,
-                        "checkpoint_ns": checkpoint_ns,
-                        "checkpoint_id": checkpoint_id,
-                        "parent_id": parent_checkpoint_id,
-                        "checkpoint_data": checkpoint_json,
-                        "metadata": metadata_json,
-                    },
-                )
-                await conn.commit()
+                {
+                    "thread_id": thread_id,
+                    "checkpoint_ns": checkpoint_ns,
+                    "checkpoint_id": checkpoint_id,
+                    "parent_id": parent_checkpoint_id,
+                    "checkpoint_data": checkpoint_json,
+                    "metadata": metadata_json,
+                },
+            )
+            await conn.commit()
 
         # Update cache
         await self._set_cache(
@@ -467,7 +470,7 @@ class ATPCheckpointer(BaseCheckpointSaver):
     async def aput_writes(
         self,
         config: dict,
-        writes: Sequence[Tuple[str, Any]],
+        writes: Sequence[tuple[str, Any]],
         task_id: str,
     ) -> None:
         """
@@ -482,14 +485,13 @@ class ATPCheckpointer(BaseCheckpointSaver):
         checkpoint_ns = config["configurable"].get("checkpoint_ns", "")
         checkpoint_id = config["configurable"]["checkpoint_id"]
 
-        async with self._pool.acquire() as conn:
-            async with conn.cursor() as cursor:
-                for channel, value in writes:
-                    type_name, value_data = self.serde.dumps_typed(value)
-                    value_json = json.dumps(value_data, default=str)
+        async with self._pool.acquire() as conn, conn.cursor() as cursor:
+            for channel, value in writes:
+                type_name, value_data = self.serde.dumps_typed(value)
+                value_json = json.dumps(value_data, default=str)
 
-                    await cursor.execute(
-                        """
+                await cursor.execute(
+                    """
                         MERGE INTO langgraph_checkpoint_writes t
                         USING (SELECT :thread_id as thread_id,
                                       :checkpoint_ns as checkpoint_ns,
@@ -509,25 +511,25 @@ class ATPCheckpointer(BaseCheckpointSaver):
                             VALUES (:thread_id, :checkpoint_ns, :checkpoint_id,
                                     :task_id, :channel, :type_name, :value_json)
                         """,
-                        {
-                            "thread_id": thread_id,
-                            "checkpoint_ns": checkpoint_ns,
-                            "checkpoint_id": checkpoint_id,
-                            "task_id": task_id,
-                            "channel": channel,
-                            "type_name": type_name,
-                            "value_json": value_json,
-                        },
-                    )
-                await conn.commit()
+                    {
+                        "thread_id": thread_id,
+                        "checkpoint_ns": checkpoint_ns,
+                        "checkpoint_id": checkpoint_id,
+                        "task_id": task_id,
+                        "channel": channel,
+                        "type_name": type_name,
+                        "value_json": value_json,
+                    },
+                )
+            await conn.commit()
 
     async def alist(
         self,
-        config: Optional[dict],
+        config: dict | None,
         *,
-        filter: Optional[dict] = None,
-        before: Optional[dict] = None,
-        limit: Optional[int] = None,
+        filter: dict | None = None,
+        before: dict | None = None,
+        limit: int | None = None,
     ) -> list[CheckpointTuple]:
         """
         List checkpoints for a thread.
@@ -639,28 +641,27 @@ class ATPCheckpointer(BaseCheckpointSaver):
         """
         retention = days or self._retention_days
 
-        async with self._pool.acquire() as conn:
-            async with conn.cursor() as cursor:
-                # Delete old writes first (FK constraint)
-                await cursor.execute(
-                    """
+        async with self._pool.acquire() as conn, conn.cursor() as cursor:
+            # Delete old writes first (FK constraint)
+            await cursor.execute(
+                """
                     DELETE FROM langgraph_checkpoint_writes
                     WHERE created_at < SYSTIMESTAMP - INTERVAL :days DAY
                     """,
-                    {"days": str(retention)},
-                )
+                {"days": str(retention)},
+            )
 
-                # Delete old checkpoints
-                await cursor.execute(
-                    """
+            # Delete old checkpoints
+            await cursor.execute(
+                """
                     DELETE FROM langgraph_checkpoints
                     WHERE created_at < SYSTIMESTAMP - INTERVAL :days DAY
                     """,
-                    {"days": str(retention)},
-                )
+                {"days": str(retention)},
+            )
 
-                deleted = cursor.rowcount
-                await conn.commit()
+            deleted = cursor.rowcount
+            await conn.commit()
 
         self._logger.info(
             "Cleaned up old checkpoints",
@@ -671,7 +672,7 @@ class ATPCheckpointer(BaseCheckpointSaver):
         return deleted
 
     # Synchronous methods required by LangGraph (delegate to async)
-    def get_tuple(self, config: dict) -> Optional[CheckpointTuple]:
+    def get_tuple(self, config: dict) -> CheckpointTuple | None:
         """Sync wrapper for aget_tuple."""
         try:
             loop = asyncio.get_running_loop()
@@ -718,7 +719,7 @@ class ATPCheckpointer(BaseCheckpointSaver):
     def put_writes(
         self,
         config: dict,
-        writes: Sequence[Tuple[str, Any]],
+        writes: Sequence[tuple[str, Any]],
         task_id: str,
     ) -> None:
         """Sync wrapper for aput_writes."""
@@ -739,11 +740,11 @@ class ATPCheckpointer(BaseCheckpointSaver):
 
     def list(
         self,
-        config: Optional[dict],
+        config: dict | None,
         *,
-        filter: Optional[dict] = None,
-        before: Optional[dict] = None,
-        limit: Optional[int] = None,
+        filter: dict | None = None,
+        before: dict | None = None,
+        limit: int | None = None,
     ) -> Iterator[CheckpointTuple]:
         """Sync wrapper for alist."""
         try:

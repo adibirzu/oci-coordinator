@@ -61,23 +61,28 @@ async def test_list_vcns_logic():
 
 @pytest.mark.asyncio
 async def test_get_cost_summary_logic():
-    """Verify get_cost_summary tool logic."""
+    """Verify get_cost_summary tool logic returns structured JSON data."""
     from src.mcp.server.tools.cost import _get_cost_summary_logic
-    
+    import json
+
     mock_usage = MagicMock()
     mock_item = MagicMock()
     mock_item.computed_amount = 100.5
     mock_item.currency = "USD"
+    mock_item.service = "Compute"
     mock_collection = MagicMock()
     mock_collection.items = [mock_item]
     mock_response = MagicMock()
     mock_response.data = mock_collection
     mock_usage.request_summarized_usages.return_value = mock_response
-    
+
     with patch("src.mcp.server.tools.cost.get_usage_client", return_value=mock_usage):
-        result = await _get_cost_summary_logic(compartment_id="test-comp", format="markdown")
-        assert "100.5" in result
-        assert "USD" in result
+        result = await _get_cost_summary_logic(compartment_id="test-comp")
+        # Function returns JSON string
+        parsed = json.loads(result)
+        assert parsed["type"] == "cost_summary"
+        assert "100" in parsed["summary"]["total"]  # Check total contains the amount
+        assert "USD" in parsed["summary"]["total"]
 
 @pytest.mark.asyncio
 async def test_troubleshoot_instance_logic():

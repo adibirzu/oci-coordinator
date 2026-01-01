@@ -4,6 +4,15 @@
 # This file defines the MCP servers available to the OCI AI Agent Coordinator.
 # Users can modify this file to add, remove, or configure MCP servers.
 #
+# DISCLAIMER: The external MCP servers referenced here are personal projects
+# created to demonstrate OCI AI integration capabilities. These are NOT
+# official Oracle products and are not endorsed by Oracle Corporation.
+#
+# External MCP Server Repositories:
+# - database-observatory: https://github.com/adibirzu/mcp-oci-database-observatory
+# - oci-infrastructure (mcp-oci): https://github.com/adibirzu/mcp-oci
+# - finopsai-mcp: https://github.com/adibirzu/finopsai-mcp
+#
 # Transport Types:
 # - stdio: Spawns a subprocess and communicates via stdin/stdout
 # - http: Sends JSON-RPC requests over HTTP POST

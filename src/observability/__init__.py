@@ -16,6 +16,14 @@ Quick Start:
     trace_id = get_trace_id()
 """
 
+from src.observability.oci_logging import (
+    AGENT_LOG_IDS,
+    build_apm_link,
+    get_trace_context,
+    get_trace_id,
+    init_oci_logging,
+    shutdown_oci_logging,
+)
 from src.observability.tracing import (
     SERVICE_NAMES,
     force_flush_traces,
@@ -25,14 +33,6 @@ from src.observability.tracing import (
     is_otel_enabled,
     shutdown_tracing,
     truncate,
-)
-from src.observability.oci_logging import (
-    AGENT_LOG_IDS,
-    build_apm_link,
-    get_trace_context,
-    get_trace_id,
-    init_oci_logging,
-    shutdown_oci_logging,
 )
 
 

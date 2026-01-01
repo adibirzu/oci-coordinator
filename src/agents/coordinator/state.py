@@ -7,9 +7,10 @@ including intent classification, workflow routing, and agent context.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Annotated, Any, Sequence
+from typing import Annotated, Any
 
 from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
@@ -332,5 +333,5 @@ def determine_routing(intent: IntentClassification) -> RoutingDecision:
         routing_type=RoutingType.DIRECT,
         target=None,
         confidence=intent.confidence,
-        reasoning=f"No workflow/agent match - direct LLM response",
+        reasoning="No workflow/agent match - direct LLM response",
     )

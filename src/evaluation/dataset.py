@@ -12,8 +12,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-import yaml
 import structlog
+import yaml
 
 logger = structlog.get_logger(__name__)
 
@@ -272,7 +272,7 @@ def load_dataset(path: str | Path) -> EvaluationDataset:
     path = Path(path)
     logger.info("Loading evaluation dataset", path=str(path))
 
-    with open(path, "r") as f:
+    with open(path) as f:
         data = yaml.safe_load(f)
 
     dataset = EvaluationDataset.from_dict(data)

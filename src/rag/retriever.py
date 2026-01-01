@@ -9,13 +9,12 @@ from __future__ import annotations
 
 import hashlib
 import os
-import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import structlog
 
-from src.rag.embeddings import OCIEmbeddings, get_embeddings
+from src.rag.embeddings import get_embeddings
 from src.rag.vector_store import Document, RedisVectorStore, SearchResult
 
 if TYPE_CHECKING:
@@ -69,7 +68,7 @@ class RAGRetriever:
     def __init__(
         self,
         namespace: str = "default",
-        embeddings: "Embeddings | None" = None,
+        embeddings: Embeddings | None = None,
         redis_url: str | None = None,
         chunk_config: ChunkConfig | None = None,
         default_k: int = 5,
@@ -252,7 +251,7 @@ class RAGRetriever:
         if not os.path.exists(file_path):
             raise FileNotFoundError(f"File not found: {file_path}")
 
-        with open(file_path, "r", encoding="utf-8") as f:
+        with open(file_path, encoding="utf-8") as f:
             content = f.read()
 
         metadata = metadata or {}
@@ -409,7 +408,24 @@ async def get_retriever(
 
     if key not in _retrievers:
         embeddings = get_embeddings(use_mock=use_mock)
-        retriever = RAGRetriever(namespace=namespace, embeddings=embeddings)
+        redis_url = os.getenv("REDIS_URL") or os.getenv("MCP_REDIS_URL")
+        default_k = int(os.getenv("RAG_DEFAULT_K", "5"))
+        min_score = float(os.getenv("RAG_MIN_SCORE", "0.3"))
+        chunk_size = int(os.getenv("RAG_CHUNK_SIZE", "1000"))
+        chunk_overlap = int(os.getenv("RAG_CHUNK_OVERLAP", "200"))
+        chunk_config = ChunkConfig(
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+        )
+
+        retriever = RAGRetriever(
+            namespace=namespace,
+            embeddings=embeddings,
+            redis_url=redis_url,
+            chunk_config=chunk_config,
+            default_k=default_k,
+            min_score=min_score,
+        )
         await retriever.initialize()
         _retrievers[key] = retriever
 

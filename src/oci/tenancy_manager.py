@@ -18,11 +18,10 @@ Usage:
 """
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 import structlog
-from opentelemetry import trace
 
 logger = structlog.get_logger(__name__)
 

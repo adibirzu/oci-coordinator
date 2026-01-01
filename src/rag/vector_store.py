@@ -46,7 +46,7 @@ class Document:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "Document":
+    def from_dict(cls, data: dict[str, Any]) -> Document:
         return cls(
             id=data["id"],
             content=data["content"],
@@ -99,7 +99,7 @@ class RedisVectorStore:
         self._redis: Redis | None = None
         self._vss_available: bool | None = None
 
-    async def get_redis(self) -> "Redis":
+    async def get_redis(self) -> Redis:
         """Get or create Redis connection."""
         if self._redis is None:
             import redis.asyncio as redis
@@ -192,7 +192,7 @@ class RedisVectorStore:
     async def add_documents(
         self,
         documents: list[Document],
-        embeddings_model: "Embeddings",
+        embeddings_model: Embeddings,
     ) -> int:
         """
         Add documents to the vector store.

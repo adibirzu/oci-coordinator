@@ -35,49 +35,131 @@ def mock_catalog():
 
     catalog = MagicMock(spec=ToolCatalog)
 
-    # Define mock tools
+    # Define mock tools - using unified naming convention
     mock_tools = {
+        # OCI Unified tools
         "oci_database_list_autonomous": ToolDefinition(
             name="oci_database_list_autonomous",
             description="List autonomous databases",
             input_schema={},
-            server_id="mock",
+            server_id="oci-unified",
         ),
         "oci_database_get_autonomous": ToolDefinition(
             name="oci_database_get_autonomous",
             description="Get autonomous database details",
             input_schema={},
-            server_id="mock",
+            server_id="oci-unified",
         ),
         "oci_observability_get_metrics": ToolDefinition(
             name="oci_observability_get_metrics",
             description="Get metrics",
             input_schema={},
-            server_id="mock",
+            server_id="oci-unified",
         ),
         "oci_observability_query_logs": ToolDefinition(
             name="oci_observability_query_logs",
             description="Query logs",
             input_schema={},
-            server_id="mock",
+            server_id="oci-unified",
         ),
         "oci_compute_list_instances": ToolDefinition(
             name="oci_compute_list_instances",
             description="List compute instances",
             input_schema={},
-            server_id="mock",
+            server_id="oci-unified",
         ),
         "oci_security_list_problems": ToolDefinition(
             name="oci_security_list_problems",
             description="List security problems",
             input_schema={},
-            server_id="mock",
+            server_id="oci-unified",
         ),
         "oci_cost_get_summary": ToolDefinition(
             name="oci_cost_get_summary",
             description="Get cost summary",
             input_schema={},
-            server_id="mock",
+            server_id="oci-unified",
+        ),
+        # Database Observatory OPSI tools
+        "oci_opsi_get_fleet_summary": ToolDefinition(
+            name="oci_opsi_get_fleet_summary",
+            description="Get database fleet summary",
+            input_schema={},
+            server_id="database-observatory",
+        ),
+        "oci_opsi_search_databases": ToolDefinition(
+            name="oci_opsi_search_databases",
+            description="Search databases by name/type",
+            input_schema={},
+            server_id="database-observatory",
+        ),
+        "oci_opsi_get_database": ToolDefinition(
+            name="oci_opsi_get_database",
+            description="Get cached database details",
+            input_schema={},
+            server_id="database-observatory",
+        ),
+        "oci_opsi_get_performance_summary": ToolDefinition(
+            name="oci_opsi_get_performance_summary",
+            description="Get performance summary",
+            input_schema={},
+            server_id="database-observatory",
+        ),
+        "oci_opsi_analyze_cpu": ToolDefinition(
+            name="oci_opsi_analyze_cpu",
+            description="Analyze CPU usage",
+            input_schema={},
+            server_id="database-observatory",
+        ),
+        "oci_opsi_analyze_memory": ToolDefinition(
+            name="oci_opsi_analyze_memory",
+            description="Analyze memory usage",
+            input_schema={},
+            server_id="database-observatory",
+        ),
+        "oci_opsi_analyze_io": ToolDefinition(
+            name="oci_opsi_analyze_io",
+            description="Analyze I/O performance",
+            input_schema={},
+            server_id="database-observatory",
+        ),
+        # Database Observatory SQLcl tools
+        "oci_database_execute_sql": ToolDefinition(
+            name="oci_database_execute_sql",
+            description="Execute SQL via SQLcl",
+            input_schema={},
+            server_id="database-observatory",
+        ),
+        "oci_database_list_connections": ToolDefinition(
+            name="oci_database_list_connections",
+            description="List SQLcl connections",
+            input_schema={},
+            server_id="database-observatory",
+        ),
+        "oci_database_get_schema": ToolDefinition(
+            name="oci_database_get_schema",
+            description="Get schema info",
+            input_schema={},
+            server_id="database-observatory",
+        ),
+        # Database Observatory Logan tools
+        "oci_logan_execute_query": ToolDefinition(
+            name="oci_logan_execute_query",
+            description="Execute Logan query",
+            input_schema={},
+            server_id="database-observatory",
+        ),
+        "oci_logan_list_sources": ToolDefinition(
+            name="oci_logan_list_sources",
+            description="List log sources",
+            input_schema={},
+            server_id="database-observatory",
+        ),
+        "oci_logan_detect_anomalies": ToolDefinition(
+            name="oci_logan_detect_anomalies",
+            description="Detect log anomalies",
+            input_schema={},
+            server_id="database-observatory",
         ),
     }
 

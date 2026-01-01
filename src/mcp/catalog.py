@@ -18,9 +18,10 @@ from __future__ import annotations
 
 import asyncio
 import time
-from dataclasses import dataclass, field
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any, Callable, Optional
+from typing import Any
 
 import structlog
 from langchain_core.tools import StructuredTool
@@ -47,6 +48,70 @@ class ToolTier:
 
 # Tool tier classifications
 # Tier 1: Instant (<100ms), Tier 2: Fast (100ms-1s), Tier 3: Moderate (1s-30s), Tier 4: Mutations
+# ═══════════════════════════════════════════════════════════════════════════════
+# Tool Aliases for Backward Compatibility
+# ═══════════════════════════════════════════════════════════════════════════════
+# Maps legacy tool names to standardized oci_{domain}_{action} format
+TOOL_ALIASES: dict[str, str] = {
+    # database-observatory legacy names → standardized names
+    "execute_sql": "oci_database_execute_sql",
+    "get_schema_info": "oci_database_get_schema",
+    "list_connections": "oci_database_list_connections",
+    "database_status": "oci_database_get_status",
+    "get_fleet_summary": "oci_opsi_get_fleet_summary",
+    "search_databases": "oci_opsi_search_databases",
+    "list_database_insights": "oci_opsi_list_insights",
+    "analyze_cpu_usage": "oci_opsi_analyze_cpu",
+    "analyze_memory_usage": "oci_opsi_analyze_memory",
+    "analyze_io_usage": "oci_opsi_analyze_io",
+    "get_blocking_sessions": "oci_opsi_get_blocking_sessions",
+    "analyze_wait_events": "oci_opsi_analyze_wait_events",
+    "get_sql_statistics": "oci_opsi_get_sql_statistics",
+    "compare_awr_periods": "oci_opsi_compare_awr",
+    "list_tablespaces": "oci_database_list_tablespaces",
+    "list_users": "oci_database_list_users",
+    "get_sql_plan": "oci_database_get_sql_plan",
+    "list_awr_snapshots": "oci_database_list_awr_snapshots",
+    "sqlwatch_get_plan_history": "oci_sqlwatch_get_plan_history",
+    "sqlwatch_analyze_regression": "oci_sqlwatch_analyze_regression",
+    "query_warehouse_standard": "oci_opsi_query_warehouse",
+    # Legacy short names
+    "list_instances": "oci_compute_list_instances",
+    "start_instance": "oci_compute_start_instance",
+    "stop_instance": "oci_compute_stop_instance",
+    "restart_instance": "oci_compute_restart_instance",
+    "get_instance_metrics": "oci_observability_get_instance_metrics",
+    # Agent-referenced names (from DOMAIN_PROMPTS)
+    "list_autonomous_databases": "oci_database_list_autonomous",
+    "analyze_performance": "oci_opsi_get_performance_summary",
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# MCP Server to Domain Mapping
+# ═══════════════════════════════════════════════════════════════════════════════
+# Maps MCP servers to their supported domains for agent routing
+MCP_SERVER_DOMAINS: dict[str, list[str]] = {
+    "mcp-oci": ["compute", "network", "database", "observability", "discovery", "identity"],
+    "oci-mcp-security": ["security", "cloudguard", "vss", "bastion", "audit", "kms", "waf", "datasafe", "accessgov"],
+    "finopsai-mcp": ["cost", "finops", "budget", "forecast", "optimization"],
+    "database-observatory": ["sql", "performance", "awr", "schema", "opsi", "sqlwatch"],
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Domain-to-Tool Prefix Mapping
+# ═══════════════════════════════════════════════════════════════════════════════
+# Used for dynamic tool discovery by domain
+DOMAIN_PREFIXES: dict[str, list[str]] = {
+    "database": ["oci_database_", "oci_opsi_", "execute_sql", "database_status"],
+    "infrastructure": ["oci_compute_", "oci_network_", "oci_list_", "oci_get_", "oci_search_"],
+    "finops": ["oci_cost_", "finops_"],
+    "cost": ["oci_cost_"],
+    "security": ["oci_security_"],
+    "cloudguard": ["oci_security_cloudguard_"],
+    "observability": ["oci_observability_", "oci_logan_"],
+    "identity": ["oci_list_compartments", "oci_get_compartment", "oci_search_compartments", "oci_get_tenancy"],
+}
+
 TOOL_TIERS: dict[str, ToolTier] = {
     # ═══════════════════════════════════════════════════════════════════════════
     # mcp-oci Tools (Reference Implementation)
@@ -57,6 +122,9 @@ TOOL_TIERS: dict[str, ToolTier] = {
     "oci_search_tools": ToolTier(1, 100, "none"),
     "oci_get_capabilities": ToolTier(1, 50, "none"),
     "oci_get_cache_stats": ToolTier(1, 50, "none"),
+    "set_feedback": ToolTier(1, 50, "none"),
+    "append_feedback": ToolTier(1, 50, "none"),
+    "get_feedback": ToolTier(1, 50, "none"),
     # Tier 2: Compute reads
     "oci_compute_list_instances": ToolTier(2, 500, "none"),
     "oci_compute_get_instance": ToolTier(2, 400, "none"),
@@ -213,6 +281,15 @@ TOOL_TIERS: dict[str, ToolTier] = {
     "sqlwatch_get_plan_history": ToolTier(3, 2000, "low"),
     "sqlwatch_analyze_regression": ToolTier(3, 3000, "low"),
 }
+
+
+def _tier_key(name: str) -> str:
+    """Normalize tool names for tier lookups."""
+    if ":" in name:
+        name = name.split(":", 1)[1]
+    if "__" in name:
+        name = name.split("__", 1)[1]
+    return name
 
 
 class ToolCatalog:
@@ -456,7 +533,10 @@ class ToolCatalog:
         self._tool_to_server[name] = server_id
 
         # Add tier info
-        TOOL_TIERS[name] = ToolTier(tier, 1000, risk_level)
+        tier_key = _tier_key(name)
+        TOOL_TIERS[tier_key] = ToolTier(tier, 1000, risk_level)
+        if tier_key != name:
+            TOOL_TIERS[name] = TOOL_TIERS[tier_key]
 
         self._logger.info(
             "Custom tool registered",
@@ -486,8 +566,8 @@ class ToolCatalog:
             del self._tools[name]
         if name in self._tool_to_server:
             del self._tool_to_server[name]
-        if name in TOOL_TIERS:
-            del TOOL_TIERS[name]
+        TOOL_TIERS.pop(name, None)
+        TOOL_TIERS.pop(_tier_key(name), None)
 
         self._logger.info("Custom tool unregistered", name=name)
         return True
@@ -510,12 +590,15 @@ class ToolCatalog:
             risk_level: Risk level
             requires_confirmation: Whether tool needs user confirmation
         """
-        TOOL_TIERS[name] = ToolTier(
+        tier_key = _tier_key(name)
+        TOOL_TIERS[tier_key] = ToolTier(
             tier=tier,
             latency_estimate_ms=latency_estimate_ms,
             risk_level=risk_level,
             requires_confirmation=requires_confirmation,
         )
+        if tier_key != name:
+            TOOL_TIERS[name] = TOOL_TIERS[tier_key]
         self._logger.debug("Tool tier updated", name=name, tier=tier)
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -622,17 +705,81 @@ class ToolCatalog:
         return all_stats
 
     def get_tool(self, tool_name: str) -> ToolDefinition | None:
-        """Get a tool definition by name."""
-        # Try exact match
+        """Get a tool definition by name.
+
+        Supports:
+        - Exact match
+        - Alias resolution (legacy names → standard names)
+        - Namespace prefix stripping
+        """
+        # Try exact match first
         if tool_name in self._tools:
             return self._tools[tool_name]
+
+        # Try alias resolution (legacy → standard name)
+        if tool_name in TOOL_ALIASES:
+            canonical_name = TOOL_ALIASES[tool_name]
+            if canonical_name in self._tools:
+                return self._tools[canonical_name]
+            # Also try finding canonical name with different casing/prefixes
+            for name, tool_def in self._tools.items():
+                if name.endswith(canonical_name.split("_")[-1]) or canonical_name in name:
+                    return tool_def
 
         # Try without namespace prefix
         for name, tool_def in self._tools.items():
             if name.endswith(f":{tool_name}") or name == tool_name:
                 return tool_def
 
+        # Try partial match for flexibility
+        tool_lower = tool_name.lower()
+        for name, tool_def in self._tools.items():
+            if tool_lower in name.lower():
+                return tool_def
+
         return None
+
+    def get_tools_for_domain(self, domain: str) -> list[ToolDefinition]:
+        """Get all tools for a specific domain.
+
+        Uses DOMAIN_PREFIXES to match tools by domain.
+
+        Args:
+            domain: Domain name (database, infrastructure, finops, etc.)
+
+        Returns:
+            List of tools matching the domain
+        """
+        prefixes = DOMAIN_PREFIXES.get(domain.lower(), [])
+        if not prefixes:
+            self._logger.warning("Unknown domain", domain=domain)
+            return []
+
+        matching_tools = []
+        for name, tool_def in self._tools.items():
+            # Check if tool matches any prefix for this domain
+            for prefix in prefixes:
+                if name.startswith(prefix) or name == prefix:
+                    matching_tools.append(tool_def)
+                    break
+
+        self._logger.debug(
+            "Tools for domain",
+            domain=domain,
+            count=len(matching_tools),
+        )
+        return matching_tools
+
+    def resolve_alias(self, tool_name: str) -> str:
+        """Resolve a tool alias to its canonical name.
+
+        Args:
+            tool_name: Possibly aliased tool name
+
+        Returns:
+            Canonical tool name (or original if not aliased)
+        """
+        return TOOL_ALIASES.get(tool_name, tool_name)
 
     def get_server_for_tool(self, tool_name: str) -> str | None:
         """Get the server ID that provides a tool."""
@@ -686,7 +833,7 @@ class ToolCatalog:
                     continue
 
             # Get tier info
-            tier_info = TOOL_TIERS.get(name, ToolTier(2, 1000, "low"))
+            tier_info = TOOL_TIERS.get(_tier_key(name), ToolTier(2, 1000, "low"))
             if tier_info.tier > max_tier:
                 continue
 
@@ -759,7 +906,7 @@ class ToolCatalog:
             )
 
         # Check if confirmation required
-        tier_info = TOOL_TIERS.get(tool_name, ToolTier(2, 1000, "low"))
+        tier_info = TOOL_TIERS.get(_tier_key(tool_name), ToolTier(2, 1000, "low"))
         if tier_info.requires_confirmation:
             self._logger.info(
                 "Tool requires confirmation",
@@ -873,7 +1020,7 @@ class ToolCatalog:
                 continue
 
             # Skip high tier tools by default
-            tier_info = TOOL_TIERS.get(name, ToolTier(2, 1000, "low"))
+            tier_info = TOOL_TIERS.get(_tier_key(name), ToolTier(2, 1000, "low"))
             if tier_info.tier > max_tier:
                 continue
 
@@ -912,7 +1059,7 @@ class ToolCatalog:
 
         tier_counts = {1: 0, 2: 0, 3: 0, 4: 0}
         for name in self._tools:
-            tier = TOOL_TIERS.get(name, ToolTier(2, 1000, "low")).tier
+            tier = TOOL_TIERS.get(_tier_key(name), ToolTier(2, 1000, "low")).tier
             tier_counts[tier] = tier_counts.get(tier, 0) + 1
 
         # Calculate usage summary

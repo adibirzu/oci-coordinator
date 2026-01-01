@@ -9,11 +9,8 @@ ShowOCI Source: https://github.com/oracle/oci-python-sdk/tree/master/examples/sh
 
 from __future__ import annotations
 
-import json
-import os
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from pathlib import Path
+from datetime import UTC, datetime
 from typing import Any
 
 import structlog
@@ -75,7 +72,7 @@ class ShowOCIResult:
     error: str | None = None
     """Error message if failed."""
 
-    timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    timestamp: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     """Execution timestamp."""
 
     def get_instances(self) -> list[dict[str, Any]]:
@@ -153,7 +150,6 @@ class ShowOCIRunner:
 
     def _get_client(self, client_class: type) -> Any:
         """Get or create an OCI client."""
-        import oci
 
         client_name = client_class.__name__
         if client_name not in self._clients:
@@ -378,7 +374,7 @@ class ShowOCIRunner:
         Returns:
             ShowOCIResult with discovered resources
         """
-        start_time = datetime.now(timezone.utc)
+        start_time = datetime.now(UTC)
         resource_types = resource_types or self.config.resource_types or ["all"]
 
         # Normalize resource types
@@ -437,7 +433,7 @@ class ShowOCIRunner:
                     volumes = await self._discover_block_volumes(comp_id)
                     data["block_volumes"].extend(volumes)
 
-            duration = (datetime.now(timezone.utc) - start_time).total_seconds()
+            duration = (datetime.now(UTC) - start_time).total_seconds()
 
             result = ShowOCIResult(
                 success=True,
@@ -470,7 +466,7 @@ class ShowOCIRunner:
                 success=False,
                 profile=self.config.profile,
                 error=str(e),
-                duration_seconds=(datetime.now(timezone.utc) - start_time).total_seconds(),
+                duration_seconds=(datetime.now(UTC) - start_time).total_seconds(),
             )
 
     async def run_quick_discovery(self) -> ShowOCIResult:

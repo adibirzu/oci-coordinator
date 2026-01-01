@@ -250,8 +250,9 @@ class LLMJudge:
     async def _get_llm(self) -> Any:
         """Get or create LLM instance."""
         if self._llm is None:
-            from src.llm.factory import LLMFactory
             import os
+
+            from src.llm.factory import LLMFactory
 
             config = {
                 "provider": self._provider,

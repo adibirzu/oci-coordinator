@@ -13,13 +13,12 @@ Usage:
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import threading
+from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from typing import Callable, Optional
 from urllib.parse import parse_qs, urlparse
 
 import httpx
@@ -46,7 +45,7 @@ def ensure_cache_dir() -> None:
     CACHE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
 
 
-def load_verifier() -> Optional[str]:
+def load_verifier() -> str | None:
     """Load saved PKCE verifier."""
     try:
         if VERIFIER_CACHE_PATH.exists():
@@ -77,7 +76,7 @@ def save_token(token: dict) -> None:
     logger.info("OCA token saved", path=str(TOKEN_CACHE_PATH))
 
 
-def exchange_code_for_token(code: str, verifier: str) -> Optional[dict]:
+def exchange_code_for_token(code: str, verifier: str) -> dict | None:
     """Exchange authorization code for token."""
     try:
         logger.info("Exchanging OAuth code for token")
@@ -112,7 +111,7 @@ class OCACallbackHandler(BaseHTTPRequestHandler):
     """HTTP handler for OAuth callbacks."""
 
     # Class-level callback for token received
-    on_token_received: Optional[Callable[[dict], None]] = None
+    on_token_received: Callable[[dict], None] | None = None
 
     def log_message(self, format, *args):
         """Suppress default HTTP logging."""
@@ -195,7 +194,7 @@ class OCACallbackHandler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "text/html")
             self.end_headers()
-            self.wfile.write("""
+            self.wfile.write(b"""
                 <html>
                 <body style="font-family: system-ui; text-align: center; padding: 50px;">
                     <h1 style="color: #27ae60;">Authentication Successful!</h1>
@@ -203,7 +202,7 @@ class OCACallbackHandler(BaseHTTPRequestHandler):
                     <p>Your session is now active.</p>
                 </body>
                 </html>
-            """.encode())
+            """)
 
             logger.info(
                 "OCA authentication successful",
@@ -233,19 +232,19 @@ class OCACallbackHandler(BaseHTTPRequestHandler):
 class OCACallbackServer:
     """Background OCA callback server manager."""
 
-    _instance: Optional["OCACallbackServer"] = None
-    _server: Optional[HTTPServer] = None
-    _thread: Optional[threading.Thread] = None
+    _instance: OCACallbackServer | None = None
+    _server: HTTPServer | None = None
+    _thread: threading.Thread | None = None
     _running: bool = False
 
     @classmethod
-    def get_instance(cls) -> "OCACallbackServer":
+    def get_instance(cls) -> OCACallbackServer:
         """Get singleton instance."""
         if cls._instance is None:
             cls._instance = cls()
         return cls._instance
 
-    def start(self, on_token_received: Optional[Callable[[dict], None]] = None) -> bool:
+    def start(self, on_token_received: Callable[[dict], None] | None = None) -> bool:
         """Start the callback server in a background thread.
 
         Args:
@@ -338,7 +337,7 @@ class OCACallbackServer:
 
 
 async def start_callback_server(
-    on_token_received: Optional[Callable[[dict], None]] = None
+    on_token_received: Callable[[dict], None] | None = None
 ) -> bool:
     """Start the OCA callback server.
 

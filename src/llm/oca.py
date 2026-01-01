@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Any, AsyncIterator, Iterator, List, Optional
+from typing import Any
 
 import httpx
 import structlog
@@ -209,6 +209,32 @@ class OCATokenManager:
             OCA_CONFIG.token_cache_path.unlink()
         logger.info("OCA token cleared")
 
+    def force_reload_from_disk(self) -> bool:
+        """Force reload token from disk, clearing in-memory cache first.
+
+        This is useful when the user has re-authenticated in the browser
+        and the new token was saved to disk while the bot is still running.
+
+        Returns:
+            True if a valid token was loaded from disk.
+        """
+        # Clear in-memory cache to force disk reload
+        self._cached_token = None
+        self._token_expires_at = 0
+        self._refresh_expires_at = 0
+
+        # Try to load from disk
+        if self._load_from_file():
+            logger.info(
+                "Reloaded OCA token from disk",
+                has_token=self._cached_token is not None,
+                is_valid=self.has_valid_token(),
+            )
+            return self.has_valid_token()
+
+        logger.debug("No token file found on disk to reload")
+        return False
+
     def get_token_info(self) -> dict:
         """Get token status information."""
         import time
@@ -268,8 +294,21 @@ oca_token_manager = OCATokenManager()
 
 
 def is_oca_authenticated() -> bool:
-    """Check if OCA authentication is valid."""
-    return oca_token_manager.has_valid_token() or oca_token_manager.can_refresh()
+    """Check if OCA authentication is valid.
+
+    This function checks:
+    1. In-memory cached token
+    2. Token on disk (in case user just authenticated)
+    """
+    # Check in-memory first
+    if oca_token_manager.has_valid_token() or oca_token_manager.can_refresh():
+        return True
+
+    # Try reloading from disk (user may have just authenticated)
+    if oca_token_manager.force_reload_from_disk():
+        return True
+
+    return False
 
 
 class ChatOCA(BaseChatModel):
@@ -298,15 +337,33 @@ class ChatOCA(BaseChatModel):
         }
 
     async def _get_access_token(self) -> str:
-        """Get valid access token, refreshing if needed."""
+        """Get valid access token, refreshing or reloading from disk if needed.
+
+        This method tries multiple strategies to get a valid token:
+        1. Use the in-memory cached token if valid
+        2. Try to refresh the token using the refresh_token
+        3. Force reload from disk (in case user re-authenticated in browser)
+
+        Raises:
+            ValueError: If no valid token is available after all attempts.
+        """
+        # Strategy 1: Use cached token
         token = oca_token_manager.get_access_token()
         if token:
             return token
 
-        # Try to refresh
+        # Strategy 2: Try to refresh
         token = await oca_token_manager.refresh_token()
         if token:
             return token
+
+        # Strategy 3: Reload from disk (user may have re-authenticated)
+        logger.info("Attempting to reload OCA token from disk...")
+        if oca_token_manager.force_reload_from_disk():
+            token = oca_token_manager.get_access_token()
+            if token:
+                logger.info("Successfully loaded new token from disk after re-authentication")
+                return token
 
         raise ValueError(
             "Oracle Code Assist requires authentication. "
@@ -314,8 +371,8 @@ class ChatOCA(BaseChatModel):
         )
 
     def _convert_messages(
-        self, messages: List[BaseMessage]
-    ) -> List[dict[str, Any]]:
+        self, messages: list[BaseMessage]
+    ) -> list[dict[str, Any]]:
         """Convert LangChain messages to OpenAI format."""
         result = []
         for msg in messages:
@@ -385,9 +442,9 @@ class ChatOCA(BaseChatModel):
 
     def _generate(
         self,
-        messages: List[BaseMessage],
-        stop: Optional[List[str]] = None,
-        run_manager: Optional[CallbackManagerForLLMRun] = None,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: CallbackManagerForLLMRun | None = None,
         **kwargs: Any,
     ) -> ChatResult:
         """Synchronous generation - wraps async."""
@@ -399,14 +456,14 @@ class ChatOCA(BaseChatModel):
 
     async def _agenerate(
         self,
-        messages: List[BaseMessage],
-        stop: Optional[List[str]] = None,
-        run_manager: Optional[CallbackManagerForLLMRun] = None,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: CallbackManagerForLLMRun | None = None,
         **kwargs: Any,
     ) -> ChatResult:
         """Generate chat completion from OCA."""
         import time
-        from opentelemetry import trace
+
         from opentelemetry.trace import SpanKind
 
         # Get tracer for LLM operations - use observability module for consistency
@@ -707,7 +764,6 @@ async def verify_oca_integration() -> tuple[bool, str, dict]:
     Returns:
         Tuple of (success, message, details)
     """
-    from opentelemetry import trace
     from opentelemetry.trace import SpanKind
 
     details = {

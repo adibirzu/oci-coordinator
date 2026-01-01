@@ -7,7 +7,12 @@ Provides tools for VCN, subnet, and security list management.
 import json
 from typing import Any
 
+from opentelemetry import trace
+
 from src.mcp.server.auth import get_network_client
+
+# Get tracer for network tools
+_tracer = trace.get_tracer("mcp-oci-network")
 
 
 async def _list_vcns_logic(

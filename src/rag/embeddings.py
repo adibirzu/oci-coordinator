@@ -8,7 +8,7 @@ Supports Cohere embed models for high-quality document and query embeddings.
 from __future__ import annotations
 
 import os
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import structlog
 from langchain_core.embeddings import Embeddings
@@ -78,7 +78,7 @@ class OCIEmbeddings(Embeddings):
             )
 
     @property
-    def client(self) -> "oci.generative_ai_inference.GenerativeAiInferenceClient":
+    def client(self) -> oci.generative_ai_inference.GenerativeAiInferenceClient:
         """Get or create the OCI GenAI client."""
         if self._client is None:
             try:

@@ -44,6 +44,7 @@ class ServerConfigEntry:
     description: str = ""
     timeout_seconds: int = 30
     retry_attempts: int = 3
+    tool_timeouts: dict[str, int] = field(default_factory=dict)
 
     def to_mcp_config(self) -> MCPServerConfig:
         """Convert to MCPServerConfig for use with MCP client."""
@@ -71,6 +72,7 @@ class ServerConfigEntry:
             headers=self.headers,
             timeout_seconds=self.timeout_seconds,
             retry_attempts=self.retry_attempts,
+            tool_timeouts=self.tool_timeouts,
         )
 
 
@@ -169,6 +171,8 @@ def load_mcp_config(
         # Apply defaults
         timeout = server_data.get("timeout_seconds", defaults.get("timeout_seconds", 30))
         retry = server_data.get("retry_attempts", defaults.get("retry_attempts", 3))
+        # Tool-specific timeouts from defaults
+        tool_timeouts = defaults.get("tool_timeouts", {})
 
         servers[server_id] = ServerConfigEntry(
             server_id=server_id,
@@ -184,6 +188,7 @@ def load_mcp_config(
             description=server_data.get("description", ""),
             timeout_seconds=timeout,
             retry_attempts=retry,
+            tool_timeouts=tool_timeouts,
         )
 
     logger.info(
@@ -263,7 +268,7 @@ def load_mcp_config_from_env() -> MCPConfig:
 
 async def initialize_mcp_from_config(
     config: MCPConfig | None = None,
-) -> tuple["ServerRegistry", "ToolCatalog"]:
+) -> tuple[ServerRegistry, ToolCatalog]:
     """
     Initialize MCP infrastructure from configuration.
 
@@ -312,7 +317,7 @@ async def initialize_mcp_from_config(
 
 
 # Convenience function for quick setup
-async def quick_setup() -> tuple["ServerRegistry", "ToolCatalog"]:
+async def quick_setup() -> tuple[ServerRegistry, ToolCatalog]:
     """
     Quick setup for MCP infrastructure using default configuration.
 

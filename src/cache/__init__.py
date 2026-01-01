@@ -19,9 +19,9 @@ from src.cache.oci_resource_cache import (
 )
 
 __all__ = [
-    "OCIResourceCache",
-    "CACHE_EVENT_SET",
     "CACHE_EVENT_DELETE",
-    "CACHE_EVENT_INVALIDATE",
     "CACHE_EVENT_EXPIRE",
+    "CACHE_EVENT_INVALIDATE",
+    "CACHE_EVENT_SET",
+    "OCIResourceCache",
 ]

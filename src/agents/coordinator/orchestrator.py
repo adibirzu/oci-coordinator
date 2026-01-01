@@ -34,7 +34,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 import structlog
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -48,13 +48,18 @@ from src.agents.protocol import (
     TaskSpecification,
     get_message_bus,
 )
+from src.mcp.dynamic_manager import (
+    DynamicToolManager,
+    UpdateEvent,
+    ToolChangeEvent,
+)
 
 if TYPE_CHECKING:
     from langchain_core.language_models import BaseChatModel
 
     from src.agents.catalog import AgentCatalog
-    from src.memory.manager import SharedMemoryManager
     from src.mcp.catalog import ToolCatalog
+    from src.memory.manager import SharedMemoryManager
 
 logger = structlog.get_logger(__name__)
 
@@ -105,7 +110,7 @@ class OrchestratorResult:
     execution_time_ms: int
     total_tool_calls: int
     agents_used: list[str]
-    error: Optional[str] = None
+    error: str | None = None
 
 
 class ParallelOrchestrator:
@@ -128,15 +133,20 @@ class ParallelOrchestrator:
     DEFAULT_MAX_AGENTS = 5
     DEFAULT_TIMEOUT = 60
 
+    # Loop prevention
+    MAX_ITERATIONS = 10  # Maximum orchestration iterations
+    MAX_RECURSION_DEPTH = 3  # Maximum nesting of agent calls
+
     def __init__(
         self,
-        agent_catalog: "AgentCatalog",
-        tool_catalog: "ToolCatalog",
-        llm: "BaseChatModel",
-        memory: Optional["SharedMemoryManager"] = None,
-        message_bus: Optional[MessageBus] = None,
+        agent_catalog: AgentCatalog,
+        tool_catalog: ToolCatalog,
+        llm: BaseChatModel,
+        memory: SharedMemoryManager | None = None,
+        message_bus: MessageBus | None = None,
         max_concurrent_agents: int = DEFAULT_MAX_AGENTS,
         default_timeout: int = DEFAULT_TIMEOUT,
+        dynamic_manager: DynamicToolManager | None = None,
     ):
         """
         Initialize the parallel orchestrator.
@@ -149,6 +159,7 @@ class ParallelOrchestrator:
             message_bus: Message bus for A2A communication
             max_concurrent_agents: Maximum agents running in parallel
             default_timeout: Default timeout per agent (seconds)
+            dynamic_manager: Dynamic tool manager for hot-reload support
         """
         self.agent_catalog = agent_catalog
         self.tool_catalog = tool_catalog
@@ -159,8 +170,22 @@ class ParallelOrchestrator:
         self.default_timeout = default_timeout
         self._logger = logger.bind(component="ParallelOrchestrator")
 
+        # Dynamic tool manager for auto-updates
+        self._dynamic_manager = dynamic_manager or DynamicToolManager.get_instance(
+            tool_catalog=tool_catalog,
+            agent_catalog=agent_catalog,
+        )
+
+        # Loop prevention state
+        self._iteration_count = 0
+        self._active_tasks: set[str] = set()  # Track active task IDs
+        self._seen_queries: dict[str, int] = {}  # Track repeated queries
+
         # Register agent handlers with message bus
         self._register_agent_handlers()
+
+        # Register for dynamic tool updates
+        self._register_dynamic_callbacks()
 
     def _register_agent_handlers(self) -> None:
         """Register all agents as message handlers."""
@@ -173,6 +198,111 @@ class ParallelOrchestrator:
                 "Registered agent handler",
                 agent_id=agent_def.agent_id,
             )
+
+    def _register_dynamic_callbacks(self) -> None:
+        """Register callbacks for dynamic tool/skill updates."""
+        # Listen for tool additions
+        self._dynamic_manager.on_update(
+            UpdateEvent.TOOLS_ADDED,
+            self._handle_tools_updated,
+        )
+
+        # Listen for runbook registrations
+        self._dynamic_manager.on_update(
+            UpdateEvent.RUNBOOKS_REGISTERED,
+            self._handle_runbooks_registered,
+        )
+
+        # Listen for sync completions
+        self._dynamic_manager.on_update(
+            UpdateEvent.SYNC_COMPLETE,
+            self._handle_sync_complete,
+        )
+
+        self._logger.info("Dynamic callbacks registered")
+
+    async def _handle_tools_updated(self, event: ToolChangeEvent) -> None:
+        """Handle tool update events."""
+        self._logger.info(
+            "Tools updated event received",
+            tools_count=len(event.tools_affected),
+            details=event.details,
+        )
+
+        # Refresh tool catalog to pick up new tools
+        await self.tool_catalog.ensure_fresh(force=True)
+
+        # Re-register any agent handlers that might use new tools
+        self._logger.debug("Tool catalog refreshed after update")
+
+    async def _handle_runbooks_registered(self, event: ToolChangeEvent) -> None:
+        """Handle runbook registration events."""
+        self._logger.info(
+            "Runbooks registered event received",
+            runbooks=event.tools_affected,
+            details=event.details,
+        )
+
+        # Runbooks are now available as skills
+        # Agents can discover them via the skill registry
+
+    async def _handle_sync_complete(self, event: ToolChangeEvent) -> None:
+        """Handle sync completion events."""
+        self._logger.info(
+            "Sync complete event received",
+            timestamp=event.timestamp.isoformat(),
+            details=event.details,
+        )
+
+    async def start_dynamic_manager(self) -> None:
+        """
+        Start the dynamic tool manager for auto-sync.
+
+        Call this during application startup to enable hot-reload
+        of tools, skills, and runbooks.
+        """
+        await self._dynamic_manager.start()
+        self._logger.info("Dynamic tool manager started")
+
+    async def stop_dynamic_manager(self) -> None:
+        """Stop the dynamic tool manager."""
+        await self._dynamic_manager.stop()
+        self._logger.info("Dynamic tool manager stopped")
+
+    async def register_runbook(
+        self,
+        runbook_id: str,
+        name: str,
+        description: str,
+        category: str,
+        executor: callable | None = None,
+    ) -> None:
+        """
+        Register a runbook as an executable skill.
+
+        Args:
+            runbook_id: Unique runbook identifier
+            name: Human-readable name
+            description: Runbook description
+            category: Category (monitoring, troubleshooting, etc.)
+            executor: Optional custom executor function
+        """
+        await self._dynamic_manager.register_runbook_skill(
+            runbook_id=runbook_id,
+            name=name,
+            description=description,
+            category=category,
+            executor=executor,
+        )
+        self._logger.info(
+            "Runbook registered via orchestrator",
+            runbook_id=runbook_id,
+            name=name,
+        )
+
+    def get_dynamic_status(self) -> dict[str, Any]:
+        """Get status of dynamic tool manager."""
+        return self._dynamic_manager.get_status()
 
     def _create_agent_handler(self, agent_def) -> callable:
         """Create a message handler for an agent."""
@@ -261,48 +391,113 @@ class ParallelOrchestrator:
         """
         start_time = time.time()
         context = context or {}
+        task_id = context.get("task_id", str(uuid.uuid4())[:8])
 
-        self._logger.info(
-            "Starting orchestration",
-            query_length=len(query),
-            force_parallel=force_parallel,
-        )
+        # Loop prevention check
+        query_hash = hash(query[:100])  # Use first 100 chars for dedup
+        self._seen_queries[query_hash] = self._seen_queries.get(query_hash, 0) + 1
 
-        # Step 1: Assess complexity
-        complexity = await self._assess_complexity(query, context)
+        if self._seen_queries[query_hash] > 3:
+            self._logger.warning(
+                "Loop detected: repeated query",
+                query_hash=query_hash,
+                count=self._seen_queries[query_hash],
+            )
+            return OrchestratorResult(
+                success=False,
+                response="Request loop detected. This query has been processed multiple times. Please rephrase or try a different question.",
+                agent_results=[],
+                execution_time_ms=0,
+                total_tool_calls=0,
+                agents_used=[],
+                error="loop_detected",
+            )
 
-        self._logger.info(
-            "Complexity assessed",
-            level=complexity.level.value,
-            score=complexity.score,
-            domains=complexity.domains_involved,
-            suggested_agents=complexity.estimated_agents,
-        )
+        # Check for maximum iterations
+        self._iteration_count += 1
+        if self._iteration_count > self.MAX_ITERATIONS:
+            self._logger.warning(
+                "Maximum iterations exceeded",
+                count=self._iteration_count,
+                max=self.MAX_ITERATIONS,
+            )
+            return OrchestratorResult(
+                success=False,
+                response=f"Maximum orchestration iterations ({self.MAX_ITERATIONS}) exceeded. Please simplify your request.",
+                agent_results=[],
+                execution_time_ms=0,
+                total_tool_calls=0,
+                agents_used=[],
+                error="max_iterations_exceeded",
+            )
 
-        # Step 2: Route based on complexity
-        if (
-            complexity.level in (ComplexityLevel.SIMPLE, ComplexityLevel.MODERATE)
-            and not force_parallel
-        ):
-            # Single agent execution
-            result = await self._execute_single_agent(query, context, complexity)
-        else:
-            # Parallel multi-agent execution
-            result = await self._execute_parallel(query, context, complexity)
+        # Check for task already in progress (reentrant call)
+        if task_id in self._active_tasks:
+            self._logger.warning(
+                "Reentrant task detected",
+                task_id=task_id,
+            )
+            return OrchestratorResult(
+                success=False,
+                response="This task is already being processed. Please wait for completion.",
+                agent_results=[],
+                execution_time_ms=0,
+                total_tool_calls=0,
+                agents_used=[],
+                error="reentrant_task",
+            )
 
-        # Calculate total execution time
-        execution_time = int((time.time() - start_time) * 1000)
-        result.execution_time_ms = execution_time
+        # Mark task as active
+        self._active_tasks.add(task_id)
 
-        self._logger.info(
-            "Orchestration complete",
-            success=result.success,
-            execution_time_ms=execution_time,
-            agents_used=result.agents_used,
-            total_tool_calls=result.total_tool_calls,
-        )
+        try:
+            self._logger.info(
+                "Starting orchestration",
+                query_length=len(query),
+                force_parallel=force_parallel,
+                iteration=self._iteration_count,
+                task_id=task_id,
+            )
 
-        return result
+            # Step 1: Assess complexity
+            complexity = await self._assess_complexity(query, context)
+
+            self._logger.info(
+                "Complexity assessed",
+                level=complexity.level.value,
+                score=complexity.score,
+                domains=complexity.domains_involved,
+                suggested_agents=complexity.estimated_agents,
+            )
+
+            # Step 2: Route based on complexity
+            if (
+                complexity.level in (ComplexityLevel.SIMPLE, ComplexityLevel.MODERATE)
+                and not force_parallel
+            ):
+                # Single agent execution
+                result = await self._execute_single_agent(query, context, complexity)
+            else:
+                # Parallel multi-agent execution
+                result = await self._execute_parallel(query, context, complexity)
+
+            # Calculate total execution time
+            execution_time = int((time.time() - start_time) * 1000)
+            result.execution_time_ms = execution_time
+
+            self._logger.info(
+                "Orchestration complete",
+                success=result.success,
+                execution_time_ms=execution_time,
+                agents_used=result.agents_used,
+                total_tool_calls=result.total_tool_calls,
+            )
+
+            return result
+
+        finally:
+            # Clean up active task tracking
+            self._active_tasks.discard(task_id)
 
     async def _assess_complexity(
         self,

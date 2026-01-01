@@ -21,7 +21,9 @@ from __future__ import annotations
 
 import os
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
+
+import os
 
 import structlog
 from langchain_core.messages import HumanMessage
@@ -35,16 +37,16 @@ from src.agents.coordinator.nodes import (
     should_continue_after_router,
     should_loop_from_action,
 )
-from src.agents.coordinator.state import CoordinatorState, RoutingType
+from src.agents.coordinator.state import CoordinatorState
 
 if TYPE_CHECKING:
     from langchain_core.language_models import BaseChatModel
 
     from src.agents.catalog import AgentCatalog
     from src.agents.coordinator.orchestrator import ParallelOrchestrator
+    from src.mcp.catalog import ToolCatalog
     from src.memory.context import ContextManager
     from src.memory.manager import SharedMemoryManager
-    from src.mcp.catalog import ToolCatalog
 
 logger = structlog.get_logger(__name__)
 
@@ -90,13 +92,13 @@ class LangGraphCoordinator:
 
     def __init__(
         self,
-        llm: "BaseChatModel",
-        tool_catalog: "ToolCatalog",
-        agent_catalog: "AgentCatalog",
-        memory: "SharedMemoryManager",
+        llm: BaseChatModel,
+        tool_catalog: ToolCatalog,
+        agent_catalog: AgentCatalog,
+        memory: SharedMemoryManager,
         workflow_registry: dict[str, Any] | None = None,
         max_iterations: int = 15,
-        checkpointer: Optional[BaseCheckpointSaver] = None,
+        checkpointer: BaseCheckpointSaver | None = None,
         enable_parallel: bool = True,
         enable_context_compression: bool = True,
     ):
@@ -128,10 +130,10 @@ class LangGraphCoordinator:
         self._use_atp_checkpointer = checkpointer is None and os.getenv("ATP_TNS_NAME")
 
         # Context manager for long conversations
-        self._context_manager: Optional["ContextManager"] = None
+        self._context_manager: ContextManager | None = None
 
         # Parallel orchestrator for complex queries
-        self._orchestrator: Optional["ParallelOrchestrator"] = None
+        self._orchestrator: ParallelOrchestrator | None = None
 
         self._nodes = CoordinatorNodes(
             llm=llm,
@@ -328,8 +330,33 @@ class LangGraphCoordinator:
             )
 
     def _bind_tools(self) -> None:
-        """Bind MCP tools to the LLM."""
+        """Bind MCP tools to the LLM if supported.
+
+        Not all LLM providers support tool binding (e.g., OCA).
+        This method gracefully skips binding if not supported.
+        Tools are still available via direct MCP execution.
+        """
         if not self.tool_catalog or not self.llm:
+            return
+
+        llm_type = type(self.llm).__name__
+
+        # Skip tool binding for LLMs that don't support function calling
+        # ChatOCA inherits bind_tools from BaseChatModel but doesn't support it
+        unsupported_llms = {"ChatOCA", "ChatLiteLLM"}
+        if llm_type in unsupported_llms:
+            self._logger.info(
+                "LLM does not support tool binding, tools available via MCP",
+                llm_type=llm_type,
+            )
+            return
+
+        # Check if LLM supports bind_tools
+        if not hasattr(self.llm, "bind_tools"):
+            self._logger.info(
+                "LLM does not support bind_tools, tools available via MCP",
+                llm_type=llm_type,
+            )
             return
 
         try:
@@ -345,8 +372,20 @@ class LangGraphCoordinator:
 
         except ImportError:
             self._logger.warning("ToolConverter not available, skipping tool binding")
+        except AttributeError as e:
+            # LLM doesn't support tool binding
+            self._logger.info(
+                "LLM does not support tool binding",
+                llm_type=type(self.llm).__name__,
+                error=str(e),
+            )
         except Exception as e:
-            self._logger.error("Failed to bind tools", error=str(e))
+            import traceback
+            self._logger.error(
+                "Failed to bind tools",
+                error=str(e) or type(e).__name__,
+                traceback=traceback.format_exc(),
+            )
 
     async def invoke(
         self,
@@ -621,7 +660,7 @@ class LangGraphCoordinator:
 
 
 async def create_coordinator(
-    llm: "BaseChatModel | None" = None,
+    llm: BaseChatModel | None = None,
     redis_url: str = "redis://localhost:6379",
     atp_connection: str | None = None,
     max_iterations: int = 15,
@@ -641,8 +680,8 @@ async def create_coordinator(
         Initialized LangGraphCoordinator
     """
     from src.agents.catalog import AgentCatalog
-    from src.memory.manager import SharedMemoryManager
     from src.mcp.catalog import ToolCatalog
+    from src.memory.manager import SharedMemoryManager
 
     # Create LLM if not provided
     if llm is None:
@@ -653,7 +692,7 @@ async def create_coordinator(
     # Create components
     memory = SharedMemoryManager(
         redis_url=redis_url,
-        atp_connection=atp_connection,
+        atp_connection=atp_connection or os.getenv("ATP_CONNECTION_STRING"),
     )
 
     tool_catalog = ToolCatalog()

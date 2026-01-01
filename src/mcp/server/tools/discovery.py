@@ -10,10 +10,14 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from src.showoci.runner import ShowOCIRunner, ShowOCIConfig
-from src.showoci.cache_loader import ShowOCICacheLoader
-from src.cache.oci_resource_cache import OCIResourceCache
+from opentelemetry import trace
 
+from src.cache.oci_resource_cache import OCIResourceCache
+from src.showoci.cache_loader import ShowOCICacheLoader
+from src.showoci.runner import ShowOCIConfig, ShowOCIRunner
+
+# Get tracer for discovery tools
+_tracer = trace.get_tracer("mcp-oci-discovery")
 
 # Global cache loader instance
 _cache_loader: ShowOCICacheLoader | None = None
@@ -138,15 +142,14 @@ async def _get_cached_resources_logic(
         lines.append("| --- | --- | --- |")
         for r in resources[:50]:
             lines.append(f"| {r.get('name', 'N/A')} | {r.get('lifecycle_state', 'N/A')} | `{r.get('id', 'N/A')[:50]}...` |")
-    else:
-        # Generic table
-        if resources:
-            keys = list(resources[0].keys())[:5]
-            lines.append("| " + " | ".join(keys) + " |")
-            lines.append("| " + " | ".join(["---"] * len(keys)) + " |")
-            for r in resources[:50]:
-                values = [str(r.get(k, "N/A"))[:30] for k in keys]
-                lines.append("| " + " | ".join(values) + " |")
+    # Generic table
+    elif resources:
+        keys = list(resources[0].keys())[:5]
+        lines.append("| " + " | ".join(keys) + " |")
+        lines.append("| " + " | ".join(["---"] * len(keys)) + " |")
+        for r in resources[:50]:
+            values = [str(r.get(k, "N/A"))[:30] for k in keys]
+            lines.append("| " + " | ".join(values) + " |")
 
     if len(resources) > 50:
         lines.append(f"\n*...and {len(resources) - 50} more*")

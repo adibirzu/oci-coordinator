@@ -8,7 +8,12 @@ tenancy information, and user/group management.
 import json
 from typing import Any
 
+from opentelemetry import trace
+
 from src.mcp.server.auth import get_identity_client, get_oci_config
+
+# Get tracer for identity tools
+_tracer = trace.get_tracer("mcp-oci-identity")
 
 
 async def _list_compartments_logic(
@@ -19,56 +24,65 @@ async def _list_compartments_logic(
     format: str = "markdown",
 ) -> str:
     """Internal logic for listing compartments."""
-    config = get_oci_config()
-    client = get_identity_client()
+    with _tracer.start_as_current_span("mcp.identity.list_compartments") as span:
+        span.set_attribute("include_subtree", include_subtree)
+        span.set_attribute("lifecycle_state", lifecycle_state)
+        span.set_attribute("limit", limit)
 
-    try:
-        # Use tenancy as root if no compartment specified
-        root_compartment = compartment_id or config.get("tenancy")
+        config = get_oci_config()
+        client = get_identity_client()
 
-        if not root_compartment:
-            return "Error: No compartment_id provided and tenancy not found in config"
+        try:
+            # Use tenancy as root if no compartment specified
+            root_compartment = compartment_id or config.get("tenancy")
+            span.set_attribute("root_compartment", root_compartment or "unknown")
 
-        response = client.list_compartments(
-            compartment_id=root_compartment,
-            compartment_id_in_subtree=include_subtree,
-            access_level="ACCESSIBLE",
-            lifecycle_state=lifecycle_state,
-            limit=limit,
-        )
+            if not root_compartment:
+                return "Error: No compartment_id provided and tenancy not found in config"
 
-        compartments = response.data
-
-        if format == "json":
-            return json.dumps(
-                [
-                    {
-                        "name": c.name,
-                        "id": c.id,
-                        "description": c.description,
-                        "lifecycle_state": c.lifecycle_state,
-                        "parent_id": c.compartment_id,
-                    }
-                    for c in compartments
-                ],
-                indent=2,
+            response = client.list_compartments(
+                compartment_id=root_compartment,
+                compartment_id_in_subtree=include_subtree,
+                access_level="ACCESSIBLE",
+                lifecycle_state=lifecycle_state,
+                limit=limit,
             )
 
-        # Markdown table for LLM efficiency
-        lines = [
-            f"Found {len(compartments)} compartments:\n",
-            "| Name | State | OCID |",
-            "| --- | --- | --- |",
-        ]
-        for c in compartments:
-            # Truncate OCID for display
-            short_ocid = f"{c.id[:30]}..." if len(c.id) > 30 else c.id
-            lines.append(f"| {c.name} | {c.lifecycle_state} | `{short_ocid}` |")
+            compartments = response.data
+            span.set_attribute("compartment_count", len(compartments))
 
-        return "\n".join(lines)
+            if format == "json":
+                return json.dumps(
+                    [
+                        {
+                            "name": c.name,
+                            "id": c.id,
+                            "description": c.description,
+                            "lifecycle_state": c.lifecycle_state,
+                            "parent_id": c.compartment_id,
+                        }
+                        for c in compartments
+                    ],
+                    indent=2,
+                )
 
-    except Exception as e:
-        return f"Error listing compartments: {e}"
+            # Markdown table for LLM efficiency
+            lines = [
+                f"Found {len(compartments)} compartments:\n",
+                "| Name | State | OCID |",
+                "| --- | --- | --- |",
+            ]
+            for c in compartments:
+                # Truncate OCID for display
+                short_ocid = f"{c.id[:30]}..." if len(c.id) > 30 else c.id
+                lines.append(f"| {c.name} | {c.lifecycle_state} | `{short_ocid}` |")
+
+            return "\n".join(lines)
+
+        except Exception as e:
+            span.set_attribute("error", str(e))
+            span.record_exception(e)
+            return f"Error listing compartments: {e}"
 
 
 async def _get_compartment_logic(compartment_id: str, format: str = "markdown") -> str:

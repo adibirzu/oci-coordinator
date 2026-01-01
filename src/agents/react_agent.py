@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import structlog
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
@@ -26,6 +26,9 @@ from src.mcp.catalog import ToolCatalog
 from src.observability.tracing import get_tracer
 
 logger = structlog.get_logger(__name__)
+
+if TYPE_CHECKING:
+    from src.memory.manager import SharedMemoryManager
 
 
 @dataclass
@@ -130,6 +133,7 @@ class OCIReActAgent:
         llm: Any,
         tool_catalog: ToolCatalog | None = None,
         resource_cache: OCIResourceCache | None = None,
+        memory_manager: "SharedMemoryManager | None" = None,
         agent_id: str = "oci-react-agent",
         max_iterations: int = 5,
     ):
@@ -140,12 +144,14 @@ class OCIReActAgent:
             llm: LangChain LLM instance
             tool_catalog: MCP tool catalog for API calls
             resource_cache: OCI resource cache for context
+            memory_manager: Shared memory manager for runtime feedback
             agent_id: Agent identifier
             max_iterations: Maximum tool call iterations
         """
         self.llm = llm
         self.tool_catalog = tool_catalog or ToolCatalog.get_instance()
         self.resource_cache = resource_cache
+        self.memory = memory_manager
         self.agent_id = agent_id
         self.max_iterations = max_iterations
         self._tracer = get_tracer(agent_id)
@@ -345,6 +351,12 @@ class OCIReActAgent:
                     compartment_context=compartment_context,
                     tools_context=tools_context,
                 )
+                if self.memory:
+                    feedback_text = await self.memory.get_feedback_text()
+                    if feedback_text:
+                        system_prompt = (
+                            f"{system_prompt}\n\nRuntime feedback directives:\n{feedback_text}"
+                        )
 
                 messages = [
                     SystemMessage(content=system_prompt),
@@ -454,6 +466,7 @@ class SpecializedReActAgent(OCIReActAgent):
     Extends base agent with domain-specific prompts and tool preferences.
     """
 
+    # Domain-specific focus areas (tools are discovered dynamically)
     DOMAIN_PROMPTS = {
         "database": """You are an Oracle Database Troubleshooting Agent.
 
@@ -462,57 +475,53 @@ Focus on:
 - DB System performance
 - Blocking sessions and wait events
 - AWR report analysis
+- SQL tuning and query optimization
 
-Preferred tools:
-- list_autonomous_databases
-- database_status
-- analyze_performance
-- get_blocking_sessions
+Use the dynamically discovered tools below to query real database data.
 """,
         "infrastructure": """You are an OCI Infrastructure Agent.
 
 Focus on:
 - Compartment and tenancy management
-- Compute instance management
+- Compute instance management (list, start, stop, restart)
 - Network configuration (VCN, subnets, security lists)
 - Load balancers and security
 - Resource utilization and inventory
 
-Preferred tools:
-- oci_list_compartments: List all compartments in the tenancy
-- oci_search_compartments: Search compartments by name
-- oci_get_tenancy: Get tenancy info
-- oci_compute_list_instances: List compute instances
-- oci_compute_get_instance: Get instance details
-- oci_network_list_vcns: List VCNs
-- oci_network_list_subnets: List subnets
-- oci_network_list_security_lists: List security lists
+Use the dynamically discovered tools below to manage OCI resources.
 """,
         "finops": """You are an OCI FinOps Agent.
 
 Focus on:
-- Cost analysis and optimization
+- Cost analysis and optimization by service and compartment
 - Budget tracking and alerts
-- Resource rightsizing
-- Usage anomaly detection
+- Resource rightsizing recommendations
+- Usage anomaly detection and spike analysis
+- Credit forecasting
 
-Preferred tools:
-- oci_cost_get_summary
-- oci_cost_by_service
-- oci_cost_by_compartment
-- oci_cost_detect_anomalies
+Use the dynamically discovered tools below to analyze costs.
 """,
         "security": """You are an OCI Security Agent.
 
 Focus on:
-- Cloud Guard findings
-- Security compliance
+- Cloud Guard findings and problems
+- Security compliance monitoring
 - IAM policy analysis
-- Threat detection
+- Threat detection and MITRE mapping
+- Vulnerability scanning
 
-Preferred tools:
-- oci_security_list_problems
-- search_resources (for security analysis)
+Use the dynamically discovered tools below for security analysis.
+""",
+        "observability": """You are an OCI Observability Agent.
+
+Focus on:
+- Log search and analysis
+- Metrics and alarms
+- Error correlation across services
+- Audit log analysis
+- Pattern detection
+
+Use the dynamically discovered tools below for observability tasks.
 """,
     }
 
@@ -545,6 +554,53 @@ Preferred tools:
         self.domain_prompt = self.DOMAIN_PROMPTS.get(domain, "")
 
     async def _get_compartment_context(self) -> str:
-        """Get context with domain-specific additions."""
+        """Get context with domain-specific additions and dynamic tool discovery."""
         base_context = await super()._get_compartment_context()
-        return f"{self.domain_prompt}\n\n{base_context}"
+
+        # Get dynamically discovered tools for this domain
+        domain_tools_context = await self._get_domain_tools_context()
+
+        return f"{self.domain_prompt}\n\n## Domain Tools\n{domain_tools_context}\n\n## Compartments\n{base_context}"
+
+    async def _get_domain_tools_context(self) -> str:
+        """Get dynamically discovered tools for this domain.
+
+        Uses the ToolCatalog.get_tools_for_domain() to discover
+        available tools at runtime, ensuring agents always have
+        access to the latest tools without hardcoding.
+        """
+        if not self.tool_catalog:
+            return "No tools available for this domain."
+
+        try:
+            # Ensure catalog is fresh
+            await self.tool_catalog.ensure_fresh()
+
+            # Get tools for this domain
+            domain_tools = self.tool_catalog.get_tools_for_domain(self.domain)
+
+            if not domain_tools:
+                # Fall back to search
+                search_results = self.tool_catalog.search_tools(
+                    domain=self.domain,
+                    max_tier=3,
+                    limit=15,
+                )
+                if search_results:
+                    lines = []
+                    for tool in search_results:
+                        lines.append(f"- **{tool['name']}**: {tool['description'][:80]}")
+                    return "\n".join(lines)
+                return f"No tools found for domain: {self.domain}"
+
+            # Format tool list
+            lines = []
+            for tool in domain_tools[:15]:  # Limit to 15 tools
+                desc = (tool.description or "")[:80]
+                lines.append(f"- **{tool.name}**: {desc}")
+
+            return "\n".join(lines)
+
+        except Exception as e:
+            self._logger.error("Failed to get domain tools", error=str(e))
+            return f"Error discovering tools: {e}"

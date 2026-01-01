@@ -32,10 +32,10 @@ Usage:
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
-from datetime import datetime, timedelta, timezone
-from typing import Any, Callable
+from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import structlog
 
@@ -198,7 +198,7 @@ class OCIResourceCache:
         """Publish invalidation event to Redis pub/sub."""
         if self._redis:
             try:
-                message = json.dumps({"tag": tag, "keys": keys, "time": datetime.now(timezone.utc).isoformat()})
+                message = json.dumps({"tag": tag, "keys": keys, "time": datetime.now(UTC).isoformat()})
                 await self._redis.publish(CACHE_KEYS["invalidation_channel"], message)
             except Exception as e:
                 self._logger.warning("Publish invalidation failed", error=str(e))
@@ -238,7 +238,7 @@ class OCIResourceCache:
         if not self._redis or not tags:
             return
 
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         metadata = {"tags": tags, "created_at": now}
 
         # Store metadata
@@ -400,7 +400,7 @@ class OCIResourceCache:
             try:
                 metadata = json.loads(metadata_raw)
                 created_at = datetime.fromisoformat(metadata.get("created_at", ""))
-                age = datetime.now(timezone.utc) - created_at
+                age = datetime.now(UTC) - created_at
 
                 # If past soft TTL but within hard TTL, return stale and trigger refresh
                 if age > soft_ttl and refresh_func:
@@ -700,10 +700,24 @@ class OCIResourceCache:
 
         try:
             # Call MCP tool to list compartments
-            result = await self._tool_catalog.execute(
-                "oci_iam_list_compartments",
-                {"include_root": True, "recursive": True}
-            )
+            # Try standardized name first, then fallback to legacy names
+            tool_names = ["oci_list_compartments", "list_compartments", "oci_iam_list_compartments"]
+            result = None
+
+            for tool_name in tool_names:
+                try:
+                    result = await self._tool_catalog.execute(
+                        tool_name,
+                        {"include_root": True, "recursive": True}
+                    )
+                    if result and hasattr(result, 'success') and result.success:
+                        break
+                except Exception:
+                    continue
+
+            if result is None:
+                self._logger.error("No compartment list tool found")
+                return 0
 
             if result.success and result.result:
                 compartments = result.result if isinstance(result.result, list) else []
@@ -754,13 +768,20 @@ class OCIResourceCache:
         # Discover databases
         if "database" in resource_types:
             try:
-                result = await self._tool_catalog.execute(
-                    "list_autonomous_databases",
-                    {"compartment_id": compartment_id}
-                )
-                if result.success and result.result:
-                    databases = result.result if isinstance(result.result, list) else []
-                    results["databases"] = await self.cache_databases(compartment_id, databases)
+                # Try standardized name first, then fallback
+                db_tool_names = ["oci_database_list_autonomous", "list_autonomous_databases"]
+                for tool_name in db_tool_names:
+                    try:
+                        result = await self._tool_catalog.execute(
+                            tool_name,
+                            {"compartment_id": compartment_id}
+                        )
+                        if result.success and result.result:
+                            databases = result.result if isinstance(result.result, list) else []
+                            results["databases"] = await self.cache_databases(compartment_id, databases)
+                            break
+                    except Exception:
+                        continue
             except Exception as e:
                 self._logger.error("Database discovery failed", error=str(e))
 
@@ -798,7 +819,7 @@ class OCIResourceCache:
         Returns:
             Discovery statistics
         """
-        start_time = datetime.now(timezone.utc)
+        start_time = datetime.now(UTC)
         stats: dict[str, Any] = {
             "start_time": start_time.isoformat(),
             "incremental": incremental,
@@ -824,9 +845,9 @@ class OCIResourceCache:
                     stats["resources"][rtype] = stats["resources"].get(rtype, 0) + count
 
         # Update last discovery time
-        stats["end_time"] = datetime.now(timezone.utc).isoformat()
+        stats["end_time"] = datetime.now(UTC).isoformat()
         stats["duration_seconds"] = (
-            datetime.now(timezone.utc) - start_time
+            datetime.now(UTC) - start_time
         ).total_seconds()
 
         await self._set(CACHE_KEYS["last_discovery"], start_time.isoformat())
@@ -1040,7 +1061,7 @@ class OCIResourceCache:
                 last_discovery = await self._get(CACHE_KEYS["last_discovery"])
                 if last_discovery:
                     last_dt = datetime.fromisoformat(last_discovery)
-                    age = datetime.now(timezone.utc) - last_dt
+                    age = datetime.now(UTC) - last_dt
                     health["data_age_hours"] = age.total_seconds() / 3600
                     health["data_stale"] = age > timedelta(hours=6)
                 else:

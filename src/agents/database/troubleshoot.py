@@ -28,17 +28,13 @@ from src.agents.base import (
     KafkaTopics,
 )
 from src.agents.skills import (
-    DB_RCA_WORKFLOW,
-    DB_HEALTH_CHECK_WORKFLOW,
-    SkillExecutionResult,
-    SkillStatus,
     StepResult,
 )
 from src.observability import get_trace_id
 
 if TYPE_CHECKING:
-    from src.memory.manager import SharedMemoryManager
     from src.mcp.catalog import ToolCatalog
+    from src.memory.manager import SharedMemoryManager
 
 logger = structlog.get_logger(__name__)
 
@@ -89,6 +85,18 @@ class Recommendation:
 
 
 @dataclass
+class AwrReportData:
+    """AWR report data for file attachment."""
+
+    html_content: str
+    database_name: str
+    begin_snapshot_id: int
+    end_snapshot_id: int
+    source: str  # sqlcl, dbmgmt, opsi
+    generated_at: str | None = None
+
+
+@dataclass
 class DbAnalysisResult:
     """Result of database analysis."""
 
@@ -101,6 +109,7 @@ class DbAnalysisResult:
     recommendations: list[Recommendation] = field(default_factory=list)
     next_steps: list[str] = field(default_factory=list)
     trace_id: str | None = None
+    awr_report: AwrReportData | None = None  # AWR HTML report for attachment
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
@@ -143,6 +152,13 @@ class DbAnalysisResult:
             ],
             "next_steps": self.next_steps,
             "trace_id": self.trace_id,
+            "awr_report": {
+                "database_name": self.awr_report.database_name,
+                "begin_snapshot_id": self.awr_report.begin_snapshot_id,
+                "end_snapshot_id": self.awr_report.end_snapshot_id,
+                "source": self.awr_report.source,
+                "generated_at": self.awr_report.generated_at,
+            } if self.awr_report else None,
         }
 
 
@@ -177,6 +193,10 @@ class TroubleshootState:
     # Skill execution tracking
     skill_results: list[StepResult] = field(default_factory=list)
 
+    # AWR report data (for attachment)
+    awr_report: AwrReportData | None = None
+    awr_requested: bool = False
+
     # Analysis result
     result: DbAnalysisResult | None = None
     error: str | None = None
@@ -193,25 +213,32 @@ Your expertise includes:
 - SQL performance tuning
 - Resource bottleneck identification
 
-## Available MCP Tools (Database Observatory)
+## Available MCP Tools (Database Observatory - oci_{domain}_{action}_{resource} convention)
 
 ### Tier 1: Cache-Based (Instant, <100ms)
-- `get_fleet_summary`: Get fleet overview with database counts
-- `search_databases`: Find databases by name/type/compartment
-- `get_cached_database`: Get database details from cache
-- `get_cached_statistics`: Get cache statistics
+- `oci_opsi_get_fleet_summary`: Get fleet overview with database counts
+- `oci_opsi_search_databases`: Find databases by name/type/compartment
+- `oci_opsi_get_database`: Get database details from cache
+- `oci_opsi_get_statistics`: Get cache statistics
+- `oci_opsi_refresh_cache`: Refresh cache if needed
 
 ### Tier 2: OPSI API (1-5s)
-- `analyze_cpu_usage`: CPU usage trends with recommendations
-- `analyze_memory_usage`: Memory utilization analysis
-- `analyze_io_performance`: I/O throughput analysis
-- `get_performance_summary`: Combined CPU/memory/I/O summary
-- `find_cost_opportunities`: Identify cost savings opportunities
+- `oci_opsi_analyze_cpu`: CPU usage trends with recommendations
+- `oci_opsi_analyze_memory`: Memory utilization analysis
+- `oci_opsi_analyze_io`: I/O throughput analysis
+- `oci_opsi_get_performance_summary`: Combined CPU/memory/I/O summary
+- `oci_opsi_find_cost_opportunities`: Identify cost savings opportunities
+- `oci_opsi_list_insights`: List database insights
 
 ### Tier 3: SQL Execution (5-30s)
-- `execute_sql`: Run SQL queries via SQLcl
-- `get_schema_info`: Get schema metadata
-- `database_status`: Check connection status
+- `oci_database_execute_sql`: Run SQL queries via SQLcl
+- `oci_database_get_schema`: Get schema metadata
+- `oci_database_get_status`: Check connection status
+- `oci_database_list_connections`: List available connections
+
+### Tier 4: Tenancy Management
+- `oci_tenancy_list_profiles`: List OCI profiles
+- `oci_tenancy_list_compartments`: List compartments
 
 ## Troubleshooting Methodology
 
@@ -247,27 +274,43 @@ class DbTroubleshootAgent(BaseAgent):
     5. Generate recommendations
     """
 
-    # MCP tools from Database Observatory server
+    # MCP tools from Database Observatory server (unified naming convention)
     MCP_TOOLS = [
-        # Tier 1: Cache-based
-        "get_fleet_summary",
-        "search_databases",
-        "get_cached_database",
-        "get_cached_statistics",
-        "refresh_cache_if_needed",
-        # Tier 2: OPSI API
-        "analyze_cpu_usage",
-        "analyze_memory_usage",
-        "analyze_io_performance",
-        "get_performance_summary",
-        "find_cost_opportunities",
-        "list_database_insights",
-        # Tier 3: SQLcl
-        "execute_sql",
-        "get_schema_info",
-        "list_connections",
-        "database_status",
-        "check_network_access",
+        # Tier 1: Cache-based (OPSI)
+        "oci_opsi_get_fleet_summary",
+        "oci_opsi_search_databases",
+        "oci_opsi_get_database",
+        "oci_opsi_get_statistics",
+        "oci_opsi_refresh_cache",
+        "oci_opsi_build_cache",
+        # Tier 2: OPSI API (Analysis)
+        "oci_opsi_analyze_cpu",
+        "oci_opsi_analyze_memory",
+        "oci_opsi_analyze_io",
+        "oci_opsi_get_performance_summary",
+        "oci_opsi_find_cost_opportunities",
+        "oci_opsi_get_savings_summary",
+        "oci_opsi_list_insights",
+        "oci_opsi_list_skills",
+        "oci_opsi_get_skill_recommendations",
+        # Tier 3: SQLcl (Direct SQL)
+        "oci_database_execute_sql",
+        "oci_database_get_schema",
+        "oci_database_list_connections",
+        "oci_database_get_status",
+        "oci_database_disconnect",
+        "oci_database_check_network",
+        "oci_database_get_ip",
+        # Tier 4: Tenancy/Infrastructure
+        "oci_tenancy_list_profiles",
+        "oci_tenancy_get_profile",
+        "oci_tenancy_set_profile",
+        "oci_tenancy_list_compartments",
+        # Health/Cache Management
+        "oci_database_ping",
+        "oci_database_health_check",
+        "oci_database_cache_status",
+        "oci_database_clear_cache",
     ]
 
     @classmethod
@@ -288,6 +331,7 @@ class DbTroubleshootAgent(BaseAgent):
                 "db_rca_workflow",
                 "db_health_check_workflow",
                 "db_sql_analysis_workflow",
+                "db_awr_report_workflow",  # AWR report generation
                 "rca_workflow",  # Legacy
             ],
             kafka_topics=KafkaTopics(
@@ -312,8 +356,8 @@ class DbTroubleshootAgent(BaseAgent):
 
     def __init__(
         self,
-        memory_manager: "SharedMemoryManager | None" = None,
-        tool_catalog: "ToolCatalog | None" = None,
+        memory_manager: SharedMemoryManager | None = None,
+        tool_catalog: ToolCatalog | None = None,
         config: dict[str, Any] | None = None,
         llm: Any = None,
     ):
@@ -418,7 +462,7 @@ class DbTroubleshootAgent(BaseAgent):
                 return {"success": False, "error": str(e)}
 
     async def _discover_node(self, state: TroubleshootState) -> dict[str, Any]:
-        """Discover database using cache-based tools."""
+        """Discover database using cache-based tools and name resolution."""
         with self._tracer.start_as_current_span("discover_database") as span:
             self._logger.info(
                 "Discovering database",
@@ -426,52 +470,68 @@ class DbTroubleshootAgent(BaseAgent):
                 trace_id=get_trace_id(),
             )
 
-            # Extract database name from query
-            db_name = self._extract_db_name(state.query)
-            span.set_attribute("db.name_hint", db_name or "none")
+            updates: dict[str, Any] = {
+                "phase": "performance_overview",
+                "iteration": state.iteration + 1,
+            }
 
-            # If database_id provided, get details from cache
+            # If database_id already provided, get details from cache
             if state.database_id:
+                span.set_attribute("db.id_provided", True)
                 result = await self._call_mcp_tool(
-                    "get_cached_database",
+                    "oci_opsi_get_database",
                     {"database_id": state.database_id},
                 )
                 if result.get("success"):
                     db = result.get("database", {})
-                    return {
-                        "database_name": db.get("database_name"),
-                        "database_type": db.get("database_type"),
-                        "phase": "performance_overview",
-                        "iteration": state.iteration + 1,
-                    }
+                    updates["database_name"] = db.get("database_name")
+                    updates["database_type"] = db.get("database_type")
+                    return updates
 
-            # Search by name if provided
-            if db_name:
+            # Try to resolve database name from query
+            database_id, database_name = await self._resolve_database_from_query(state.query)
+            span.set_attribute("db.name_hint", database_name or "none")
+            span.set_attribute("db.resolved_id", bool(database_id))
+
+            if database_id:
+                # Get full details from cache
                 result = await self._call_mcp_tool(
-                    "search_databases",
-                    {"name": db_name, "limit": 5},
+                    "oci_opsi_get_database",
+                    {"database_id": database_id},
                 )
-                if result.get("success") and result.get("databases"):
-                    db = result["databases"][0]
-                    return {
-                        "database_id": db.get("id"),
-                        "database_name": db.get("database_name"),
-                        "database_type": db.get("database_type"),
-                        "phase": "performance_overview",
-                        "iteration": state.iteration + 1,
-                    }
+                if result.get("success"):
+                    db = result.get("database", {})
+                    updates["database_id"] = database_id
+                    updates["database_name"] = db.get("database_name") or database_name
+                    updates["database_type"] = db.get("database_type")
+                    return updates
+                else:
+                    # Use resolved info even if cache lookup failed
+                    updates["database_id"] = database_id
+                    updates["database_name"] = database_name
+                    return updates
+            elif database_name:
+                # Have name but no ID - store name for context
+                updates["database_name"] = database_name
+                self._logger.info(
+                    "Database name found but OCID not resolved",
+                    name=database_name,
+                )
 
-            # Get fleet summary for context
+            # Try to resolve compartment from query for context
+            compartment_id = await self._resolve_compartment_from_query(state.query)
+            if compartment_id:
+                updates["compartment_id"] = compartment_id
+                span.set_attribute("compartment.resolved", True)
+
+            # Get fleet summary for context if no specific database
             fleet_result = await self._call_mcp_tool(
-                "get_fleet_summary",
+                "oci_opsi_get_fleet_summary",
                 {"use_cache": True},
             )
 
-            return {
-                "fleet_summary": fleet_result if fleet_result.get("success") else {},
-                "phase": "performance_overview",
-                "iteration": state.iteration + 1,
-            }
+            updates["fleet_summary"] = fleet_result if fleet_result.get("success") else {}
+            return updates
 
     async def _performance_overview_node(self, state: TroubleshootState) -> dict[str, Any]:
         """Get performance overview using OPSI."""
@@ -491,7 +551,7 @@ class DbTroubleshootAgent(BaseAgent):
 
             # Get combined performance summary
             result = await self._call_mcp_tool(
-                "get_performance_summary",
+                "oci_opsi_get_performance_summary",
                 {
                     "database_id": state.database_id,
                     "hours_back": 24,
@@ -523,21 +583,21 @@ class DbTroubleshootAgent(BaseAgent):
                 perf = state.performance_summary
                 if perf.get("cpu", {}).get("avg_percent", 0) > 50:
                     cpu_analysis = await self._call_mcp_tool(
-                        "analyze_cpu_usage",
+                        "oci_opsi_analyze_cpu",
                         {"database_id": state.database_id, "hours_back": 24},
                     )
 
                 # Analyze memory if there are issues
                 if perf.get("memory", {}).get("avg_percent", 0) > 50:
                     memory_analysis = await self._call_mcp_tool(
-                        "analyze_memory_usage",
+                        "oci_opsi_analyze_memory",
                         {"database_id": state.database_id, "hours_back": 24},
                     )
 
                 # Analyze I/O if there are issues
                 if perf.get("io", {}).get("avg_throughput_mbps", 0) > 100:
                     io_analysis = await self._call_mcp_tool(
-                        "analyze_io_performance",
+                        "oci_opsi_analyze_io",
                         {"database_id": state.database_id, "hours_back": 24},
                     )
 
@@ -562,7 +622,7 @@ class DbTroubleshootAgent(BaseAgent):
             blocking_sessions = []
 
             # Check if SQLcl is available
-            connections = await self._call_mcp_tool("list_connections", {})
+            connections = await self._call_mcp_tool("oci_database_list_connections", {})
 
             if not connections.get("success") or not connections.get("connections"):
                 self._logger.info("SQLcl not available, skipping SQL analysis")
@@ -578,7 +638,7 @@ class DbTroubleshootAgent(BaseAgent):
 
             # Query wait events
             wait_result = await self._call_mcp_tool(
-                "execute_sql",
+                "oci_database_execute_sql",
                 {
                     "sql": """
                         SELECT event, total_waits, time_waited_micro/1000000 as time_waited_sec
@@ -594,7 +654,7 @@ class DbTroubleshootAgent(BaseAgent):
 
             # Query top SQL
             top_sql_result = await self._call_mcp_tool(
-                "execute_sql",
+                "oci_database_execute_sql",
                 {
                     "sql": """
                         SELECT sql_id, elapsed_time/1000000 as elapsed_sec,
@@ -611,7 +671,7 @@ class DbTroubleshootAgent(BaseAgent):
 
             # Query blocking sessions
             blocking_result = await self._call_mcp_tool(
-                "execute_sql",
+                "oci_database_execute_sql",
                 {
                     "sql": """
                         SELECT blocking_session, sid, serial#, username, sql_id
@@ -852,23 +912,169 @@ class DbTroubleshootAgent(BaseAgent):
 
     def _extract_db_name(self, query: str) -> str | None:
         """Extract database name from natural language query."""
+        import re
+
         query_lower = query.lower()
 
-        # Common patterns
-        patterns = [
-            "database ", "db ", "for ", "analyze ", "check ",
-            "troubleshoot ", "investigate ",
+        # Regex patterns for database name extraction
+        db_patterns = [
+            r"(?:database|db)\s+['\"]?([\w_-]+)['\"]?",
+            r"(?:for|on|analyze|check|troubleshoot|investigate)\s+['\"]?([\w_-]+)['\"]?\s*(?:database|db)?",
+            r"['\"]?([\w_-]+)['\"]?\s+(?:database|db)",
+            r"performance\s+(?:of|for)\s+['\"]?([\w_-]+)['\"]?",
         ]
 
+        for pattern in db_patterns:
+            match = re.search(pattern, query_lower)
+            if match:
+                name = match.group(1)
+                # Filter out common words that aren't database names
+                if name not in {"the", "a", "my", "our", "this", "that", "all", "any"}:
+                    return name
+
+        return None
+
+    async def _resolve_database_from_query(self, query: str) -> tuple[str | None, str | None]:
+        """
+        Extract and resolve database name from user query.
+
+        Returns:
+            Tuple of (database_id, database_name) or (None, None) if not found
+        """
+        db_name = self._extract_db_name(query)
+
+        if not db_name:
+            return None, None
+
+        self._logger.debug("Attempting to resolve database", name=db_name)
+
+        # Try to resolve using MCP search_databases tool
+        try:
+            result = await self._call_mcp_tool(
+                "oci_opsi_search_databases",
+                {"name": db_name, "limit": 5},
+            )
+
+            if result.get("success") and result.get("databases"):
+                databases = result["databases"]
+                # Exact match first
+                for db in databases:
+                    if db.get("database_name", "").lower() == db_name.lower():
+                        self._logger.info(
+                            "Resolved database name to OCID",
+                            name=db_name,
+                            database_id=db.get("id", "")[:50],
+                        )
+                        return db.get("id"), db.get("database_name")
+
+                # Otherwise use first match
+                db = databases[0]
+                self._logger.info(
+                    "Resolved database name to OCID (partial match)",
+                    name=db_name,
+                    database_id=db.get("id", "")[:50],
+                )
+                return db.get("id"), db.get("database_name")
+
+        except Exception as e:
+            self._logger.warning(
+                "Database resolution failed",
+                name=db_name,
+                error=str(e),
+            )
+
+        # Try OCIResourceCache as fallback
+        try:
+            from src.cache.oci_resource_cache import OCIResourceCache
+            import os
+
+            redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
+            cache = OCIResourceCache.get_instance(redis_url)
+
+            # Search in cached databases
+            databases = await cache.search_resources(
+                resource_type="database",
+                name_pattern=db_name,
+                limit=5,
+            )
+
+            if databases:
+                db = databases[0]
+                self._logger.info(
+                    "Resolved database from cache",
+                    name=db_name,
+                    database_id=db.get("id", "")[:50],
+                )
+                return db.get("id"), db.get("display_name")
+
+        except Exception as e:
+            self._logger.debug("Cache lookup failed", error=str(e))
+
+        return None, db_name  # Return name even if ID not found
+
+    async def _resolve_compartment_from_query(self, query: str) -> str | None:
+        """
+        Extract and resolve compartment name from user query.
+
+        Returns:
+            Compartment OCID or None if not found
+        """
+        import re
+
+        query_lower = query.lower()
+
+        # Regex patterns for compartment name extraction
+        patterns = [
+            r"(?:in|from|for)\s+(?:the\s+)?['\"]?([\w_-]+)['\"]?\s+compartment",
+            r"compartment\s+['\"]?([\w_-]+)['\"]?",
+            r"(?:in|from|for)\s+compartment\s+['\"]?([\w_-]+)['\"]?",
+        ]
+
+        compartment_name = None
         for pattern in patterns:
-            if pattern in query_lower:
-                idx = query_lower.find(pattern) + len(pattern)
-                remaining = query[idx:].strip()
-                # Get first word after pattern
-                if remaining:
-                    parts = remaining.split()
-                    if parts:
-                        return parts[0].strip("'\"")
+            match = re.search(pattern, query_lower)
+            if match:
+                compartment_name = match.group(1)
+                break
+
+        if not compartment_name:
+            return None
+
+        self._logger.debug("Attempting to resolve compartment", name=compartment_name)
+
+        try:
+            from src.oci.tenancy_manager import TenancyManager
+
+            manager = TenancyManager.get_instance()
+            if not manager._initialized:
+                await manager.initialize()
+
+            # Try exact match first
+            ocid = await manager.get_compartment_ocid(compartment_name)
+            if ocid:
+                self._logger.info(
+                    "Resolved compartment name to OCID",
+                    name=compartment_name,
+                    ocid=ocid[:50],
+                )
+                return ocid
+
+            # Try partial match
+            matches = await manager.search_compartments(compartment_name)
+            if matches:
+                self._logger.info(
+                    "Resolved compartment (partial match)",
+                    name=compartment_name,
+                    ocid=matches[0].id[:50],
+                )
+                return matches[0].id
+
+        except Exception as e:
+            self._logger.warning(
+                "Compartment resolution failed",
+                name=compartment_name,
+                error=str(e),
+            )
 
         return None
 
@@ -893,20 +1099,45 @@ class DbTroubleshootAgent(BaseAgent):
             if not self._graph:
                 self.build_graph()
 
-            # Create initial state
+            # Pre-resolve database and compartment from query if not provided
+            database_id = context.get("database_id")
+            database_name = context.get("database_name")
+            compartment_id = context.get("compartment_id")
+
+            if not database_id:
+                resolved_id, resolved_name = await self._resolve_database_from_query(query)
+                if resolved_id:
+                    database_id = resolved_id
+                    database_name = database_name or resolved_name
+                    span.set_attribute("db.pre_resolved", True)
+                    self._logger.info(
+                        "Pre-resolved database from query",
+                        database_id=database_id[:50] if database_id else None,
+                        database_name=database_name,
+                    )
+
+            if not compartment_id:
+                resolved_compartment = await self._resolve_compartment_from_query(query)
+                if resolved_compartment:
+                    compartment_id = resolved_compartment
+                    span.set_attribute("compartment.pre_resolved", True)
+
+            # Create initial state with resolved values
             initial_state = TroubleshootState(
                 query=query,
-                database_id=context.get("database_id"),
-                database_name=context.get("database_name"),
+                database_id=database_id,
+                database_name=database_name,
                 database_type=context.get("database_type"),
-                compartment_id=context.get("compartment_id"),
+                compartment_id=compartment_id,
                 region=context.get("region"),
             )
 
             self._logger.info(
                 "Starting database troubleshooting",
                 query=query[:100],
-                database_id=initial_state.database_id,
+                database_id=initial_state.database_id[:50] if initial_state.database_id else None,
+                database_name=initial_state.database_name,
+                compartment_id=initial_state.compartment_id[:50] if initial_state.compartment_id else None,
                 trace_id=get_trace_id(),
             )
 
@@ -972,6 +1203,221 @@ class DbTroubleshootAgent(BaseAgent):
                 trace_id=get_trace_id(),
             )
 
+    async def get_awr_report(
+        self,
+        database_name: str | None = None,
+        database_id: str | None = None,
+        managed_database_id: str | None = None,
+        hours_back: int = 1,
+        source: str = "auto",  # auto, sqlcl, dbmgmt, opsi
+        profile: str = "EMDEMO",
+    ) -> AwrReportData | None:
+        """
+        Generate AWR report from the best available source.
+
+        Source priority (per user preference):
+        1. SQLcl Direct (if connection available) - PRIMARY
+        2. DB Management (if managed)
+        3. OpsInsights (if insight enabled)
+
+        Args:
+            database_name: Database display name (for resolution)
+            database_id: OPSI database OCID
+            managed_database_id: DB Management database OCID
+            hours_back: Hours of data for report (default 1)
+            source: Force specific source or auto-detect
+            profile: OCI profile to use (default EMDEMO)
+
+        Returns:
+            AwrReportData with HTML content or None if failed
+        """
+        import base64
+        from datetime import datetime
+
+        with self._tracer.start_as_current_span("get_awr_report") as span:
+            span.set_attribute("awr.source_preference", source)
+            span.set_attribute("awr.hours_back", hours_back)
+            span.set_attribute("awr.profile", profile)
+
+            self._logger.info(
+                "Generating AWR report",
+                database_name=database_name,
+                source=source,
+                hours_back=hours_back,
+                trace_id=get_trace_id(),
+            )
+
+            # Try to resolve database if only name provided
+            if database_name and not database_id and not managed_database_id:
+                resolved_id, _ = await self._resolve_database_from_query(database_name)
+                database_id = resolved_id
+
+            # Source 1: SQLcl Direct (if source is auto or sqlcl)
+            if source in ("auto", "sqlcl"):
+                awr_data = await self._get_awr_via_sqlcl(database_name, hours_back)
+                if awr_data:
+                    span.set_attribute("awr.source_used", "sqlcl")
+                    return awr_data
+
+            # Source 2: DB Management (if source is auto or dbmgmt)
+            if source in ("auto", "dbmgmt") and managed_database_id:
+                awr_data = await self._get_awr_via_dbmgmt(
+                    managed_database_id, hours_back, profile
+                )
+                if awr_data:
+                    span.set_attribute("awr.source_used", "dbmgmt")
+                    return awr_data
+
+            # Source 2b: Try to find managed database by name
+            if source in ("auto", "dbmgmt") and database_name:
+                # Search for managed database
+                search_result = await self._call_mcp_tool(
+                    "search_managed_databases",
+                    {"name": database_name, "profile": profile, "limit": 5},
+                )
+                if search_result.get("success") and search_result.get("databases"):
+                    db = search_result["databases"][0]
+                    awr_data = await self._get_awr_via_dbmgmt(
+                        db["id"], hours_back, profile
+                    )
+                    if awr_data:
+                        awr_data.database_name = db.get("name", database_name)
+                        span.set_attribute("awr.source_used", "dbmgmt")
+                        return awr_data
+
+            self._logger.warning(
+                "AWR report generation failed - no source available",
+                database_name=database_name,
+                source=source,
+            )
+            span.set_attribute("awr.source_used", "none")
+            return None
+
+    async def _get_awr_via_sqlcl(
+        self, database_name: str | None, hours_back: int
+    ) -> AwrReportData | None:
+        """Get AWR report via SQLcl direct connection."""
+        # Check if SQLcl is available for this database
+        connections = await self._call_mcp_tool("oci_database_list_connections", {})
+
+        if not connections.get("success") or not connections.get("connections"):
+            self._logger.debug("SQLcl not available for AWR")
+            return None
+
+        # Find matching connection
+        conn_name = None
+        for conn in connections.get("connections", []):
+            if database_name and database_name.lower() in conn.get("name", "").lower():
+                conn_name = conn.get("name")
+                break
+
+        if not conn_name:
+            self._logger.debug("No SQLcl connection for database", name=database_name)
+            return None
+
+        # Generate AWR via SQLcl SQL command
+        # This uses the DBMS_WORKLOAD_REPOSITORY package
+        awr_sql = f"""
+            DECLARE
+                l_report CLOB;
+                l_dbid   NUMBER;
+                l_inst   NUMBER := 1;
+                l_bid    NUMBER;
+                l_eid    NUMBER;
+            BEGIN
+                SELECT dbid INTO l_dbid FROM v$database;
+
+                SELECT MIN(snap_id), MAX(snap_id)
+                INTO l_bid, l_eid
+                FROM dba_hist_snapshot
+                WHERE end_interval_time > SYSDATE - {hours_back}/24;
+
+                SELECT XMLAGG(
+                    XMLELEMENT(e, output || CHR(10))
+                ).getClobVal()
+                INTO l_report
+                FROM TABLE(
+                    DBMS_WORKLOAD_REPOSITORY.AWR_REPORT_HTML(
+                        l_dbid, l_inst, l_bid, l_eid
+                    )
+                );
+
+                DBMS_OUTPUT.PUT_LINE('AWR_BEGIN');
+                DBMS_OUTPUT.PUT_LINE(l_report);
+                DBMS_OUTPUT.PUT_LINE('AWR_END');
+            END;
+        """
+
+        result = await self._call_mcp_tool(
+            "oci_database_execute_sql",
+            {"sql": awr_sql, "connection": conn_name},
+        )
+
+        if result.get("success"):
+            output = result.get("output", "")
+            # Extract HTML between markers
+            if "AWR_BEGIN" in output and "AWR_END" in output:
+                start = output.find("AWR_BEGIN") + len("AWR_BEGIN")
+                end = output.find("AWR_END")
+                html_content = output[start:end].strip()
+
+                return AwrReportData(
+                    html_content=html_content,
+                    database_name=database_name or "unknown",
+                    begin_snapshot_id=0,  # Not easily available from output
+                    end_snapshot_id=0,
+                    source="sqlcl",
+                    generated_at=time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                )
+
+        return None
+
+    async def _get_awr_via_dbmgmt(
+        self,
+        managed_database_id: str,
+        hours_back: int,
+        profile: str,
+    ) -> AwrReportData | None:
+        """Get AWR report via DB Management API."""
+        import base64
+
+        # Use the auto-detect tool that finds snapshots automatically
+        result = await self._call_mcp_tool(
+            "get_awr_db_report_auto",
+            {
+                "managed_database_id": managed_database_id,
+                "hours_back": hours_back,
+                "profile": profile,
+                "report_format": "HTML",
+            },
+        )
+
+        if not result.get("success"):
+            self._logger.warning(
+                "DB Management AWR failed",
+                error=result.get("error"),
+            )
+            return None
+
+        # Decode base64 HTML content
+        html_base64 = result.get("report_html", "")
+        if html_base64:
+            try:
+                html_content = base64.b64decode(html_base64).decode("utf-8")
+            except Exception:
+                html_content = html_base64  # Already decoded
+
+            return AwrReportData(
+                html_content=html_content,
+                database_name=result.get("database_name", "unknown"),
+                begin_snapshot_id=result.get("begin_snapshot_id", 0),
+                end_snapshot_id=result.get("end_snapshot_id", 0),
+                source="dbmgmt",
+                generated_at=result.get("generated_at"),
+            )
+
+        return None
+
     def _format_response(self, analysis: DbAnalysisResult) -> str | dict:
         """
         Format analysis result using structured response.
@@ -982,8 +1428,10 @@ class DbTroubleshootAgent(BaseAgent):
             ListItem,
             MetricValue,
             ResponseFooter,
-            Severity as FmtSeverity,
             StatusIndicator,
+        )
+        from src.formatting import (
+            Severity as FmtSeverity,
         )
 
         # Map severity
@@ -1058,4 +1506,103 @@ class DbTroubleshootAgent(BaseAgent):
                 help_text="Run `/oci db analyze <db_name>` for detailed analysis",
             )
 
+        # Add AWR report as file attachment if present
+        if analysis.awr_report:
+            from src.formatting import FileAttachment
+
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            db_name = analysis.awr_report.database_name.replace(" ", "_")
+            filename = f"awr_{db_name}_{timestamp}.html"
+
+            response.add_attachment(
+                FileAttachment(
+                    content=analysis.awr_report.html_content,
+                    filename=filename,
+                    content_type="text/html",
+                    title=f"AWR Report - {analysis.awr_report.database_name}",
+                    comment=(
+                        f"AWR report from {analysis.awr_report.source} "
+                        f"(snapshots {analysis.awr_report.begin_snapshot_id}-"
+                        f"{analysis.awr_report.end_snapshot_id})"
+                    ),
+                )
+            )
+
         return self.format_response(response)
+
+    async def generate_awr_report(
+        self,
+        database_name: str | None = None,
+        database_id: str | None = None,
+        managed_database_id: str | None = None,
+        hours_back: int = 1,
+        source: str = "auto",
+        profile: str = "EMDEMO",
+    ) -> dict[str, Any]:
+        """
+        Generate an AWR report and return it ready for Slack attachment.
+
+        This is a high-level method for direct AWR report requests.
+        Returns a response dict with the message and attachments list.
+
+        Args:
+            database_name: Database display name
+            database_id: OPSI database OCID
+            managed_database_id: DB Management database OCID
+            hours_back: Hours of data for report (default 1)
+            source: Force source (auto, sqlcl, dbmgmt)
+            profile: OCI profile (default EMDEMO)
+
+        Returns:
+            Dict with 'message', 'success', and 'attachments' keys
+        """
+        with self._tracer.start_as_current_span("generate_awr_report"):
+            awr_data = await self.get_awr_report(
+                database_name=database_name,
+                database_id=database_id,
+                managed_database_id=managed_database_id,
+                hours_back=hours_back,
+                source=source,
+                profile=profile,
+            )
+
+            if not awr_data:
+                return {
+                    "success": False,
+                    "message": (
+                        f"Could not generate AWR report for "
+                        f"{database_name or database_id or 'unknown database'}. "
+                        f"Ensure the database is registered in DB Management or "
+                        f"has a SQLcl connection."
+                    ),
+                    "attachments": [],
+                }
+
+            # Build response with attachment
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            db_name = awr_data.database_name.replace(" ", "_")
+            filename = f"awr_{db_name}_{timestamp}.html"
+
+            return {
+                "success": True,
+                "message": (
+                    f"AWR report generated for **{awr_data.database_name}**\n"
+                    f"- Source: {awr_data.source.upper()}\n"
+                    f"- Snapshots: {awr_data.begin_snapshot_id} - {awr_data.end_snapshot_id}\n"
+                    f"- Generated: {awr_data.generated_at or 'now'}\n\n"
+                    f"The HTML report is attached below."
+                ),
+                "attachments": [
+                    {
+                        "content": awr_data.html_content,
+                        "filename": filename,
+                        "content_type": "text/html",
+                        "title": f"AWR Report - {awr_data.database_name}",
+                        "comment": (
+                            f"AWR report from {awr_data.source} "
+                            f"(snapshots {awr_data.begin_snapshot_id}-"
+                            f"{awr_data.end_snapshot_id})"
+                        ),
+                    }
+                ],
+            }
