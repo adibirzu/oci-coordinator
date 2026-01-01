@@ -141,6 +141,7 @@ class LangGraphCoordinator:
             agent_catalog=agent_catalog,
             memory=memory,
             workflow_registry=workflow_registry,
+            orchestrator=None,  # Set after orchestrator init
         )
         self._graph: StateGraph | None = None
         self._compiled_graph: Any = None
@@ -174,6 +175,7 @@ class LangGraphCoordinator:
         graph.add_node(NodeName.CLASSIFIER.value, self._nodes.classifier_node)
         graph.add_node(NodeName.ROUTER.value, self._nodes.router_node)
         graph.add_node(NodeName.WORKFLOW.value, self._nodes.workflow_node)
+        graph.add_node(NodeName.PARALLEL.value, self._nodes.parallel_node)
         graph.add_node(NodeName.AGENT.value, self._nodes.agent_node)
         graph.add_node(NodeName.ACTION.value, self._nodes.action_node)
         graph.add_node(NodeName.OUTPUT.value, self._nodes.output_node)
@@ -194,12 +196,13 @@ class LangGraphCoordinator:
         # Classifier → Router (always)
         graph.add_edge(NodeName.CLASSIFIER.value, NodeName.ROUTER.value)
 
-        # Router → Conditional (workflow/agent/output)
+        # Router → Conditional (workflow/parallel/agent/output)
         graph.add_conditional_edges(
             NodeName.ROUTER.value,
             should_continue_after_router,
             {
                 "workflow": NodeName.WORKFLOW.value,
+                "parallel": NodeName.PARALLEL.value,
                 "agent": NodeName.AGENT.value,
                 "output": NodeName.OUTPUT.value,
             },
@@ -207,6 +210,9 @@ class LangGraphCoordinator:
 
         # Workflow → Output (always, workflows are terminal)
         graph.add_edge(NodeName.WORKFLOW.value, NodeName.OUTPUT.value)
+
+        # Parallel → Output (parallel execution synthesizes and returns)
+        graph.add_edge(NodeName.PARALLEL.value, NodeName.OUTPUT.value)
 
         # Agent → Conditional (action/output)
         graph.add_conditional_edges(
@@ -321,7 +327,9 @@ class LangGraphCoordinator:
                 llm=self.llm,
                 memory=self.memory,
             )
-            self._logger.info("Parallel orchestrator initialized")
+            # Connect orchestrator to nodes for parallel execution
+            self._nodes.orchestrator = self._orchestrator
+            self._logger.info("Parallel orchestrator initialized and connected to nodes")
 
         except Exception as e:
             self._logger.warning(
@@ -464,13 +472,18 @@ class LangGraphCoordinator:
         try:
             result = await self._compiled_graph.ainvoke(initial_state, config)
 
-            # Extract results
+            # Extract results - handle both dict and object forms
             routing_type = "direct"
-            if result.get("routing"):
-                routing_type = result["routing"].routing_type.value
+            routing = result.get("routing") if isinstance(result, dict) else getattr(result, "routing", None)
+            if routing:
+                # Handle both RoutingDecision objects and dicts
+                if hasattr(routing, "routing_type"):
+                    routing_type = routing.routing_type.value if hasattr(routing.routing_type, "value") else str(routing.routing_type)
+                elif isinstance(routing, dict):
+                    routing_type = routing.get("routing_type", "direct")
 
-            response = result.get("final_response", "")
-            error = result.get("error")
+            response = result.get("final_response", "") if isinstance(result, dict) else getattr(result, "final_response", "")
+            error = result.get("error") if isinstance(result, dict) else getattr(result, "error", None)
 
             # Save to memory if session provided
             if session_id and self.memory:
@@ -489,18 +502,21 @@ class LangGraphCoordinator:
                     },
                 )
 
+            # Extract iteration count
+            iterations = result.get("iteration", 0) if isinstance(result, dict) else getattr(result, "iteration", 0)
+
             self._logger.info(
                 "Query processed",
                 success=error is None,
                 routing_type=routing_type,
-                iterations=result.get("iteration", 0),
+                iterations=iterations,
             )
 
             return {
                 "success": error is None,
                 "response": response,
                 "routing_type": routing_type,
-                "iterations": result.get("iteration", 0),
+                "iterations": iterations,
                 "error": error,
                 "thread_id": effective_thread_id,
             }
@@ -664,6 +680,7 @@ async def create_coordinator(
     redis_url: str = "redis://localhost:6379",
     atp_connection: str | None = None,
     max_iterations: int = 15,
+    include_workflows: bool = True,
 ) -> LangGraphCoordinator:
     """
     Create and initialize a LangGraph Coordinator.
@@ -675,6 +692,7 @@ async def create_coordinator(
         redis_url: Redis URL for caching
         atp_connection: ATP connection string for persistence
         max_iterations: Maximum tool iterations
+        include_workflows: Include pre-built deterministic workflows
 
     Returns:
         Initialized LangGraphCoordinator
@@ -698,12 +716,21 @@ async def create_coordinator(
     tool_catalog = ToolCatalog()
     agent_catalog = AgentCatalog.get_instance()
 
+    # Load pre-built workflows if enabled
+    workflow_registry = None
+    if include_workflows:
+        from src.agents.coordinator.workflows import get_workflow_registry
+
+        workflow_registry = get_workflow_registry()
+        logger.info("Loaded pre-built workflows", count=len(workflow_registry))
+
     # Create coordinator
     coordinator = LangGraphCoordinator(
         llm=llm,
         tool_catalog=tool_catalog,
         agent_catalog=agent_catalog,
         memory=memory,
+        workflow_registry=workflow_registry,
         max_iterations=max_iterations,
     )
 

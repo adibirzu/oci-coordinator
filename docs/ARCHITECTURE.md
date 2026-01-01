@@ -427,12 +427,14 @@ servers:
     timeout_seconds: 60
 
 defaults:
-  timeout_seconds: 120  # Increased for large compartments
+  timeout_seconds: 120  # Default for most tools
   retry_attempts: 3
   backoff_multiplier: 2
   tool_timeouts:
+    oci_cost_get_summary: 30     # OCI Usage API can be slow
     oci_compute_list_instances: 180
     oci_observability_query_logs: 300
+    oci_discovery_run: 60        # Full resource discovery
 ```
 
 ### 7.2 GitHub References for MCP Servers
@@ -448,19 +450,21 @@ defaults:
 
 ### 7.3 MCP Server Capabilities Comparison
 
-| Feature | oci-unified | mcp-oci | finopsai-mcp |
-|---------|-------------|---------|--------------|
+| Feature | oci-unified | mcp-oci | finopsai-mcp (optional) |
+|---------|-------------|---------|-------------------------|
 | **Compartment Discovery** | ✅ ShowOCI-style with Redis caching | ✅ Basic | - |
 | **Instance by Name** | ✅ find/start/stop/restart | ❌ Requires OCID | - |
 | **Resource Caching** | ✅ Redis-backed | ❌ Direct API | - |
 | **Compute Operations** | ✅ Basic | ✅ Full | - |
 | **Network Operations** | ✅ Basic | ✅ Full | - |
-| **Cost Analysis** | ✅ Basic summary | ✅ Basic | ✅ Advanced |
-| **Anomaly Detection** | ❌ | ❌ | ✅ Cost spikes |
-| **Rightsizing** | ❌ | ❌ | ✅ Recommendations |
+| **Cost Analysis** | ✅ With 30s timeout | ✅ Basic | ✅ Advanced |
+| **Cost Anomaly Detection** | ✅ Built-in (high-concentration) | ❌ | ✅ Cost spikes |
+| **Rightsizing Recommendations** | ✅ Built-in heuristics | ❌ | ✅ Detailed |
 | **Budget Tracking** | ❌ | ❌ | ✅ Budget status |
 | **Multicloud** | ❌ | ❌ | ✅ OCI, AWS, Azure, GCP |
 | **Troubleshoot Skills** | ✅ | ❌ | ❌ |
+
+**Note:** oci-unified is the primary server for cost analysis. It includes a 30-second timeout on the OCI Usage API to prevent hanging. The FinOps agent uses built-in heuristics for anomaly detection and recommendations when finopsai-mcp is not available.
 
 ### 7.4 Server Capabilities
 

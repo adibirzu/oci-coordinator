@@ -93,12 +93,9 @@ class FinOpsAgent(BaseAgent):
                 "and optimization recommendations in OCI."
             ),
             mcp_tools=[
-                "oci_cost_get_summary",  # Built-in tool
-                # Additional tools from finopsai server (if available):
-                # "oci_cost_get_by_service", "oci_cost_get_forecast",
-                # "oci_cost_list_budgets", "oci_cost_spikes"
+                "oci_cost_get_summary",  # Primary cost tool with 30s timeout
             ],
-            mcp_servers=["oci-unified", "finopsai"],  # finopsai, not finopsai-mcp
+            mcp_servers=["oci-unified"],
         )
 
     def build_graph(self) -> StateGraph:
@@ -160,12 +157,12 @@ class FinOpsAgent(BaseAgent):
                 except ValueError:
                     pass
 
-            # Get cost summary (the main tool that exists)
+            # Get cost summary - compartment_id=None uses tenancy from OCI config
             try:
                 summary_result = await self.call_tool(
                     "oci_cost_get_summary",
                     {
-                        "compartment_id": state.compartment_id or "ocid1.tenancy.oc1..example",
+                        "compartment_id": state.compartment_id,  # None is valid, tool handles it
                         "days": days,
                     },
                 )
@@ -228,47 +225,14 @@ class FinOpsAgent(BaseAgent):
         }
 
     async def _detect_anomalies_node(self, state: FinOpsState) -> dict[str, Any]:
-        """Detect cost anomalies - uses finopsai tools if available, otherwise analyzes service data."""
+        """Detect cost anomalies - analyzes service data from cost summary."""
         self._logger.info("Detecting cost anomalies")
 
         anomalies = []
         cost_trend = "stable"
 
-        # Try finopsai spike detection if tool is available
-        if self.tools and self.tools.get_tool("oci_cost_spikes"):
-            try:
-                result = await self.call_tool(
-                    "oci_cost_spikes",
-                    {
-                        "compartment_id": state.compartment_id or "default",
-                        "time_range": state.time_range,
-                        "threshold_percent": 20,
-                    },
-                )
-                if isinstance(result, dict):
-                    spikes = result.get("spikes", [])
-                    for spike in spikes:
-                        anomalies.append({
-                            "type": "cost_spike",
-                            "description": f"Cost spike of {spike.get('percent_change', 0):.1f}% in {spike.get('service', 'Unknown')}",
-                            "service": spike.get("service"),
-                            "amount": spike.get("amount", 0),
-                            "date": spike.get("date"),
-                            "severity": "high" if spike.get("percent_change", 0) > 50 else "medium",
-                        })
-
-                    if spikes:
-                        avg_change = sum(s.get("percent_change", 0) for s in spikes) / len(spikes)
-                        if avg_change > 10:
-                            cost_trend = "increasing"
-                        elif avg_change < -10:
-                            cost_trend = "decreasing"
-
-            except Exception as e:
-                self._logger.debug("Spike detection tool not available", error=str(e))
-
-        # Fallback: analyze cost by service for anomalies (always run if no anomalies found)
-        if not anomalies and state.cost_by_service:
+        # Analyze cost by service for anomalies
+        if state.cost_by_service:
             # Flag services consuming > 40% of budget
             for service in state.cost_by_service:
                 cost = service.get("cost", 0)
@@ -290,83 +254,56 @@ class FinOpsAgent(BaseAgent):
     async def _generate_recommendations_node(
         self, state: FinOpsState
     ) -> dict[str, Any]:
-        """Generate optimization recommendations - uses finopsai tools if available."""
+        """Generate optimization recommendations based on cost analysis."""
         self._logger.info("Generating optimization recommendations")
 
         recommendations = []
 
-        # Try rightsizing recommendations from finopsai if tool is available
-        if self.tools and self.tools.get_tool("oci_cost_service_drilldown"):
-            try:
-                result = await self.call_tool(
-                    "oci_cost_service_drilldown",
-                    {
-                        "compartment_id": state.compartment_id or "default",
-                        "service": "compute",
-                        "include_recommendations": True,
-                    },
-                )
-                if isinstance(result, dict):
-                    recs = result.get("recommendations", [])
-                    for rec in recs:
-                        recommendations.append({
-                            "type": rec.get("type", "rightsizing"),
-                            "service": "Compute",
-                            "resource": rec.get("resource_name", "Unknown"),
-                            "potential_savings": rec.get("estimated_savings", 0),
-                            "action": rec.get("recommendation", "Review resource sizing"),
-                            "current": rec.get("current_shape"),
-                            "suggested": rec.get("recommended_shape"),
-                        })
+        # Analyze cost by service for optimization opportunities
+        for service in state.cost_by_service:
+            cost = service.get("cost", 0)
+            name = service.get("name", "Unknown")
 
-            except Exception as e:
-                self._logger.debug("Rightsizing API not available", error=str(e))
+            # High cost concentration recommendation
+            if state.total_cost > 0 and cost / state.total_cost > 0.4:
+                recommendations.append({
+                    "type": "review",
+                    "service": name,
+                    "potential_savings": cost * 0.1,  # Estimate 10% savings from review
+                    "action": f"Review {name} usage - accounts for {cost/state.total_cost*100:.0f}% of spend",
+                })
 
-        # Try budget status check if tool is available
-        if self.tools and self.tools.get_tool("oci_cost_budget_status"):
-            try:
-                budget_result = await self.call_tool(
-                    "oci_cost_budget_status",
-                    {
-                        "compartment_id": state.compartment_id or "default",
-                    },
-                )
-                if isinstance(budget_result, dict):
-                    for budget in budget_result.get("budgets", []):
-                        pct_used = budget.get("percent_used", 0)
-                        if pct_used > 80:
-                            recommendations.append({
-                                "type": "budget_alert",
-                                "service": budget.get("target_type", "All Services"),
-                                "potential_savings": 0,
-                                "action": f"Budget '{budget.get('name')}' is {pct_used:.0f}% used - review spending",
-                                "severity": "high" if pct_used > 90 else "medium",
-                            })
+            # Compute-specific recommendations
+            if "compute" in name.lower() and cost > 100:
+                recommendations.append({
+                    "type": "rightsizing",
+                    "service": name,
+                    "potential_savings": cost * 0.2,
+                    "action": "Consider rightsizing compute instances or using preemptible shapes",
+                })
 
-            except Exception as e:
-                self._logger.debug("Budget check not available", error=str(e))
-
-        # Fallback: analyze from cost by service data
-        if not recommendations:
-            for service in state.cost_by_service:
-                utilization = service.get("utilization", 100)
-                if utilization < 30 and service.get("cost", 0) > 10:
+            # Storage optimization
+            if "storage" in name.lower() or "block" in name.lower():
+                if cost > 50:
                     recommendations.append({
-                        "type": "rightsizing",
-                        "service": service.get("name"),
-                        "potential_savings": service.get("cost", 0) * 0.3,
-                        "action": f"Consider downsizing {service.get('name')} resources (utilization: {utilization}%)",
+                        "type": "optimization",
+                        "service": name,
+                        "potential_savings": cost * 0.15,
+                        "action": "Review storage tiers - consider Standard vs. Archive for cold data",
                     })
 
         # Add recommendations based on anomalies
         for anomaly in state.cost_anomalies[:3]:
-            if anomaly.get("type") == "cost_spike":
+            if anomaly.get("type") == "high_concentration":
                 recommendations.append({
                     "type": "investigate",
                     "service": anomaly.get("service", "Unknown"),
-                    "potential_savings": anomaly.get("amount", 0) * 0.2,
-                    "action": f"Investigate cost spike in {anomaly.get('service', 'Unknown')}",
+                    "potential_savings": anomaly.get("amount", 0) * 0.1,
+                    "action": f"Investigate high cost concentration in {anomaly.get('service', 'Unknown')}",
                 })
+
+        # Limit to top 5 recommendations
+        recommendations = recommendations[:5]
 
         return {"optimization_recommendations": recommendations, "phase": "output"}
 

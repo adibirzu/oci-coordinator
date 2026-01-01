@@ -53,6 +53,7 @@ class CoordinatorNodes:
 
     Implements workflow-first routing:
     - 70%+ requests → deterministic workflows
+    - Multi-domain queries → parallel multi-agent execution
     - Remaining → agentic LLM reasoning
     """
 
@@ -63,6 +64,7 @@ class CoordinatorNodes:
         agent_catalog: AgentCatalog,
         memory: SharedMemoryManager,
         workflow_registry: dict[str, Any] | None = None,
+        orchestrator: Any | None = None,
     ):
         """
         Initialize coordinator nodes.
@@ -73,12 +75,14 @@ class CoordinatorNodes:
             agent_catalog: Catalog of specialized agents
             memory: Shared memory manager
             workflow_registry: Map of workflow names to workflow functions
+            orchestrator: Parallel orchestrator for multi-agent execution
         """
         self.llm = llm
         self.tool_catalog = tool_catalog
         self.agent_catalog = agent_catalog
         self.memory = memory
         self.workflow_registry = workflow_registry or {}
+        self.orchestrator = orchestrator
         self._logger = logger.bind(component="CoordinatorNodes")
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -396,6 +400,124 @@ Return only the JSON object, no other text."""
                         "current_agent": state.routing.fallback.target,
                     }
                 return {"error": f"Workflow failed: {e}"}
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Parallel Node
+    # ─────────────────────────────────────────────────────────────────────────
+
+    async def parallel_node(self, state: CoordinatorState) -> dict[str, Any]:
+        """
+        Execute multi-domain query using parallel orchestrator.
+
+        Routes complex cross-domain requests (2+ domains) to the parallel
+        orchestrator which decomposes the task and runs multiple agents
+        concurrently for optimal performance.
+
+        Args:
+            state: Current coordinator state
+
+        Returns:
+            State updates with synthesized response from multiple agents
+        """
+        with _tracer.start_as_current_span("coordinator.parallel") as span:
+            span.set_attribute("query_preview", state.query[:100] if state.query else "")
+            domains = state.intent.domains if state.intent else []
+            span.set_attribute("domains", ",".join(domains))
+
+            if not self.orchestrator:
+                span.set_attribute("error", "orchestrator_not_initialized")
+                self._logger.warning("Parallel orchestrator not available")
+                # Fallback to single agent execution
+                return {
+                    "routing": state.routing._replace(routing_type=RoutingType.AGENT)
+                    if state.routing and hasattr(state.routing, "_replace")
+                    else state.routing,
+                    "error": "Parallel orchestrator not available, falling back to agent",
+                }
+
+            self._logger.info(
+                "Executing parallel orchestration",
+                domains=domains,
+                category=state.intent.category.value if state.intent else "unknown",
+            )
+
+            start_time = time.time()
+            try:
+                # Build context for orchestrator
+                context = {
+                    "intent": state.intent.to_dict() if state.intent else {},
+                    "domains": domains,
+                    "previous_results": [r.to_dict() for r in state.tool_results],
+                    "output_format": state.output_format,
+                    "channel_type": state.channel_type,
+                }
+
+                # Execute parallel orchestration
+                result = await self.orchestrator.execute(
+                    query=state.query,
+                    context=context,
+                )
+
+                duration_ms = int((time.time() - start_time) * 1000)
+                span.set_attribute("parallel.duration_ms", duration_ms)
+                span.set_attribute("parallel.success", result.success)
+                span.set_attribute("parallel.agents_used", ",".join(result.agents_used))
+                span.set_attribute("parallel.total_tool_calls", result.total_tool_calls)
+
+                self._logger.info(
+                    "Parallel orchestration completed",
+                    success=result.success,
+                    agents_used=result.agents_used,
+                    duration_ms=duration_ms,
+                    total_tool_calls=result.total_tool_calls,
+                )
+
+                if result.success:
+                    return {
+                        "final_response": result.response,
+                        "agent_response": result.response,
+                        "workflow_state": {
+                            "parallel": True,
+                            "agents_used": result.agents_used,
+                            "duration_ms": duration_ms,
+                            "total_tool_calls": result.total_tool_calls,
+                        },
+                    }
+                else:
+                    # Parallel execution failed, try fallback
+                    if state.routing and state.routing.fallback:
+                        self._logger.info(
+                            "Parallel failed, using fallback",
+                            fallback=state.routing.fallback.routing_type.value,
+                        )
+                        return {
+                            "routing": state.routing.fallback,
+                            "current_agent": state.routing.fallback.target,
+                            "error": result.error,
+                        }
+                    return {
+                        "error": result.error or "Parallel orchestration failed",
+                        "final_response": f"Error: {result.error or 'Parallel execution failed'}",
+                    }
+
+            except Exception as e:
+                duration_ms = int((time.time() - start_time) * 1000)
+                span.set_attribute("error", True)
+                span.set_attribute("error.message", str(e)[:200])
+
+                self._logger.error(
+                    "Parallel orchestration failed",
+                    error=str(e),
+                    duration_ms=duration_ms,
+                )
+
+                # Try fallback if available
+                if state.routing and state.routing.fallback:
+                    return {
+                        "routing": state.routing.fallback,
+                        "current_agent": state.routing.fallback.target,
+                    }
+                return {"error": f"Parallel execution failed: {e}"}
 
     # ─────────────────────────────────────────────────────────────────────────
     # Agent Node
@@ -806,7 +928,7 @@ def should_continue_after_router(state: CoordinatorState) -> str:
     Determine next node after routing decision.
 
     Returns:
-        Node name: "workflow", "agent", "direct", or "escalate"
+        Node name: "workflow", "parallel", "agent", or "output"
     """
     if state.error:
         return "output"
@@ -818,6 +940,8 @@ def should_continue_after_router(state: CoordinatorState) -> str:
 
     if routing_type == RoutingType.WORKFLOW:
         return "workflow"
+    elif routing_type == RoutingType.PARALLEL:
+        return "parallel"  # Multi-domain parallel execution
     elif routing_type == RoutingType.AGENT:
         return "agent"
     elif routing_type == RoutingType.ESCALATE:

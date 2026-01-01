@@ -104,6 +104,21 @@ class AppState:
         self.start_time = datetime.utcnow()
         self.request_count = 0
         self.active_threads: dict[str, dict] = {}
+        self._coordinator = None
+        self._coordinator_lock = asyncio.Lock()
+
+    async def get_coordinator(self):
+        """Get or create the coordinator (cached)."""
+        if self._coordinator is None:
+            async with self._coordinator_lock:
+                if self._coordinator is None:
+                    from src.agents.coordinator.graph import create_coordinator
+                    from src.llm import get_llm
+
+                    llm = get_llm()
+                    self._coordinator = await create_coordinator(llm=llm)
+                    logger.info("Coordinator initialized for API")
+        return self._coordinator
 
 
 app_state = AppState()
@@ -304,14 +319,8 @@ async def chat(request: ChatRequest) -> ChatResponse:
         tools_used = []
 
         try:
-            from src.agents.coordinator.graph import create_coordinator
-
-            llm = get_llm()
-            coordinator = create_coordinator(
-                llm=llm,
-                tool_catalog=tool_catalog,
-                agent_catalog=agent_catalog,
-            )
+            # Get cached coordinator
+            coordinator = await app_state.get_coordinator()
 
             # Invoke with thread context
             result = await coordinator.invoke(
@@ -320,9 +329,9 @@ async def chat(request: ChatRequest) -> ChatResponse:
                 user_id=request.user_id,
             )
 
-            response_text = result.response if hasattr(result, "response") else str(result)
-            agent_used = result.agent_used if hasattr(result, "agent_used") else None
-            tools_used = result.tools_used if hasattr(result, "tools_used") else []
+            response_text = result.get("response") if isinstance(result, dict) else str(result)
+            agent_used = result.get("routing_type") if isinstance(result, dict) else None
+            tools_used = []
 
         except Exception as e:
             logger.warning("LangGraph coordinator failed, using fallback", error=str(e))
@@ -375,24 +384,13 @@ async def chat_stream(request: ChatRequest):
 
     async def generate():
         try:
-            from src.agents.coordinator.graph import create_coordinator
-            from src.llm import get_llm
-
-            tool_catalog = ToolCatalog.get_instance()
-            agent_catalog = AgentCatalog.get_instance()
-            llm = get_llm()
-
-            coordinator = create_coordinator(
-                llm=llm,
-                tool_catalog=tool_catalog,
-                agent_catalog=agent_catalog,
-            )
+            # Get cached coordinator
+            coordinator = await app_state.get_coordinator()
 
             # Stream response
             async for chunk in coordinator.invoke_stream(
                 query=request.message,
                 thread_id=thread_id,
-                user_id=request.user_id,
             ):
                 yield f"data: {chunk}\n\n"
 

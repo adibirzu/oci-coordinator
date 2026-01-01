@@ -4,7 +4,7 @@
 
 The OCI AI Agent Coordinator is a Python-based LangGraph orchestration system that manages specialized AI agents for Oracle Cloud Infrastructure operations. It acts as a central hub receiving requests from multiple channels (Slack, Teams, Web, API) and routing them to specialized agents via MCP (Model Context Protocol) servers.
 
-**Status**: Phase 3 - LangGraph Coordinator Core (Complete)
+**Status**: Phase 4 - Production Readiness (In Progress)
 - Phase 1: Project Environment & LLM Setup ✅
 - Phase 2: Unified MCP Layer ✅
 - Phase 3: LangGraph Coordinator Core ✅
@@ -19,7 +19,18 @@ The OCI AI Agent Coordinator is a Python-based LangGraph orchestration system th
   - **FastAPI REST API Server ✅** (2025-12-31)
   - **Loop Prevention in Orchestrator ✅** (2025-12-31)
   - **3-Second Ack Pattern for Slack ✅** (2025-12-31)
+  - **Parallel Multi-Agent Orchestrator ✅** (2026-01-01)
+  - **Pre-built Deterministic Workflows (20+) ✅** (2026-01-01)
+  - **Context Compression for Long Conversations ✅** (2026-01-01)
+  - **RAG with OCI GenAI ✅** (Complete)
+  - **LLM-as-a-Judge Evaluation Framework ✅** (Complete)
+  - **SSE Streaming API ✅** (Complete)
+  - **Cost Tool Timeout & Resilience ✅** (2026-01-01)
+  - **Slack Table Visualization for Cost/List Data ✅** (2026-01-01)
 - Phase 4: Evaluation & Production 🔄
+  - Microsoft Teams integration ⏳
+  - Web UI dashboard ⏳
+  - OKE deployment manifests ⏳
 
 ## Quick Start
 
@@ -242,6 +253,13 @@ Configure in `config/mcp_servers.yaml`:
 
 ```yaml
 servers:
+  oci-unified:
+    transport: stdio
+    command: python
+    args: ["-m", "src.mcp.server.main"]
+    enabled: true
+    domains: [compute, network, security, identity, cost, observability, discovery]
+
   database-observatory:
     transport: stdio
     command: python
@@ -249,22 +267,18 @@ servers:
     working_dir: /Users/abirzu/dev/MCP/mcp-oci-database-observatory
     enabled: true
     domains: [database, opsi, logan, observability]
-
-  finopsai:
-    transport: stdio
-    command: python
-    args: ["-m", "finopsai_mcp.server"]
-    working_dir: /Users/abirzu/dev/MCP/finopsai-mcp
-    enabled: true
-    domains: [cost, budget, finops, anomaly, forecasting, rightsizing]
 ```
 
 | Server | Path | Transport | Purpose |
 |--------|------|-----------|---------|
-| **oci-unified** | `src/mcp/server/` | stdio | Compute, network, security, identity, cost |
+| **oci-unified** | `src/mcp/server/` | stdio | Compute, network, security, identity, cost (30s timeout), discovery |
 | **database-observatory** | `mcp-oci-database-observatory/` | stdio | OPSI, SQLcl, Logan unified |
-| **finopsai** | `finopsai-mcp/` | stdio | Multicloud FinOps, anomaly detection, rightsizing |
 | **oci-infrastructure** | `mcp-oci/` | stdio | Full OCI management (fallback) |
+
+**Tool Timeouts:**
+- Cost tools: 30 seconds (OCI Usage API can be slow)
+- Discovery tools: 60 seconds (full resource discovery)
+- Standard tools: 120 seconds (default)
 
 ### Dynamic Server Registration
 
@@ -490,19 +504,83 @@ async def _invoke_coordinator(self, text, user_id, ...):
     return await self._route_to_agent(text, catalog, user_id)
 ```
 
-### 4. MCP Client (`src/mcp/`)
+### 4. Parallel Orchestrator (`src/agents/coordinator/orchestrator.py`)
+- Multi-agent parallel execution for complex cross-domain queries
+- Automatic task decomposition by domain
+- Result synthesis using LLM
+- Bounded concurrency (3-5 agents max)
+- Loop prevention with max iterations
+
+**When Parallel Execution is Used:**
+- Query involves 2+ domains (e.g., "database" + "cost")
+- Intent category is ANALYSIS or TROUBLESHOOT
+- Confidence score ≥ 0.60
+
+```python
+# Parallel execution is automatic via routing
+result = await coordinator.invoke(
+    "Analyze database performance and associated costs",
+    thread_id=thread_id,
+)
+# Routes to: db-troubleshoot-agent AND finops-agent in parallel
+```
+
+### 5. Pre-built Workflows (`src/agents/coordinator/workflows.py`)
+- 20+ deterministic workflows for common OCI operations
+- Execute without LLM reasoning for fast, predictable responses
+- Triggered when classifier confidence ≥ 0.80
+- Multiple intent aliases for reliable routing
+
+| Category | Workflows | Intent Aliases |
+|----------|-----------|----------------|
+| Identity | `list_compartments`, `get_tenancy`, `list_regions` | show_compartments, tenancy_info |
+| Compute | `list_instances`, `get_instance` | show_instances, describe_instance |
+| Network | `list_vcns`, `list_subnets` | show_networks, get_subnets |
+| Cost | `cost_summary` | get_costs, show_spending, tenancy_costs, how_much_spent |
+| Discovery | `discovery_summary`, `search_resources` | resource_summary, find_resource |
+| Help | `search_capabilities`, `help` | capabilities, what_can_you_do |
+
+**Cost Workflow Details:**
+The `cost_summary` workflow has 10 intent aliases to reliably capture cost queries:
+- `get_tenancy_costs`, `tenancy_costs`, `spending`, `show_spending`
+- `monthly_cost`, `how_much_spent`, `get_costs`, `show_costs`
+
+This ensures queries like "How much am I spending?" route to the fast workflow instead of the full FinOps agent.
+
+**Slack Visualization:**
+Cost responses in Slack display as native table blocks with:
+- Summary header (total spend, period, days)
+- Service breakdown table (Service | Cost | %)
+- Auto-detected list data also renders as tables
+
+```python
+# Workflows are registered automatically via create_coordinator()
+from src.agents.coordinator import create_coordinator
+
+coordinator = await create_coordinator(llm=llm)
+# 15 workflows auto-registered
+
+# Or manually register a custom workflow
+async def my_workflow(query, entities, tool_catalog, memory) -> str:
+    result = await tool_catalog.execute("my_tool", entities)
+    return result
+
+coordinator.register_workflow("my_workflow", my_workflow)
+```
+
+### 6. MCP Client (`src/mcp/`)
 - Multi-transport support: stdio, HTTP, SSE
 - Dynamic server registry with health tracking
 - Unified tool catalog with namespacing
 - Progressive disclosure via `search_tools`
 - Tool tier classification (1-4) for risk management
 
-### 5. Shared Memory (`src/memory/`)
+### 7. Shared Memory (`src/memory/`)
 - Tiered storage (Redis + ATP)
 - Cross-agent context sharing
 - Conversation history persistence
 
-### 6. Observability (`src/observability/`)
+### 8. Observability (`src/observability/`)
 - OpenTelemetry tracing to OCI APM via OTLP
 - Per-agent dedicated OCI Logging with trace_id correlation
 - Structured logging via structlog
@@ -519,7 +597,7 @@ init_observability(agent_name="db-troubleshoot-agent")
 logger.info("Processing request", trace_id=get_trace_id())
 ```
 
-### 7. Response Formatting (`src/formatting/`)
+### 9. Response Formatting (`src/formatting/`)
 - Channel-aware output (Slack, Teams, Markdown)
 - Structured responses with metrics, tables, code blocks
 - Native Slack table blocks for list data (compartments, instances, etc.)
@@ -531,6 +609,15 @@ logger.info("Processing request", trace_id=get_trace_id())
 from src.formatting.slack import SlackFormatter
 
 formatter = SlackFormatter()
+
+# Cost data (auto-detected from service/cost/percent keys)
+cost_result = formatter.format_table_from_list(
+    items=[{"service": "Database", "cost": "22,296.92 ILS", "percent": "37.5%"}],
+    columns=["service", "cost", "percent"],
+    title=":bar_chart: *Top Services by Spend*",
+)
+
+# Generic list data
 result = formatter.format_table_from_list(
     items=[{"name": "prod", "state": "ACTIVE", "id": "ocid1..."}],
     columns=["name", "state"],
@@ -539,7 +626,7 @@ result = formatter.format_table_from_list(
 # Returns native Slack table block (max 100 rows, 20 columns)
 ```
 
-### 8. API Server (`src/api/main.py`)
+### 10. API Server (`src/api/main.py`)
 - FastAPI REST endpoints for programmatic access
 - Chat endpoint with LangGraph coordinator
 - Tool listing, execution, and discovery
@@ -556,7 +643,7 @@ result = formatter.format_table_from_list(
 | `/agents` | GET | List registered agents |
 | `/mcp/servers` | GET | MCP server status |
 
-### 9. ToolConverter (`src/mcp/tools/converter.py`)
+### 11. ToolConverter (`src/mcp/tools/converter.py`)
 - Converts MCP tools to LangChain StructuredTools
 - Dynamic Pydantic model generation from JSON schema
 - Domain-based tool filtering via `DOMAIN_PREFIXES`
@@ -577,7 +664,7 @@ db_tools = converter.get_domain_tools("database")
 safe_tools = converter.get_safe_tools()
 ```
 
-### 10. RAG with OCI AI Studio (`src/rag/`)
+### 12. RAG with OCI AI Studio (`src/rag/`)
 
 Retrieval-Augmented Generation using OCI Generative AI service:
 
@@ -774,19 +861,24 @@ poetry run python scripts/oca_auth.py --callback-only
 
 ### FinOps Agent (`src/agents/finops/agent.py`)
 
-Advanced cost management with anomaly detection:
+Cost management with built-in analysis:
 
 | Feature | Description | MCP Tools |
 |---------|-------------|-----------|
-| Cost Analysis | Breakdown by service, compartment | `oci_cost_get_summary`, `oci_cost_get_by_service` |
-| Anomaly Detection | Spike detection with thresholds | `oci_cost_spikes` |
-| Rightsizing | Compute optimization recommendations | `oci_cost_service_drilldown` |
-| Budget Alerts | Proactive budget monitoring | `oci_cost_budget_status` |
+| Cost Analysis | Breakdown by service with 30s timeout | `oci_cost_get_summary` |
+| Anomaly Detection | High-concentration analysis from cost data | Built-in analysis |
+| Recommendations | Rightsizing suggestions based on spend | Built-in heuristics |
+
+**Note**: The cost tool has a 30-second timeout. If the OCI Usage API is slow, check the OCI console directly.
 
 ```python
-# Anomaly detection workflow
-result = await finops_agent.invoke("Check for cost anomalies this month")
-# Returns: cost spikes, trends, rightsizing recommendations
+# Simple cost query (uses deterministic workflow)
+result = await coordinator.invoke("How much am I spending?")
+# Routes to cost_summary workflow → fast response
+
+# Deep analysis (uses FinOps agent)
+result = await finops_agent.invoke("Analyze cost trends and recommend optimizations")
+# Returns: breakdown, trends, recommendations
 ```
 
 ### Security Agent (`src/agents/security/agent.py`)

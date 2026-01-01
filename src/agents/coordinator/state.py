@@ -21,6 +21,7 @@ class RoutingType(str, Enum):
 
     WORKFLOW = "workflow"  # Deterministic workflow execution
     AGENT = "agent"  # Delegate to specialized agent
+    PARALLEL = "parallel"  # Parallel multi-agent execution for complex cross-domain queries
     DIRECT = "direct"  # Direct LLM response (no tools)
     ESCALATE = "escalate"  # Escalate to human
 
@@ -272,6 +273,7 @@ class CoordinatorState:
 WORKFLOW_CONFIDENCE_THRESHOLD = 0.80  # Route to workflow if confidence >= 0.80
 AGENT_CONFIDENCE_THRESHOLD = 0.60  # Route to agent if confidence >= 0.60
 ESCALATION_CONFIDENCE_THRESHOLD = 0.30  # Escalate if confidence < 0.30
+PARALLEL_DOMAIN_THRESHOLD = 2  # Use parallel if 2+ domains involved
 
 
 def determine_routing(intent: IntentClassification) -> RoutingDecision:
@@ -280,6 +282,7 @@ def determine_routing(intent: IntentClassification) -> RoutingDecision:
 
     Workflow-First Design:
     - High confidence (>=0.80) + workflow match → WORKFLOW
+    - Multi-domain (2+) + analysis/troubleshoot → PARALLEL
     - Medium confidence (>=0.60) + agent match → AGENT
     - Low confidence (<0.30) → ESCALATE
     - Otherwise → DIRECT (LLM handles it)
@@ -305,6 +308,28 @@ def determine_routing(intent: IntentClassification) -> RoutingDecision:
                 target=intent.suggested_agent,
                 confidence=intent.confidence * 0.8,
                 reasoning="Fallback to agent if workflow fails",
+            )
+            if intent.suggested_agent
+            else None,
+        )
+
+    # Check for multi-domain complex queries → PARALLEL execution
+    # Only for analysis/troubleshoot categories that benefit from parallel agents
+    if (
+        len(intent.domains) >= PARALLEL_DOMAIN_THRESHOLD
+        and intent.category in (IntentCategory.ANALYSIS, IntentCategory.TROUBLESHOOT)
+        and intent.confidence >= AGENT_CONFIDENCE_THRESHOLD
+    ):
+        return RoutingDecision(
+            routing_type=RoutingType.PARALLEL,
+            target=None,  # Orchestrator determines agents
+            confidence=intent.confidence,
+            reasoning=f"Multi-domain ({len(intent.domains)} domains: {', '.join(intent.domains)}) {intent.category.value} - using parallel execution",
+            fallback=RoutingDecision(
+                routing_type=RoutingType.AGENT,
+                target=intent.suggested_agent,
+                confidence=intent.confidence * 0.8,
+                reasoning="Fallback to single agent if parallel fails",
             )
             if intent.suggested_agent
             else None,

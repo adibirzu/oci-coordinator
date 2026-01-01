@@ -1014,18 +1014,26 @@ class SlackHandler:
                     redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
                     memory = SharedMemoryManager(redis_url=redis_url)
 
-                    # Create coordinator
+                    # Load pre-built workflows for fast deterministic routing
+                    from src.agents.coordinator.workflows import get_workflow_registry
+                    workflow_registry = get_workflow_registry()
+
+                    # Create coordinator with workflows
                     self._langgraph_coordinator = LangGraphCoordinator(
                         llm=llm,
                         tool_catalog=tool_catalog,
                         agent_catalog=agent_catalog,
                         memory=memory,
+                        workflow_registry=workflow_registry,
                         max_iterations=10,
                     )
 
                     # Initialize the graph
                     await self._langgraph_coordinator.initialize()
-                    logger.info("LangGraph coordinator initialized for Slack")
+                    logger.info(
+                        "LangGraph coordinator initialized for Slack",
+                        workflow_count=len(workflow_registry),
+                    )
 
                 # Invoke coordinator
                 result = await self._langgraph_coordinator.invoke(
@@ -1309,15 +1317,30 @@ class SlackHandler:
 
         # If we detected table data (list of items), format as table block
         if table_data and isinstance(table_data, list) and len(table_data) > 0:
-            # Use native Slack table block for list data
+            # Detect data type and configure table accordingly
+            first_item = table_data[0] if table_data else {}
+            keys = list(first_item.keys()) if first_item else []
+
+            # Cost data: explicit columns for consistent ordering
+            if "service" in keys and ("cost" in keys or "percent" in keys):
+                columns = ["service", "cost", "percent"]
+                title = ":bar_chart: *Top Services by Spend*"
+                footer = f"Showing top {len(table_data)} services"
+            else:
+                columns = None  # Auto-detect
+                title = self._infer_table_title(table_data)
+                footer = f"Found {len(table_data)} items"
+
+            # Use native Slack table block
             table_payload = _slack_formatter.format_table_from_list(
                 items=table_data,
-                title=self._infer_table_title(table_data),
-                footer=f"Found {len(table_data)} items",
+                columns=columns,
+                title=title,
+                footer=footer,
             )
             blocks.extend(table_payload.get("blocks", []))
 
-            # Add any additional text that wasn't table data
+            # Add any additional text that wasn't table data (e.g., summary header)
             if cleaned_message and not cleaned_message.startswith("["):
                 text_part = cleaned_message.split("[")[0].strip()
                 if text_part:
@@ -1437,12 +1460,20 @@ class SlackHandler:
                     # Handle cost_summary type
                     if parsed.get("type") == "cost_summary":
                         if "error" in parsed:
-                            message = parsed["error"]
+                            message = f"⚠️ {parsed['error']}"
                         else:
                             summary = parsed.get("summary", {})
                             services = parsed.get("services", [])
-                            # Build header text with summary
-                            message = f"*Total (last {summary.get('days', 30)} days):* {summary.get('total', 'N/A')}\n*Period:* {summary.get('period', 'N/A')}"
+                            days = summary.get("days", 30)
+                            total = summary.get("total", "N/A")
+                            period = summary.get("period", "N/A")
+
+                            # Build formatted header
+                            message = (
+                                f":moneybag: *Tenancy Cost Summary*\n"
+                                f":calendar: *Period:* {period} ({days} days)\n"
+                                f":chart_with_upwards_trend: *Total Spend:* `{total}`"
+                            )
                             if services:
                                 table_data = services
                         return message.strip(), table_data

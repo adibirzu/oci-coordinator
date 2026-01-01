@@ -17,6 +17,11 @@ from src.agents.coordinator.state import (
     ToolCall,
     ToolResult,
 )
+from src.agents.coordinator.workflows import (
+    WORKFLOW_REGISTRY,
+    get_workflow_registry,
+    list_workflows,
+)
 
 __all__ = [
     # Main coordinator
@@ -32,4 +37,8 @@ __all__ = [
     "AgentContext",
     "ToolCall",
     "ToolResult",
+    # Workflows
+    "WORKFLOW_REGISTRY",
+    "get_workflow_registry",
+    "list_workflows",
 ]

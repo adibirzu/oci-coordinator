@@ -1,17 +1,21 @@
+import asyncio
 import json
 from datetime import datetime, timedelta
 
 import oci
 from opentelemetry import trace
 
-from src.mcp.server.auth import get_usage_client
+from src.mcp.server.auth import get_oci_config, get_usage_client
 
 # Get tracer for cost tools
 _tracer = trace.get_tracer("mcp-oci-cost")
 
+# Timeout for OCI Usage API (seconds) - Usage API can be slow
+COST_API_TIMEOUT = 30
+
 
 async def _get_cost_summary_logic(
-    compartment_id: str,
+    compartment_id: str | None = None,
     days: int = 30,
 ) -> str:
     """Internal logic for cost summary.
@@ -19,7 +23,17 @@ async def _get_cost_summary_logic(
     Returns structured JSON data that can be formatted by the presentation layer.
     """
     with _tracer.start_as_current_span("mcp.cost.get_summary") as span:
-        span.set_attribute("compartment_id", compartment_id)
+        # Get tenancy ID from config if not provided
+        config = get_oci_config()
+        tenant_id = compartment_id or config.get("tenancy")
+
+        if not tenant_id:
+            return json.dumps({
+                "type": "cost_summary",
+                "error": "No compartment_id provided and tenancy not found in OCI config"
+            })
+
+        span.set_attribute("compartment_id", tenant_id)
         span.set_attribute("days", days)
 
         client = get_usage_client()
@@ -30,7 +44,7 @@ async def _get_cost_summary_logic(
             start_time = (end_time - timedelta(days=days)).replace(hour=0, minute=0, second=0, microsecond=0)
 
             request = oci.usage_api.models.RequestSummarizedUsagesDetails(
-                tenant_id=compartment_id,
+                tenant_id=tenant_id,
                 time_usage_started=start_time,
                 time_usage_ended=end_time,
                 granularity="MONTHLY",
@@ -39,7 +53,22 @@ async def _get_cost_summary_logic(
                 is_aggregate_by_time=False
             )
 
-            response = client.request_summarized_usages(request)
+            # Run synchronous OCI API call with timeout
+            def _call_usage_api():
+                return client.request_summarized_usages(request)
+
+            try:
+                response = await asyncio.wait_for(
+                    asyncio.get_event_loop().run_in_executor(None, _call_usage_api),
+                    timeout=COST_API_TIMEOUT
+                )
+            except asyncio.TimeoutError:
+                span.set_attribute("error", "timeout")
+                return json.dumps({
+                    "type": "cost_summary",
+                    "error": f"Cost API timed out after {COST_API_TIMEOUT}s. The OCI Usage API may be slow. Try again or check the OCI console."
+                })
+
             usages = response.data.items
 
             if not usages:
@@ -95,14 +124,15 @@ async def _get_cost_summary_logic(
 
 def register_cost_tools(mcp):
     @mcp.tool()
-    async def oci_cost_get_summary(compartment_id: str, days: int = 30) -> str:
-        """Get summarized cost for a compartment.
+    async def oci_cost_get_summary(compartment_id: str | None = None, days: int = 30) -> str:
+        """Get summarized cost for a compartment or the entire tenancy.
 
         Args:
-            compartment_id: OCID of the compartment (or tenancy for full account)
+            compartment_id: OCID of the compartment (defaults to tenancy root for full account costs)
             days: Number of days to look back (default 30)
 
         Returns:
-            JSON with cost summary including total spend and per-service breakdown
+            JSON with cost summary including total spend and per-service breakdown.
+            Note: This API has a 30s timeout. For slow responses, check the OCI console directly.
         """
         return await _get_cost_summary_logic(compartment_id, days)
