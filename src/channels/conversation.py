@@ -13,16 +13,20 @@ Key Features:
 
 from __future__ import annotations
 
-import hashlib
+import asyncio
 import os
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import timedelta
 from typing import Any
 
 import structlog
 
 logger = structlog.get_logger(__name__)
+
+# Configuration
+DEFAULT_LOCAL_CACHE_TTL = 3600  # 1 hour in seconds
+DEFAULT_LOCAL_CACHE_MAX_SIZE = 1000  # Maximum threads to cache locally
 
 
 @dataclass
@@ -47,12 +51,21 @@ class ConversationContext:
     session_start: float = field(default_factory=time.time)
 
 
+@dataclass
+class _CacheEntry:
+    """Internal cache entry with TTL tracking."""
+    context: ConversationContext
+    expires_at: float
+
+
 class ConversationManager:
     """
     Manages conversation state and history for Slack threads.
 
     Uses SharedMemoryManager for persistence and provides
     conversation-aware context for the coordinator.
+
+    Thread-safe with asyncio.Lock and TTL-based local cache eviction.
     """
 
     def __init__(
@@ -60,6 +73,8 @@ class ConversationManager:
         redis_url: str | None = None,
         max_history: int = 20,
         context_window: int = 5,
+        local_cache_ttl: int = DEFAULT_LOCAL_CACHE_TTL,
+        local_cache_max_size: int = DEFAULT_LOCAL_CACHE_MAX_SIZE,
     ):
         """
         Initialize conversation manager.
@@ -68,12 +83,17 @@ class ConversationManager:
             redis_url: Redis URL for persistence (uses env if not provided)
             max_history: Maximum messages to keep per thread
             context_window: Recent messages to include in context
+            local_cache_ttl: TTL for local cache entries in seconds
+            local_cache_max_size: Maximum entries in local cache
         """
         self._redis_url = redis_url or os.getenv("REDIS_URL", "redis://localhost:6379")
         self._max_history = max_history
         self._context_window = context_window
+        self._local_cache_ttl = local_cache_ttl
+        self._local_cache_max_size = local_cache_max_size
         self._memory = None
-        self._local_cache: dict[str, ConversationContext] = {}
+        self._local_cache: dict[str, _CacheEntry] = {}
+        self._cache_lock = asyncio.Lock()  # Thread-safe cache access
 
     async def _get_memory(self):
         """Get or create memory manager."""
@@ -86,6 +106,24 @@ class ConversationManager:
         """Get Redis cache key for thread."""
         return f"conversation:{thread_id}"
 
+    def _evict_expired_entries(self) -> None:
+        """Evict expired entries from local cache (called within lock)."""
+        now = time.time()
+        expired = [k for k, v in self._local_cache.items() if v.expires_at < now]
+        for key in expired:
+            del self._local_cache[key]
+
+        # Also evict oldest entries if cache is too large
+        if len(self._local_cache) > self._local_cache_max_size:
+            # Sort by expires_at and remove oldest 10%
+            sorted_entries = sorted(
+                self._local_cache.items(),
+                key=lambda x: x[1].expires_at
+            )
+            to_remove = len(self._local_cache) - int(self._local_cache_max_size * 0.9)
+            for key, _ in sorted_entries[:to_remove]:
+                del self._local_cache[key]
+
     async def get_context(
         self,
         thread_id: str,
@@ -95,6 +133,8 @@ class ConversationManager:
         """
         Get or create conversation context for a thread.
 
+        Thread-safe with asyncio.Lock to prevent race conditions.
+
         Args:
             thread_id: Slack thread timestamp
             channel_id: Slack channel ID
@@ -103,42 +143,58 @@ class ConversationManager:
         Returns:
             ConversationContext for the thread
         """
-        # Check local cache first
-        if thread_id in self._local_cache:
-            return self._local_cache[thread_id]
+        async with self._cache_lock:
+            # Evict expired entries periodically
+            self._evict_expired_entries()
 
-        # Try to load from Redis
-        try:
-            memory = await self._get_memory()
-            data = await memory.cache.get(self._get_cache_key(thread_id))
+            # Check local cache first (with TTL check)
+            now = time.time()
+            if thread_id in self._local_cache:
+                entry = self._local_cache[thread_id]
+                if entry.expires_at > now:
+                    return entry.context
+                else:
+                    # Expired, remove from cache
+                    del self._local_cache[thread_id]
 
-            if data:
-                context = ConversationContext(
-                    thread_id=thread_id,
-                    channel_id=data.get("channel_id", channel_id),
-                    user_id=data.get("user_id", user_id),
-                    messages=[
-                        ConversationMessage(**msg)
-                        for msg in data.get("messages", [])
-                    ],
-                    topics=data.get("topics", []),
-                    last_query_type=data.get("last_query_type"),
-                    last_response_time=data.get("last_response_time"),
-                    session_start=data.get("session_start", time.time()),
-                )
-                self._local_cache[thread_id] = context
-                return context
-        except Exception as e:
-            logger.warning("Failed to load conversation from Redis", error=str(e))
+            # Try to load from Redis
+            try:
+                memory = await self._get_memory()
+                data = await memory.cache.get(self._get_cache_key(thread_id))
 
-        # Create new context
-        context = ConversationContext(
-            thread_id=thread_id,
-            channel_id=channel_id,
-            user_id=user_id,
-        )
-        self._local_cache[thread_id] = context
-        return context
+                if data:
+                    context = ConversationContext(
+                        thread_id=thread_id,
+                        channel_id=data.get("channel_id", channel_id),
+                        user_id=data.get("user_id", user_id),
+                        messages=[
+                            ConversationMessage(**msg)
+                            for msg in data.get("messages", [])
+                        ],
+                        topics=data.get("topics", []),
+                        last_query_type=data.get("last_query_type"),
+                        last_response_time=data.get("last_response_time"),
+                        session_start=data.get("session_start", time.time()),
+                    )
+                    self._local_cache[thread_id] = _CacheEntry(
+                        context=context,
+                        expires_at=now + self._local_cache_ttl,
+                    )
+                    return context
+            except Exception as e:
+                logger.exception("Failed to load conversation from Redis", error=str(e))
+
+            # Create new context
+            context = ConversationContext(
+                thread_id=thread_id,
+                channel_id=channel_id,
+                user_id=user_id,
+            )
+            self._local_cache[thread_id] = _CacheEntry(
+                context=context,
+                expires_at=now + self._local_cache_ttl,
+            )
+            return context
 
     async def add_message(
         self,
@@ -150,35 +206,42 @@ class ConversationManager:
         """
         Add a message to the conversation history.
 
+        Thread-safe with asyncio.Lock.
+
         Args:
             thread_id: Slack thread timestamp
             role: "user" or "assistant"
             content: Message content
             metadata: Optional metadata (agent_id, query_type, etc.)
         """
-        if thread_id not in self._local_cache:
-            logger.warning("Adding message to unknown thread", thread_id=thread_id)
-            return
+        async with self._cache_lock:
+            if thread_id not in self._local_cache:
+                logger.warning("Adding message to unknown thread", thread_id=thread_id)
+                return
 
-        context = self._local_cache[thread_id]
-        message = ConversationMessage(
-            role=role,
-            content=content,
-            metadata=metadata or {},
-        )
-        context.messages.append(message)
+            entry = self._local_cache[thread_id]
+            context = entry.context
+            message = ConversationMessage(
+                role=role,
+                content=content,
+                metadata=metadata or {},
+            )
+            context.messages.append(message)
 
-        # Update topics based on content
-        topics = self._detect_topics(content)
-        for topic in topics:
-            if topic not in context.topics:
-                context.topics.append(topic)
+            # Update topics based on content
+            topics = self._detect_topics(content)
+            for topic in topics:
+                if topic not in context.topics:
+                    context.topics.append(topic)
 
-        # Trim history if needed
-        if len(context.messages) > self._max_history:
-            context.messages = context.messages[-self._max_history:]
+            # Trim history if needed
+            if len(context.messages) > self._max_history:
+                context.messages = context.messages[-self._max_history:]
 
-        # Persist to Redis
+            # Refresh TTL
+            entry.expires_at = time.time() + self._local_cache_ttl
+
+        # Persist to Redis (outside lock to avoid blocking)
         await self._persist_context(context)
 
     async def update_query_type(
@@ -187,11 +250,16 @@ class ConversationManager:
         query_type: str,
     ) -> None:
         """Update the last query type for follow-up suggestions."""
-        if thread_id in self._local_cache:
-            context = self._local_cache[thread_id]
+        async with self._cache_lock:
+            if thread_id not in self._local_cache:
+                return
+            entry = self._local_cache[thread_id]
+            context = entry.context
             context.last_query_type = query_type
             context.last_response_time = time.time()
-            await self._persist_context(context)
+            entry.expires_at = time.time() + self._local_cache_ttl
+
+        await self._persist_context(context)
 
     async def _persist_context(self, context: ConversationContext) -> None:
         """Persist context to Redis."""
@@ -251,6 +319,9 @@ class ConversationManager:
         """
         Get formatted recent conversation context for LLM prompt.
 
+        Note: This is a synchronous method for convenience.
+        Cache reads are atomic for dict access in Python.
+
         Args:
             thread_id: Thread ID
             max_messages: Max messages to include (defaults to context_window)
@@ -258,10 +329,11 @@ class ConversationManager:
         Returns:
             Formatted conversation history string
         """
-        if thread_id not in self._local_cache:
+        entry = self._local_cache.get(thread_id)
+        if not entry:
             return ""
 
-        context = self._local_cache[thread_id]
+        context = entry.context
         limit = max_messages or self._context_window
         recent = context.messages[-limit:]
 
@@ -281,16 +353,20 @@ class ConversationManager:
         """
         Get a summary of the conversation for analytics.
 
+        Note: This is a synchronous method for convenience.
+        Cache reads are atomic for dict access in Python.
+
         Args:
             thread_id: Thread ID
 
         Returns:
             Summary dict with message count, topics, duration
         """
-        if thread_id not in self._local_cache:
+        entry = self._local_cache.get(thread_id)
+        if not entry:
             return {"exists": False}
 
-        context = self._local_cache[thread_id]
+        context = entry.context
         now = time.time()
 
         return {
@@ -303,15 +379,16 @@ class ConversationManager:
         }
 
     async def clear_context(self, thread_id: str) -> None:
-        """Clear conversation context for a thread."""
-        if thread_id in self._local_cache:
-            del self._local_cache[thread_id]
+        """Clear conversation context for a thread (thread-safe)."""
+        async with self._cache_lock:
+            if thread_id in self._local_cache:
+                del self._local_cache[thread_id]
 
         try:
             memory = await self._get_memory()
             await memory.cache.delete(self._get_cache_key(thread_id))
         except Exception as e:
-            logger.warning("Failed to clear conversation from Redis", error=str(e))
+            logger.exception("Failed to clear conversation from Redis", error=str(e))
 
 
 # Singleton instance
