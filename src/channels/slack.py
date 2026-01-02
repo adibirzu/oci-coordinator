@@ -18,6 +18,7 @@ Usage:
 
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 from collections.abc import Callable
@@ -27,6 +28,16 @@ import structlog
 from opentelemetry import trace
 
 from src.channels.async_runtime import run_async
+from src.channels.conversation import ConversationManager, get_conversation_manager
+from src.channels.slack_catalog import (
+    Category,
+    QUICK_ACTIONS,
+    build_catalog_blocks,
+    build_error_recovery_blocks,
+    build_follow_up_blocks,
+    build_runbook_blocks,
+    get_follow_up_suggestions,
+)
 from src.formatting.slack import SlackFormatter
 from src.observability import get_trace_id, init_observability
 from src.observability.tracing import get_tracer
@@ -129,7 +140,7 @@ def build_welcome_blocks() -> list[dict]:
 
 
 def build_help_blocks() -> list[dict]:
-    """Build help message blocks using Block Kit."""
+    """Build help message blocks using Block Kit with catalog integration."""
     return [
         {
             "type": "header",
@@ -143,49 +154,67 @@ def build_help_blocks() -> list[dict]:
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": "I can help you with various OCI tasks. Just describe what you need!"
+                "text": "I help you manage and troubleshoot Oracle Cloud Infrastructure. Ask questions naturally or use the catalog for guided troubleshooting."
+            }
+        },
+        {"type": "divider"},
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": "*:rocket: Quick Start*"
+            }
+        },
+        {
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": ":books: Open Catalog", "emoji": True},
+                    "action_id": "show_catalog",
+                    "style": "primary",
+                },
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": ":moneybag: Show Costs", "emoji": True},
+                    "action_id": "quick_cost",
+                    "value": "show costs",
+                },
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": ":file_folder: Compartments", "emoji": True},
+                    "action_id": "quick_compartments",
+                    "value": "list compartments",
+                },
+            ]
+        },
+        {"type": "divider"},
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": "*:database: Database*\n• `database health check` - Quick health status\n• `show slow queries` - Find problematic queries\n• `analyze database performance` - Deep metrics"
             }
         },
         {
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": "*:database: Database Commands*"
+                "text": "*:cloud: Infrastructure*\n• `list instances` - Compute inventory\n• `list vcns` - Network topology\n• `tenancy info` - Tenancy details"
             }
         },
         {
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": "• `check database performance` - Analyze DB metrics\n• `show slow queries` - Find problematic queries\n• `analyze AWR report` - Deep dive into AWR data"
+                "text": "*:moneybag: Cost & FinOps*\n• `show costs` - Current spending\n• `cost by service` - Breakdown\n• `find optimization opportunities`"
             }
         },
         {
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": "*:cloud: Infrastructure Commands*"
-            }
-        },
-        {
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": "• `list instances` - Show compute instances\n• `check network` - Analyze VCN configuration\n• `show instance metrics` - View resource utilization"
-            }
-        },
-        {
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": "*:moneybag: FinOps Commands*"
-            }
-        },
-        {
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": "• `show costs` - Current spending summary\n• `analyze budget` - Budget vs actual comparison\n• `cost optimization` - Get savings recommendations"
+                "text": "*:shield: Security*\n• `security overview` - Cloud Guard status\n• `show threats` - Active detections\n• `list users` - IAM users"
             }
         },
         {"type": "divider"},
@@ -194,7 +223,7 @@ def build_help_blocks() -> list[dict]:
             "elements": [
                 {
                     "type": "mrkdwn",
-                    "text": ":zap: Powered by Oracle Code Assist (OCA)"
+                    "text": ":bulb: Type `catalog` for interactive troubleshooting | :zap: Powered by OCA"
                 }
             ]
         }
@@ -333,6 +362,10 @@ class SlackHandler:
 
     Integrates with Slack Bolt for event handling and the coordinator
     for agent routing.
+
+    Supports both sync and async modes:
+    - Sync mode: Uses regular `App` with `SocketModeHandler` (blocking)
+    - Async mode: Uses `AsyncApp` with `AsyncSocketModeHandler` (non-blocking)
     """
 
     def __init__(
@@ -352,8 +385,10 @@ class SlackHandler:
         self.app_token = app_token or os.getenv("SLACK_APP_TOKEN")
         self.signing_secret = signing_secret or os.getenv("SLACK_SIGNING_SECRET")
 
-        self._app = None
+        self._app = None  # Sync app (lazy init)
+        self._async_app = None  # Async app (lazy init)
         self._coordinator = None
+        self._conversation_manager = get_conversation_manager()
 
         # Initialize observability FIRST - sets up tracer provider with OCI APM export
         # This MUST happen before getting the tracer to ensure spans are exported
@@ -364,32 +399,108 @@ class SlackHandler:
 
     @property
     def app(self):
-        """Get the Slack Bolt app instance."""
+        """Get the sync Slack Bolt app instance."""
         if self._app is None:
             self._app = self._create_app()
         return self._app
 
+    @property
+    def async_app(self):
+        """Get the async Slack Bolt app instance."""
+        if self._async_app is None:
+            self._async_app = self._create_async_app()
+        return self._async_app
+
+    async def _safe_client_call(self, method, **kwargs):
+        """Safely call a Slack client method that may be sync or async.
+
+        When running in sync mode through run_async(), the client is still
+        the sync WebClient which returns SlackResponse directly (not a coroutine).
+        This helper handles both cases properly.
+
+        Args:
+            method: The client method to call (e.g., client.chat_postMessage)
+            **kwargs: Arguments to pass to the method
+
+        Returns:
+            The result (SlackResponse) from the client method
+        """
+        import inspect
+        result = method(**kwargs)
+        # If the result is a coroutine (async client), await it
+        if inspect.iscoroutine(result):
+            return await result
+        # Otherwise (sync client), return directly
+        return result
+
+    async def _safe_say(self, say, **kwargs):
+        """Safely call the Slack say function that may be sync or async.
+
+        When running in sync mode through run_async(), the say function
+        returns SlackResponse directly. In async mode, it returns a coroutine.
+        This helper handles both cases properly.
+
+        Args:
+            say: The say function from Slack Bolt
+            **kwargs: Arguments to pass to say (text, blocks, thread_ts, etc.)
+
+        Returns:
+            The result from say
+        """
+        import inspect
+        result = say(**kwargs)
+        # If the result is a coroutine (async mode), await it
+        if inspect.iscoroutine(result):
+            return await result
+        # Otherwise (sync mode), return directly
+        return result
+
     def _create_app(self):
-        """Create and configure the Slack Bolt app."""
+        """Create and configure the sync Slack Bolt app."""
         try:
             from slack_bolt import App
-            from slack_bolt.adapter.socket_mode import SocketModeHandler
 
             app = App(
                 token=self.bot_token,
                 signing_secret=self.signing_secret,
             )
 
-            # Register event handlers
+            # Register event handlers (sync versions)
             self._register_handlers(app)
 
-            logger.info("Slack app created successfully")
+            logger.info("Slack sync app created successfully")
             return app
 
         except ImportError:
             logger.error(
                 "slack_bolt not installed",
                 help="Run: poetry add slack-bolt",
+            )
+            raise
+
+    def _create_async_app(self):
+        """Create and configure the async Slack Bolt app.
+
+        Uses AsyncApp which is required for AsyncSocketModeHandler.
+        """
+        try:
+            from slack_bolt.async_app import AsyncApp
+
+            app = AsyncApp(
+                token=self.bot_token,
+                signing_secret=self.signing_secret,
+            )
+
+            # Register async event handlers
+            self._register_async_handlers(app)
+
+            logger.info("Slack async app created successfully")
+            return app
+
+        except ImportError:
+            logger.error(
+                "slack_bolt async not available",
+                help="Ensure slack-bolt is up to date: poetry update slack-bolt",
             )
             raise
 
@@ -462,6 +573,66 @@ class SlackHandler:
             # No additional action needed here
             logger.info("OCA login button clicked", user=body.get("user", {}).get("id"))
 
+        @app.action("show_catalog")
+        def handle_show_catalog(ack: Callable, body: dict, client: Any) -> None:
+            """Handle catalog button click - show troubleshooting catalog."""
+            ack()
+            run_async(self._handle_catalog_action(body, client, None))
+
+        @app.action(re.compile(r"^catalog_category_.*"))
+        def handle_catalog_category(ack: Callable, body: dict, client: Any) -> None:
+            """Handle catalog category selection."""
+            ack()
+            action = body.get("actions", [{}])[0]
+            category = action.get("value")
+            run_async(self._handle_catalog_action(body, client, category))
+
+        @app.action("catalog_back")
+        def handle_catalog_back(ack: Callable, body: dict, client: Any) -> None:
+            """Handle catalog back button."""
+            ack()
+            run_async(self._handle_catalog_action(body, client, None))
+
+        @app.action(re.compile(r"^catalog_action_.*"))
+        def handle_catalog_quick_action(ack: Callable, body: dict, client: Any) -> None:
+            """Handle quick action button from catalog."""
+            ack()
+            action = body.get("actions", [{}])[0]
+            query = action.get("value", "")
+            run_async(self._handle_quick_action(body, client, query))
+
+        @app.action(re.compile(r"^runbook_action_.*"))
+        def handle_runbook_action(ack: Callable, body: dict, client: Any) -> None:
+            """Handle runbook action button."""
+            ack()
+            action = body.get("actions", [{}])[0]
+            query = action.get("value", "")
+            run_async(self._handle_quick_action(body, client, query))
+
+        @app.action(re.compile(r"^follow_up_.*"))
+        def handle_follow_up(ack: Callable, body: dict, client: Any) -> None:
+            """Handle follow-up suggestion button."""
+            ack()
+            action = body.get("actions", [{}])[0]
+            query = action.get("value", "")
+            run_async(self._handle_quick_action(body, client, query))
+
+        @app.action(re.compile(r"^recovery_.*"))
+        def handle_recovery(ack: Callable, body: dict, client: Any) -> None:
+            """Handle error recovery button."""
+            ack()
+            action = body.get("actions", [{}])[0]
+            query = action.get("value", "")
+            run_async(self._handle_quick_action(body, client, query))
+
+        @app.action(re.compile(r"^quick_.*"))
+        def handle_quick_start(ack: Callable, body: dict, client: Any) -> None:
+            """Handle quick start buttons from help menu."""
+            ack()
+            action = body.get("actions", [{}])[0]
+            query = action.get("value", "")
+            run_async(self._handle_quick_action(body, client, query))
+
         @app.command("/oci")
         def handle_command(ack: Callable, body: dict, respond: Callable) -> None:
             """Handle /oci slash command."""
@@ -469,6 +640,125 @@ class SlackHandler:
             run_async(self._process_command(body, respond))
 
         logger.info("Slack handlers registered with shared AsyncRuntime")
+
+    def _register_async_handlers(self, app) -> None:
+        """Register async Slack event handlers for AsyncApp.
+
+        These handlers run natively in the async event loop,
+        no need for AsyncRuntime bridge.
+        """
+        @app.event("app_mention")
+        async def handle_mention(event: dict, say, client) -> None:
+            """Handle @mentions of the bot."""
+            print(f"[SLACK-ASYNC] Received mention from {event.get('user')}: {event.get('text', '')[:50]}", flush=True)
+            await self._process_message(event, say, client)
+
+        @app.event("message")
+        async def handle_message(event: dict, say, client) -> None:
+            """Handle direct messages and thread replies."""
+            text = event.get("text", "")
+            channel_type = event.get("channel_type")
+            thread_ts = event.get("thread_ts")
+            print(f"[SLACK-ASYNC] Received message type={channel_type}, thread={thread_ts is not None}: {text[:50]}", flush=True)
+
+            # Skip bot's own messages and message_changed events
+            if event.get("bot_id") or event.get("subtype"):
+                print("[SLACK-ASYNC] Skipping bot/subtype message", flush=True)
+                return
+
+            # Handle DMs
+            if channel_type == "im":
+                print("[SLACK-ASYNC] Processing DM...", flush=True)
+                await self._process_message(event, say, client)
+            # Handle thread replies (user continuing conversation without @mention)
+            elif thread_ts:
+                print("[SLACK-ASYNC] Processing thread reply...", flush=True)
+                await self._process_message(event, say, client)
+            else:
+                # Skip non-threaded channel messages - app_mention handles @mentions
+                print("[SLACK-ASYNC] Skipping channel message (need @mention or thread reply)", flush=True)
+
+        @app.action(re.compile(r"^agent_action_.*"))
+        async def handle_action(ack, body: dict, client) -> None:
+            """Handle button clicks and other interactions."""
+            await ack()
+            await self._process_action(body, client)
+
+        @app.action("oca_login_button")
+        async def handle_oca_login(ack, body: dict, client) -> None:
+            """Handle OCA login button click (URL button - just acknowledge)."""
+            await ack()
+            # The button has a URL, so clicking it opens the OAuth page
+            # No additional action needed here
+            logger.info("OCA login button clicked", user=body.get("user", {}).get("id"))
+
+        @app.action("show_catalog")
+        async def handle_show_catalog(ack, body: dict, client) -> None:
+            """Handle catalog button click - show troubleshooting catalog."""
+            await ack()
+            await self._handle_catalog_action(body, client, None)
+
+        @app.action(re.compile(r"^catalog_category_.*"))
+        async def handle_catalog_category(ack, body: dict, client) -> None:
+            """Handle catalog category selection."""
+            await ack()
+            action = body.get("actions", [{}])[0]
+            category = action.get("value")
+            await self._handle_catalog_action(body, client, category)
+
+        @app.action("catalog_back")
+        async def handle_catalog_back(ack, body: dict, client) -> None:
+            """Handle catalog back button."""
+            await ack()
+            await self._handle_catalog_action(body, client, None)
+
+        @app.action(re.compile(r"^catalog_action_.*"))
+        async def handle_catalog_quick_action(ack, body: dict, client) -> None:
+            """Handle quick action button from catalog."""
+            await ack()
+            action = body.get("actions", [{}])[0]
+            query = action.get("value", "")
+            await self._handle_quick_action(body, client, query)
+
+        @app.action(re.compile(r"^runbook_action_.*"))
+        async def handle_runbook_action(ack, body: dict, client) -> None:
+            """Handle runbook action button."""
+            await ack()
+            action = body.get("actions", [{}])[0]
+            query = action.get("value", "")
+            await self._handle_quick_action(body, client, query)
+
+        @app.action(re.compile(r"^follow_up_.*"))
+        async def handle_follow_up(ack, body: dict, client) -> None:
+            """Handle follow-up suggestion button."""
+            await ack()
+            action = body.get("actions", [{}])[0]
+            query = action.get("value", "")
+            await self._handle_quick_action(body, client, query)
+
+        @app.action(re.compile(r"^recovery_.*"))
+        async def handle_recovery(ack, body: dict, client) -> None:
+            """Handle error recovery button."""
+            await ack()
+            action = body.get("actions", [{}])[0]
+            query = action.get("value", "")
+            await self._handle_quick_action(body, client, query)
+
+        @app.action(re.compile(r"^quick_.*"))
+        async def handle_quick_start(ack, body: dict, client) -> None:
+            """Handle quick start buttons from help menu."""
+            await ack()
+            action = body.get("actions", [{}])[0]
+            query = action.get("value", "")
+            await self._handle_quick_action(body, client, query)
+
+        @app.command("/oci")
+        async def handle_command(ack, body: dict, respond) -> None:
+            """Handle /oci slash command."""
+            await ack()
+            await self._process_command(body, respond)
+
+        logger.info("Slack async handlers registered")
 
     async def _process_message(
         self,
@@ -511,7 +801,8 @@ class SlackHandler:
                 # Handle special commands first
                 if text_lower in ("help", "?", "commands"):
                     print("[SLACK] Sending help message", flush=True)
-                    say(
+                    await self._safe_say(
+                        say,
                         text="OCI Coordinator Help",
                         blocks=build_help_blocks(),
                         thread_ts=thread_ts,
@@ -521,13 +812,29 @@ class SlackHandler:
 
                 if text_lower in ("hello", "hi", "hey", "start", "welcome"):
                     print("[SLACK] Sending welcome message", flush=True)
-                    say(
+                    await self._safe_say(
+                        say,
                         text="Welcome to OCI Coordinator!",
                         blocks=build_welcome_blocks(),
                         thread_ts=thread_ts,
                     )
                     print("[SLACK] Welcome message sent", flush=True)
                     return
+
+                # Handle catalog command
+                if text_lower in ("catalog", "menu", "runbook", "runbooks", "troubleshoot"):
+                    print("[SLACK] Sending catalog", flush=True)
+                    await self._safe_say(
+                        say,
+                        text="OCI Troubleshooting Catalog",
+                        blocks=build_catalog_blocks(),
+                        thread_ts=thread_ts,
+                    )
+                    print("[SLACK] Catalog sent", flush=True)
+                    return
+
+                # Initialize conversation context for this thread
+                await self._conversation_manager.get_context(thread_ts, channel, user)
 
                 # Check OCA authentication status
                 from src.llm.oca import is_oca_authenticated
@@ -538,7 +845,8 @@ class SlackHandler:
                 if not auth_status:
                     auth_url = get_oca_auth_url()
                     print("[SLACK] Sending auth required message", flush=True)
-                    say(
+                    await self._safe_say(
+                        say,
                         text="Authentication required. Please log in with Oracle SSO.",
                         blocks=build_auth_required_blocks(auth_url),
                         thread_ts=thread_ts,
@@ -550,7 +858,9 @@ class SlackHandler:
                 # This ensures Slack doesn't timeout while we process
                 thinking_ts = None
                 try:
-                    thinking_response = client.chat_postMessage(
+                    # Use _safe_client_call to handle both sync and async clients
+                    thinking_response = await self._safe_client_call(
+                        client.chat_postMessage,
                         channel=channel,
                         thread_ts=thread_ts,
                         text=":hourglass_flowing_sand: Processing your request...",
@@ -588,13 +898,14 @@ class SlackHandler:
                 # Delete the thinking message now that we have a response
                 if thinking_ts:
                     try:
-                        client.chat_delete(channel=channel, ts=thinking_ts)
+                        await self._safe_client_call(client.chat_delete, channel=channel, ts=thinking_ts)
                     except Exception:
                         pass  # Ignore if delete fails (e.g., already deleted)
 
                 # Handle coordinator error
                 if error_msg:
-                    say(
+                    await self._safe_say(
+                        say,
                         text=f"Error processing request: {error_msg[:100]}",
                         blocks=build_error_blocks(f"Request failed: {error_msg}"),
                         thread_ts=thread_ts,
@@ -607,7 +918,8 @@ class SlackHandler:
                     # Check if it's an auth error
                     if response.get("type") == "auth_required":
                         auth_url = get_oca_auth_url()
-                        say(
+                        await self._safe_say(
+                            say,
                             text="Authentication required",
                             blocks=build_auth_required_blocks(auth_url),
                             thread_ts=thread_ts,
@@ -616,13 +928,15 @@ class SlackHandler:
                         error_msg = response.get("message", "Unknown error")
                         if "authentication" in error_msg.lower():
                             auth_url = get_oca_auth_url()
-                            say(
+                            await self._safe_say(
+                                say,
                                 text="Authentication required",
                                 blocks=build_auth_required_blocks(auth_url),
                                 thread_ts=thread_ts,
                             )
                         else:
-                            say(
+                            await self._safe_say(
+                                say,
                                 text=f"Error: {error_msg[:100]}",
                                 blocks=build_error_blocks(error_msg),
                                 thread_ts=thread_ts,
@@ -640,13 +954,35 @@ class SlackHandler:
                             )
                             print(f"[SLACK] Warning: Empty response received", flush=True)
 
+                        # Get follow-up suggestions based on query type
+                        routing_type = response.get("agent_id", text)
+                        suggestions = get_follow_up_suggestions(routing_type)
+                        follow_up_blocks = build_follow_up_blocks(suggestions)
+
+                        # Combine response blocks with follow-up suggestions
+                        all_blocks = formatted.get("blocks", []) or []
+                        if follow_up_blocks and all_blocks:
+                            all_blocks.extend(follow_up_blocks)
+
                         print(f"[SLACK] Sending formatted response (length={len(msg_text)})", flush=True)
-                        say(
+                        await self._safe_say(
+                            say,
                             text=msg_text[:200] if isinstance(msg_text, str) else "Response",
-                            blocks=formatted.get("blocks", []) if formatted.get("blocks") else None,
+                            blocks=all_blocks if all_blocks else None,
                             thread_ts=thread_ts,
                         )
                         print("[SLACK] Response sent", flush=True)
+
+                        # Update conversation memory
+                        try:
+                            await self._conversation_manager.add_message(thread_ts, "user", text)
+                            await self._conversation_manager.add_message(
+                                thread_ts, "assistant", msg_text[:500],
+                                metadata={"agent_id": response.get("agent_id")}
+                            )
+                            await self._conversation_manager.update_query_type(thread_ts, routing_type)
+                        except Exception as mem_err:
+                            logger.warning("Failed to update conversation memory", error=str(mem_err))
 
                         # Send file attachments if present
                         attachments = response.get("attachments", [])
@@ -676,18 +1012,25 @@ class SlackHandler:
                                     )
 
                         # Add success reaction
-                        client.reactions_add(
+                        await self._safe_client_call(
+                            client.reactions_add,
                             channel=channel,
                             timestamp=event.get("ts"),
                             name="white_check_mark",
                         )
                 else:
-                    say(
+                    # No response - show error with recovery options
+                    error_blocks = build_error_blocks(
+                        "I couldn't process that request.",
+                        "Try rephrasing your question or type `help` for available commands."
+                    )
+                    recovery_blocks = build_error_recovery_blocks("default", text)
+                    error_blocks.extend(recovery_blocks)
+
+                    await self._safe_say(
+                        say,
                         text="I couldn't process that request.",
-                        blocks=build_error_blocks(
-                            "I couldn't process that request.",
-                            "Try rephrasing your question or type `help` for available commands."
-                        ),
+                        blocks=error_blocks,
                         thread_ts=thread_ts,
                     )
 
@@ -707,13 +1050,15 @@ class SlackHandler:
                 # Check if it's an auth error
                 if "authentication" in error_msg.lower() or "requires authentication" in error_msg.lower():
                     auth_url = get_oca_auth_url()
-                    say(
+                    await self._safe_say(
+                        say,
                         text="Authentication required",
                         blocks=build_auth_required_blocks(auth_url),
                         thread_ts=thread_ts,
                     )
                 else:
-                    say(
+                    await self._safe_say(
+                        say,
                         text=f"Error: {error_msg[:100]}",
                         blocks=build_error_blocks(error_msg[:200]),
                         thread_ts=thread_ts,
@@ -721,7 +1066,8 @@ class SlackHandler:
 
                 # Add error reaction
                 try:
-                    client.reactions_remove(
+                    await self._safe_client_call(
+                        client.reactions_remove,
                         channel=channel,
                         timestamp=event.get("ts"),
                         name="hourglass_flowing_sand",
@@ -729,7 +1075,8 @@ class SlackHandler:
                 except Exception:
                     pass
                 try:
-                    client.reactions_add(
+                    await self._safe_client_call(
+                        client.reactions_add,
                         channel=channel,
                         timestamp=event.get("ts"),
                         name="x",
@@ -750,7 +1097,8 @@ class SlackHandler:
                 span.set_attribute("error.message", str(e))
 
                 # Send error response
-                say(
+                await self._safe_say(
+                    say,
                     text=f"Error: {str(e)[:100]}",
                     blocks=build_error_blocks(str(e)[:200]),
                     thread_ts=thread_ts,
@@ -758,7 +1106,8 @@ class SlackHandler:
 
                 # Add error reaction
                 try:
-                    client.reactions_remove(
+                    await self._safe_client_call(
+                        client.reactions_remove,
                         channel=channel,
                         timestamp=event.get("ts"),
                         name="hourglass_flowing_sand",
@@ -766,7 +1115,8 @@ class SlackHandler:
                 except Exception:
                     pass
                 try:
-                    client.reactions_add(
+                    await self._safe_client_call(
+                        client.reactions_add,
                         channel=channel,
                         timestamp=event.get("ts"),
                         name="x",
@@ -889,6 +1239,180 @@ class SlackHandler:
                 await self._handle_refresh(action_value, body, client)
             else:
                 logger.warning("Unknown action", action_id=action_id)
+
+    async def _handle_catalog_action(
+        self,
+        body: dict,
+        client: Any,
+        category: str | None,
+    ) -> None:
+        """Handle catalog navigation actions.
+
+        Args:
+            body: Slack action body
+            client: Slack client
+            category: Category to show, or None for main catalog
+        """
+        channel = body.get("channel", {}).get("id")
+        thread_ts = body.get("message", {}).get("thread_ts") or body.get("message", {}).get("ts")
+
+        # Convert category string to enum if provided
+        cat_enum = None
+        if category:
+            try:
+                cat_enum = Category(category)
+            except ValueError:
+                logger.warning("Invalid category", category=category)
+
+        # Build catalog blocks
+        blocks = build_catalog_blocks(cat_enum)
+
+        # Send or update message
+        try:
+            await self._safe_client_call(
+                client.chat_postMessage,
+                channel=channel,
+                thread_ts=thread_ts,
+                text="OCI Troubleshooting Catalog",
+                blocks=blocks,
+            )
+        except Exception as e:
+            logger.error("Failed to send catalog", error=str(e))
+
+    async def _handle_quick_action(
+        self,
+        body: dict,
+        client: Any,
+        query: str,
+    ) -> None:
+        """Handle quick action button clicks.
+
+        Processes the query as if the user typed it.
+
+        Args:
+            body: Slack action body
+            client: Slack client
+            query: Query to execute
+        """
+        channel = body.get("channel", {}).get("id")
+        thread_ts = body.get("message", {}).get("thread_ts") or body.get("message", {}).get("ts")
+        user_id = body.get("user", {}).get("id", "unknown")
+
+        logger.info("Processing quick action", query=query, user=user_id)
+
+        # Send thinking message
+        thinking_ts = None
+        try:
+            thinking_response = await self._safe_client_call(
+                client.chat_postMessage,
+                channel=channel,
+                thread_ts=thread_ts,
+                text=f":hourglass_flowing_sand: Running: {query}",
+                blocks=[{
+                    "type": "context",
+                    "elements": [{
+                        "type": "mrkdwn",
+                        "text": f":hourglass_flowing_sand: *Running:* `{query}`",
+                    }],
+                }],
+            )
+            thinking_ts = thinking_response.get("ts")
+        except Exception as e:
+            logger.warning("Failed to send thinking message", error=str(e))
+
+        # Process the query
+        try:
+            response = await self._invoke_coordinator(
+                text=query,
+                user_id=user_id,
+                channel_id=channel,
+                thread_ts=thread_ts,
+            )
+
+            # Delete thinking message
+            if thinking_ts:
+                try:
+                    await self._safe_client_call(client.chat_delete, channel=channel, ts=thinking_ts)
+                except Exception:
+                    pass
+
+            # Format and send response
+            if response:
+                formatted = self._format_response(response)
+                msg_text = response.get("message", "Response")
+
+                # Get follow-up suggestions based on query type
+                routing_type = response.get("routing_type", query)
+                suggestions = get_follow_up_suggestions(routing_type)
+                follow_up_blocks = build_follow_up_blocks(suggestions)
+
+                # Combine response blocks with follow-up suggestions
+                all_blocks = formatted.get("blocks", [])
+                if follow_up_blocks:
+                    all_blocks.extend(follow_up_blocks)
+
+                await self._safe_client_call(
+                    client.chat_postMessage,
+                    channel=channel,
+                    thread_ts=thread_ts,
+                    text=msg_text[:200] if isinstance(msg_text, str) else "Response",
+                    blocks=all_blocks if all_blocks else None,
+                )
+
+                # Update conversation memory
+                await self._conversation_manager.add_message(thread_ts, "user", query)
+                await self._conversation_manager.add_message(
+                    thread_ts, "assistant", msg_text[:500],
+                    metadata={"query_type": routing_type}
+                )
+                await self._conversation_manager.update_query_type(thread_ts, routing_type)
+            else:
+                # Error response with recovery suggestions
+                error_blocks = build_error_blocks(
+                    "I couldn't process that request.",
+                    "Try a different query or use the catalog for suggestions."
+                )
+                recovery_blocks = build_error_recovery_blocks("default", query)
+                error_blocks.extend(recovery_blocks)
+
+                await self._safe_client_call(
+                    client.chat_postMessage,
+                    channel=channel,
+                    thread_ts=thread_ts,
+                    text="Error processing request",
+                    blocks=error_blocks,
+                )
+
+        except Exception as e:
+            logger.error("Quick action failed", query=query, error=str(e))
+
+            # Delete thinking message
+            if thinking_ts:
+                try:
+                    await self._safe_client_call(client.chat_delete, channel=channel, ts=thinking_ts)
+                except Exception:
+                    pass
+
+            # Determine error type for recovery suggestions
+            error_str = str(e).lower()
+            if "timeout" in error_str:
+                error_type = "timeout"
+            elif "auth" in error_str or "permission" in error_str:
+                error_type = "permission"
+            else:
+                error_type = "default"
+
+            error_blocks = build_error_blocks(str(e)[:200])
+            recovery_blocks = build_error_recovery_blocks(error_type, query)
+            error_blocks.extend(recovery_blocks)
+
+            await self._safe_client_call(
+                client.chat_postMessage,
+                channel=channel,
+                thread_ts=thread_ts,
+                text=f"Error: {str(e)[:100]}",
+                blocks=error_blocks,
+            )
 
     async def _invoke_coordinator(
         self,
@@ -1696,7 +2220,7 @@ Always format your response with:
         text = re.sub(r"<@[A-Z0-9]+>", "", text)
         return text.strip()
 
-    def _send_file_attachment(
+    async def _send_file_attachment(
         self,
         client: Any,
         channel: str,
@@ -1728,7 +2252,9 @@ Always format your response with:
                 file_content = file_content.encode("utf-8")
 
             # Use files_upload_v2 for better reliability
-            response = client.files_upload_v2(
+            # Use _safe_client_call to handle both sync and async clients
+            response = await self._safe_client_call(
+                client.files_upload_v2,
                 file=file_content,
                 filename=filename,
                 channel=channel,
@@ -1764,8 +2290,9 @@ Always format your response with:
         channel = body.get("channel", {}).get("id")
         thread_ts = body.get("message", {}).get("ts")
 
-        # Send follow-up message
-        client.chat_postMessage(
+        # Send follow-up message - use _safe_client_call for sync/async compatibility
+        await self._safe_client_call(
+            client.chat_postMessage,
             channel=channel,
             thread_ts=thread_ts,
             text=f"Drilling down into: {value}...",
@@ -1781,15 +2308,20 @@ Always format your response with:
         channel = body.get("channel", {}).get("id")
         message_ts = body.get("message", {}).get("ts")
 
-        # Update the original message
-        client.chat_update(
+        # Update the original message - use _safe_client_call for sync/async compatibility
+        await self._safe_client_call(
+            client.chat_update,
             channel=channel,
             ts=message_ts,
             text=f"Refreshing: {value}...",
         )
 
     def start(self, port: int = 3000, socket_mode: bool = True) -> None:
-        """Start the Slack handler.
+        """Start the Slack handler in BLOCKING sync mode.
+
+        WARNING: This uses the sync SocketModeHandler which creates its own
+        internal event loop. Use start_async() when running alongside other
+        async services (like the API server) to avoid BrokenPipeError.
 
         Args:
             port: Port for HTTP mode (if not using socket mode)
@@ -1798,14 +2330,60 @@ Always format your response with:
         if socket_mode and self.app_token:
             from slack_bolt.adapter.socket_mode import SocketModeHandler
 
-            print("[SLACK] Starting Socket Mode handler...", flush=True)
+            print("[SLACK] Starting Socket Mode handler (sync/blocking)...", flush=True)
             handler = SocketModeHandler(self.app, self.app_token)
-            logger.info("Starting Slack handler in Socket Mode")
+            logger.info("Starting Slack handler in Socket Mode (blocking)")
             handler.start()
         else:
             print(f"[SLACK] Starting HTTP mode on port {port}...", flush=True)
             logger.info("Starting Slack handler in HTTP mode", port=port)
             self.app.start(port=port)
+
+    async def start_async(self) -> None:
+        """Start the Slack handler in ASYNC mode.
+
+        This uses AsyncSocketModeHandler with AsyncApp which properly integrates
+        with the asyncio event loop. Use this when running alongside other
+        async services (like the API server with uvicorn).
+
+        This avoids the BrokenPipeError that occurs when sync SocketModeHandler
+        runs in a background thread while uvicorn uses the main async loop.
+        """
+        if not self.app_token:
+            logger.warning("SLACK_APP_TOKEN not set - cannot start async Socket Mode")
+            return
+
+        # Validate token format
+        if not self.app_token.startswith("xapp-"):
+            raise ValueError("SLACK_APP_TOKEN must start with 'xapp-'")
+        if not self.bot_token.startswith("xoxb-"):
+            raise ValueError("SLACK_BOT_TOKEN must start with 'xoxb-'")
+
+        from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
+
+        print("[SLACK] Starting Async Socket Mode handler with AsyncApp...", flush=True)
+        logger.info("Starting Slack handler in Async Socket Mode")
+
+        # Create async handler with AsyncApp (not sync App!)
+        # AsyncSocketModeHandler requires AsyncApp for proper async operation
+        handler = AsyncSocketModeHandler(self.async_app, self.app_token)
+
+        # Log when connected
+        print("[SLACK] Connecting to Slack via WebSocket...", flush=True)
+
+        try:
+            # Start and keep running - this will handle reconnections automatically
+            # The start_async() method blocks until the connection is closed
+            await handler.start_async()
+        except asyncio.CancelledError:
+            logger.info("Slack handler received cancellation, shutting down gracefully")
+            await handler.close_async()
+        except Exception as e:
+            error_msg = str(e)
+            logger.error("Async Socket Mode handler failed", error=error_msg)
+            # Don't raise on BrokenPipeError during shutdown
+            if "BrokenPipeError" not in error_msg and "Broken pipe" not in error_msg:
+                raise
 
 
 def create_slack_app(
