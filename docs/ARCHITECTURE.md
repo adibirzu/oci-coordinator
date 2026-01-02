@@ -832,6 +832,204 @@ APPROVAL_REQUIRED = [
 - [x] FastAPI endpoints (`src/api/`)
 - [x] Evaluation framework (`src/evaluation/`)
 - [x] Slack integration (`src/channels/slack.py`)
+- [x] Resilience infrastructure (bulkhead, circuit breaker, health monitor)
 - [ ] Teams integration
 - [ ] OKE deployment
 - [ ] Production observability
+
+## 14. Resilience Architecture
+
+### 14.1 Production Hardening Overview
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                         RESILIENCE ARCHITECTURE                                  │
+├─────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                  │
+│  ┌────────────────────────────────────────────────────────────────────────────┐ │
+│  │                          REQUEST FLOW                                       │ │
+│  │                                                                             │ │
+│  │   User Request                                                              │ │
+│  │        │                                                                    │ │
+│  │        ▼                                                                    │ │
+│  │   ┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐     │ │
+│  │   │  Rate Limiter   │────▶│    Bulkhead     │────▶│ Circuit Breaker │     │ │
+│  │   │  (LLM: 5 conc)  │     │  (by partition) │     │  (by server)    │     │ │
+│  │   └─────────────────┘     └─────────────────┘     └────────┬────────┘     │ │
+│  │                                                             │              │ │
+│  │                                                             ▼              │ │
+│  │                                                    ┌─────────────────┐     │ │
+│  │                                                    │   Tool Catalog  │     │ │
+│  │                                                    │   (execute)     │     │ │
+│  │                                                    └────────┬────────┘     │ │
+│  │                                                             │              │ │
+│  │                            ┌────────────────────────────────┤              │ │
+│  │                            │                                │              │ │
+│  │                            ▼                                ▼              │ │
+│  │                   ┌─────────────────┐              ┌─────────────────┐     │ │
+│  │                   │    Success      │              │    Failure      │     │ │
+│  │                   │                 │              │                 │     │ │
+│  │                   └─────────────────┘              └────────┬────────┘     │ │
+│  │                                                             │              │ │
+│  │                                                             ▼              │ │
+│  │                                                    ┌─────────────────┐     │ │
+│  │                                                    │ Deadletter Queue│     │ │
+│  │                                                    │ (Redis, 7 days) │     │ │
+│  │                                                    └─────────────────┘     │ │
+│  └────────────────────────────────────────────────────────────────────────────┘ │
+│                                                                                  │
+│  ┌────────────────────────────────────────────────────────────────────────────┐ │
+│  │                        BACKGROUND SERVICES                                  │ │
+│  │                                                                             │ │
+│  │   ┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐     │ │
+│  │   │ Health Monitor  │     │  Auto-Restart   │     │   DLQ Retry     │     │ │
+│  │   │ (60s interval)  │────▶│  (on failure)   │     │  (scheduled)    │     │ │
+│  │   └─────────────────┘     └─────────────────┘     └─────────────────┘     │ │
+│  │                                                                             │ │
+│  └────────────────────────────────────────────────────────────────────────────┘ │
+└─────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 14.2 Circuit Breaker State Machine
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                      CIRCUIT BREAKER STATE MACHINE                               │
+├─────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                  │
+│                              ┌───────────────────┐                              │
+│                              │      CLOSED       │                              │
+│                              │   (Normal Mode)   │                              │
+│                              │                   │                              │
+│                              │ • All calls pass  │                              │
+│                              │ • Count failures  │                              │
+│                              └─────────┬─────────┘                              │
+│                                        │                                         │
+│                            failures >= threshold (3)                             │
+│                                        │                                         │
+│                                        ▼                                         │
+│   ┌─────────────────────────────────────────────────────────────────────────┐   │
+│   │                              OPEN                                        │   │
+│   │                          (Fast Fail Mode)                                │   │
+│   │                                                                          │   │
+│   │  • All calls fail immediately with "Server temporarily unavailable"     │   │
+│   │  • No requests reach the server                                          │   │
+│   │  • Timer: 60 seconds                                                     │   │
+│   └─────────────────────────────────┬───────────────────────────────────────┘   │
+│                                     │                                            │
+│                           timeout expires (60s)                                  │
+│                                     │                                            │
+│                                     ▼                                            │
+│                              ┌───────────────────┐                              │
+│                              │    HALF-OPEN      │                              │
+│                              │   (Probe Mode)    │                              │
+│                              │                   │                              │
+│                              │ • Allow 1 probe   │                              │
+│                              │ • Test if healthy │                              │
+│                              └─────────┬─────────┘                              │
+│                                        │                                         │
+│                    ┌───────────────────┴───────────────────┐                    │
+│                    │                                       │                    │
+│               probe succeeds                         probe fails                 │
+│                    │                                       │                    │
+│                    ▼                                       ▼                    │
+│             ┌───────────┐                           ┌───────────┐              │
+│             │  CLOSED   │                           │   OPEN    │              │
+│             │ (healthy) │                           │ (restart) │              │
+│             └───────────┘                           └───────────┘              │
+│                                                                                  │
+└─────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 14.3 Bulkhead Partitions
+
+Resource isolation prevents one domain from exhausting resources:
+
+| Partition | Max Concurrent | Timeout | Use Case |
+|-----------|----------------|---------|----------|
+| DATABASE | 3 | 60s | SQL execution, OPSI queries |
+| INFRASTRUCTURE | 5 | 30s | Compute/network operations |
+| COST | 2 | 30s | OCI Usage API (slow) |
+| SECURITY | 3 | 30s | Cloud Guard, IAM |
+| DISCOVERY | 2 | 60s | Full resource scans |
+| LLM | 5 | 300s | LLM inference |
+| DEFAULT | 10 | 120s | Other operations |
+
+### 14.4 Health Monitor Configuration
+
+| Component | Check Interval | Failure Threshold | Auto-Restart | Critical |
+|-----------|----------------|-------------------|--------------|----------|
+| MCP Servers | 60s | 3 | Yes | Yes |
+| Redis | 30s | 3 | No | Yes |
+| LLM Provider | 120s | 5 | No | No |
+
+### 14.5 Deadletter Queue Retention
+
+| Failure Type | Retention | Auto-Retry | Max Retries |
+|--------------|-----------|------------|-------------|
+| TIMEOUT | 7 days | Yes | 3 |
+| CONNECTION | 7 days | Yes | 5 |
+| RATE_LIMIT | 1 day | Yes | 10 |
+| VALIDATION | 7 days | No | 0 |
+| AUTHENTICATION | 1 day | No | 0 |
+| SERVER_ERROR | 7 days | Yes | 2 |
+
+## 15. Multi-User Concurrency
+
+### 15.1 Session Isolation
+
+Each user gets an isolated session with:
+- Thread-specific Redis keys for state
+- LangGraph checkpoint isolation via `thread_id`
+- Bulkhead slot reservation per operation type
+
+### 15.2 Rate Limiting
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                         LLM RATE LIMITING                                        │
+├─────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                  │
+│   Concurrent Users                                                              │
+│        │                                                                         │
+│        ▼                                                                         │
+│   ┌─────────────────────────────────────────┐                                   │
+│   │          SEMAPHORE (max: 5)              │                                   │
+│   │  ┌─────┐ ┌─────┐ ┌─────┐ ┌─────┐ ┌─────┐│                                   │
+│   │  │slot1│ │slot2│ │slot3│ │slot4│ │slot5││                                   │
+│   │  │ ✓   │ │ ✓   │ │ ✓   │ │wait │ │wait ││                                   │
+│   │  └─────┘ └─────┘ └─────┘ └─────┘ └─────┘│                                   │
+│   └─────────────────────────────────────────┘                                   │
+│        │                                                                         │
+│        ▼                                                                         │
+│   ┌─────────────────────────────────────────┐                                   │
+│   │          LLM PROVIDER                    │                                   │
+│   │  (OCA / Claude / OpenAI)                 │                                   │
+│   └─────────────────────────────────────────┘                                   │
+│                                                                                  │
+│   Queue Metrics:                                                                │
+│   • current_queue_size: Number waiting for slot                                 │
+│   • average_wait_time_ms: Avg wait for slot                                     │
+│   • total_requests: Total requests processed                                    │
+│   • timeout_count: Requests that timed out                                      │
+│                                                                                  │
+└─────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 15.3 Initialization Lock
+
+Prevents race conditions during concurrent startup:
+
+```python
+# src/main.py
+_init_lock: asyncio.Lock | None = None
+_initialized: bool = False
+
+async def initialize_coordinator() -> None:
+    global _initialized
+    async with _get_init_lock():
+        if _initialized:
+            return  # Already initialized
+        # ... initialization code ...
+        _initialized = True
+```

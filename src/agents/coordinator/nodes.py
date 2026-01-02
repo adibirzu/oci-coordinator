@@ -131,7 +131,7 @@ class CoordinatorNodes:
         """
         Classify user intent.
 
-        Uses LLM to understand:
+        Uses keyword pre-classification followed by LLM to understand:
         - What the user wants
         - Which domain(s) are involved
         - Confidence level
@@ -146,6 +146,42 @@ class CoordinatorNodes:
         with _tracer.start_as_current_span("coordinator.classifier") as span:
             span.set_attribute("query_preview", state.query[:100] if state.query else "")
             self._logger.info("Classifying intent", query=state.query[:100])
+
+            # Pre-classification: Check for domain-specific queries
+            # This is more reliable than LLM for specific patterns
+
+            # 1. Check database listing queries (highest priority for common requests)
+            pre_classified = self._pre_classify_database_query(state.query)
+            if pre_classified:
+                span.set_attribute("pre_classification", "database_listing")
+                self._logger.info(
+                    "Pre-classified database listing query",
+                    intent=pre_classified.intent,
+                    workflow=pre_classified.suggested_workflow,
+                )
+                return {"intent": pre_classified}
+
+            # 2. Check resource-cost mapping queries (e.g., "what's costing me the most")
+            pre_classified = self._pre_classify_resource_cost_query(state.query)
+            if pre_classified:
+                span.set_attribute("pre_classification", "resource_cost_mapping")
+                self._logger.info(
+                    "Pre-classified resource-cost mapping query",
+                    intent=pre_classified.intent,
+                    workflow=pre_classified.suggested_workflow,
+                )
+                return {"intent": pre_classified}
+
+            # 3. Check domain-specific cost queries
+            pre_classified = self._pre_classify_cost_query(state.query)
+            if pre_classified:
+                span.set_attribute("pre_classification", "cost_domain_specific")
+                self._logger.info(
+                    "Pre-classified domain-specific cost query",
+                    intent=pre_classified.intent,
+                    domains=pre_classified.domains,
+                )
+                return {"intent": pre_classified}
 
             # Build classification prompt
             classification_prompt = self._build_classification_prompt(state.query)
@@ -185,6 +221,234 @@ class CoordinatorNodes:
                     )
                 }
 
+    def _pre_classify_cost_query(self, query: str) -> IntentClassification | None:
+        """
+        Pre-classify domain-specific cost queries using keyword matching.
+
+        This catches queries like:
+        - "show me database costs" → database_costs
+        - "compute spending" → compute_costs
+        - "storage cost breakdown" → storage_costs
+
+        Returns None if not a domain-specific cost query.
+        """
+        query_lower = query.lower()
+
+        # Check if this is a cost-related query
+        cost_keywords = ["cost", "spend", "spending", "budget", "expensive", "price", "billing"]
+        is_cost_query = any(kw in query_lower for kw in cost_keywords)
+
+        if not is_cost_query:
+            return None
+
+        # Check for domain-specific keywords
+        domain_patterns = {
+            "database": {
+                "keywords": ["database", "db", "autonomous", "atp", "adw", "exadata", "mysql", "nosql"],
+                "intent": "database_costs",
+                "workflow": "database_costs",
+            },
+            "compute": {
+                "keywords": ["compute", "instance", "vm", "virtual machine", "server"],
+                "intent": "compute_costs",
+                "workflow": "compute_costs",
+            },
+            "storage": {
+                "keywords": ["storage", "block", "object", "file storage", "archive"],
+                "intent": "storage_costs",
+                "workflow": "storage_costs",
+            },
+            "network": {
+                "keywords": ["network", "vcn", "load balancer", "fastconnect", "bandwidth"],
+                "intent": "network_costs",
+                "workflow": "network_costs",  # Falls back to cost_summary if not exists
+            },
+        }
+
+        for domain, config in domain_patterns.items():
+            if any(kw in query_lower for kw in config["keywords"]):
+                # Found a domain-specific cost query
+                workflow = config["workflow"]
+                # Verify workflow exists, fall back if not
+                if workflow not in self.workflow_registry:
+                    workflow = "cost_summary"
+
+                return IntentClassification(
+                    intent=config["intent"],
+                    category=IntentCategory.QUERY,
+                    confidence=0.95,  # High confidence for keyword match
+                    domains=[domain, "cost"],
+                    entities={},
+                    suggested_workflow=workflow,
+                    suggested_agent="finops-agent",
+                )
+
+        # Cost query but not domain-specific
+        return None
+
+    def _pre_classify_database_query(self, query: str) -> IntentClassification | None:
+        """
+        Pre-classify database listing/info queries using keyword matching.
+
+        This catches queries like:
+        - "show me the database names" → list_databases
+        - "list all databases" → list_databases
+        - "what databases do I have" → list_databases
+        - "database inventory" → list_databases
+
+        Returns None if not a database listing query.
+        """
+        query_lower = query.lower()
+
+        # Database listing patterns - these should route to list_databases workflow
+        listing_keywords = [
+            "list", "show", "get", "what", "which", "display",
+            "inventory", "names", "all"
+        ]
+        database_keywords = [
+            "database", "databases", "db", "dbs",
+            "autonomous", "atp", "adw", "exadata"
+        ]
+
+        # Check for database listing intent
+        has_listing_keyword = any(kw in query_lower for kw in listing_keywords)
+        has_database_keyword = any(kw in query_lower for kw in database_keywords)
+
+        # Must have both a listing action and database reference
+        if has_listing_keyword and has_database_keyword:
+            # Make sure this isn't a cost query (handled separately)
+            cost_keywords = ["cost", "spend", "spending", "price", "billing", "expensive"]
+            if any(kw in query_lower for kw in cost_keywords):
+                return None  # Let cost pre-classification handle it
+
+            # Make sure this isn't a performance/troubleshooting query
+            perf_keywords = ["performance", "slow", "error", "problem", "issue", "troubleshoot"]
+            if any(kw in query_lower for kw in perf_keywords):
+                return None  # Let LLM route to appropriate agent
+
+            return IntentClassification(
+                intent="list_databases",
+                category=IntentCategory.QUERY,
+                confidence=0.95,
+                domains=["database"],
+                entities={},
+                suggested_workflow="list_databases",
+                suggested_agent=None,  # Workflow handles this
+            )
+
+        return None
+
+    def _pre_classify_resource_cost_query(self, query: str) -> IntentClassification | None:
+        """
+        Pre-classify resource-cost mapping queries.
+
+        These are queries that want to see costs along with the resources:
+        - "What's costing me the most and what resources are behind it?"
+        - "Show me compute resources and their costs"
+        - "Cost breakdown with resource details"
+        - "Which compartments are spending the most?"
+        - "How can I optimize my costs?"
+
+        Returns None if not a resource-cost query.
+        """
+        query_lower = query.lower()
+
+        # Cost keywords
+        cost_keywords = [
+            "cost", "spend", "spending", "expensive", "price", "billing",
+            "budget", "money", "paying"
+        ]
+        has_cost = any(kw in query_lower for kw in cost_keywords)
+
+        # Resource/mapping keywords that indicate wanting both cost + resources
+        resource_mapping_keywords = [
+            "resource", "resources", "what", "which", "behind", "causing",
+            "breakdown", "detail", "with", "and", "along", "overview",
+            "full", "complete"
+        ]
+        has_mapping = any(kw in query_lower for kw in resource_mapping_keywords)
+
+        # Optimization keywords
+        optimize_keywords = [
+            "optimize", "optimization", "reduce", "save", "saving",
+            "underutilized", "unused", "waste", "wasting"
+        ]
+        has_optimize = any(kw in query_lower for kw in optimize_keywords)
+
+        # Compartment-specific patterns
+        compartment_keywords = ["compartment", "compartments", "by compartment"]
+        has_compartment = any(kw in query_lower for kw in compartment_keywords)
+
+        # Pattern 1: Compartment cost breakdown
+        if has_cost and has_compartment:
+            return IntentClassification(
+                intent="compartment_cost_breakdown",
+                category=IntentCategory.QUERY,
+                confidence=0.90,
+                domains=["cost", "identity"],
+                entities={},
+                suggested_workflow="compartment_cost_breakdown",
+                suggested_agent=None,
+            )
+
+        # Pattern 2: Cost optimization / underutilized resources
+        if has_optimize or (has_cost and "utiliz" in query_lower):
+            return IntentClassification(
+                intent="resource_utilization",
+                category=IntentCategory.ANALYSIS,
+                confidence=0.90,
+                domains=["cost", "infrastructure"],
+                entities={},
+                suggested_workflow="resource_utilization",
+                suggested_agent=None,
+            )
+
+        # Pattern 3: Full cost overview with resources
+        # Matches: "what's costing me", "cost overview", "full breakdown"
+        full_overview_patterns = [
+            "what's costing", "whats costing", "what is costing",
+            "costing me the most", "full breakdown", "cost overview",
+            "spending overview", "full cost", "complete cost"
+        ]
+        if any(pattern in query_lower for pattern in full_overview_patterns):
+            return IntentClassification(
+                intent="resource_cost_overview",
+                category=IntentCategory.QUERY,
+                confidence=0.92,
+                domains=["cost", "infrastructure"],
+                entities={},
+                suggested_workflow="resource_cost_overview",
+                suggested_agent=None,
+            )
+
+        # Pattern 4: Resource type with costs (compute, database)
+        if has_cost and has_mapping:
+            # Check for compute-specific
+            if any(kw in query_lower for kw in ["compute", "instance", "vm", "server"]):
+                return IntentClassification(
+                    intent="compute_with_costs",
+                    category=IntentCategory.QUERY,
+                    confidence=0.90,
+                    domains=["compute", "cost"],
+                    entities={},
+                    suggested_workflow="compute_with_costs",
+                    suggested_agent=None,
+                )
+
+            # Check for database-specific
+            if any(kw in query_lower for kw in ["database", "db", "autonomous"]):
+                return IntentClassification(
+                    intent="database_with_costs",
+                    category=IntentCategory.QUERY,
+                    confidence=0.90,
+                    domains=["database", "cost"],
+                    entities={},
+                    suggested_workflow="database_with_costs",
+                    suggested_agent=None,
+                )
+
+        return None
+
     def _build_classification_prompt(self, query: str) -> str:
         """Build the intent classification prompt."""
         # Get available workflows and agents for context
@@ -200,9 +464,23 @@ Query: "{query}"
 Available Workflows: {available_workflows}
 Available Agents: {available_agents}
 
+IMPORTANT: For cost-related queries:
+- If query mentions specific services (database, DB, compute, storage, network), use domain-specific workflows:
+  - "database_costs" or "db_costs" for database/DB cost queries
+  - "compute_costs" for compute/instance cost queries
+  - "storage_costs" for storage cost queries
+- Only use "cost_summary" or "show_spending" for general tenancy-wide cost queries
+- Extract the domain (database, compute, storage, network) into the domains array
+
+Examples:
+- "show me DB costs" → intent: "database_costs", domains: ["database", "cost"]
+- "how much am I spending on databases" → intent: "database_costs", domains: ["database", "cost"]
+- "what's my total spending" → intent: "cost_summary", domains: ["cost"]
+- "tenancy costs" → intent: "cost_summary", domains: ["cost"]
+
 Respond with a JSON object:
 {{
-    "intent": "<specific intent like list_instances, analyze_performance, troubleshoot_db>",
+    "intent": "<specific intent like list_instances, database_costs, compute_costs>",
     "category": "<query|action|analysis|troubleshoot|unknown>",
     "confidence": <0.0 to 1.0>,
     "domains": ["<domain1>", "<domain2>"],
@@ -212,9 +490,9 @@ Respond with a JSON object:
 }}
 
 Categories:
-- query: Information retrieval (list, get, describe)
+- query: Information retrieval (list, get, describe, show costs)
 - action: Perform operation (start, stop, create, delete)
-- analysis: Complex analysis (cost analysis, performance review)
+- analysis: Complex analysis (deep cost analysis, performance review)
 - troubleshoot: Diagnose issues (why is X slow, fix Y)
 - unknown: Cannot determine
 
@@ -861,9 +1139,10 @@ Return only the JSON object, no other text."""
 
     async def output_node(self, state: CoordinatorState) -> dict[str, Any]:
         """
-        Prepare final output.
+        Prepare final output with agent/workflow attribution.
 
-        Extracts the final response from state and prepares for return.
+        Extracts the final response from state and prepends the selected
+        agent or workflow information for transparency.
 
         Args:
             state: Current coordinator state
@@ -877,8 +1156,13 @@ Return only the JSON object, no other text."""
             has_error=bool(state.error),
         )
 
-        # If we already have a final response (and it's not empty), return it
+        # Build agent/workflow attribution header
+        attribution = self._build_attribution_header(state)
+
+        # If we already have a final response (and it's not empty), add attribution
         if state.final_response and state.final_response.strip():
+            if attribution:
+                return {"final_response": f"{attribution}\n\n{state.final_response}"}
             return {}
 
         # Extract from last AI message
@@ -887,6 +1171,8 @@ Return only the JSON object, no other text."""
                 content = msg.content if msg.content else ""
                 # Check for non-empty, meaningful response
                 if content.strip():
+                    if attribution:
+                        return {"final_response": f"{attribution}\n\n{content}"}
                     return {"final_response": content}
                 else:
                     self._logger.warning(
@@ -896,7 +1182,10 @@ Return only the JSON object, no other text."""
 
         # Fallback for errors
         if state.error:
-            return {"final_response": f"Error: {state.error}"}
+            error_response = f"Error: {state.error}"
+            if attribution:
+                return {"final_response": f"{attribution}\n\n{error_response}"}
+            return {"final_response": error_response}
 
         # Enhanced fallback with context about what was attempted
         routing_info = ""
@@ -910,12 +1199,59 @@ Return only the JSON object, no other text."""
             query_preview=state.query[:100] if state.query else "",
         )
 
-        return {
-            "final_response": (
-                "I processed your request but couldn't generate a complete response. "
-                "Please try rephrasing your question or check the system logs for details."
-            )
-        }
+        fallback_response = (
+            "I processed your request but couldn't generate a complete response. "
+            "Please try rephrasing your question or check the system logs for details."
+        )
+        if attribution:
+            return {"final_response": f"{attribution}\n\n{fallback_response}"}
+        return {"final_response": fallback_response}
+
+    def _build_attribution_header(self, state: CoordinatorState) -> str:
+        """
+        Build attribution header showing which agent/workflow was selected.
+
+        Args:
+            state: Current coordinator state
+
+        Returns:
+            Attribution string like "🤖 Agent: db-troubleshoot-agent" or empty string
+        """
+        if not state.routing:
+            return ""
+
+        routing_type = state.routing.routing_type
+
+        # Workflow attribution
+        if routing_type == RoutingType.WORKFLOW and state.workflow_name:
+            workflow_display = state.workflow_name.replace("_", " ").title()
+            return f"📋 **Workflow:** {workflow_display}"
+
+        # Agent attribution
+        if routing_type == RoutingType.AGENT and state.current_agent:
+            agent_display = state.current_agent.replace("-agent", "").replace("-", " ").title()
+            return f"🤖 **Agent:** {agent_display}"
+
+        # Parallel execution attribution
+        if routing_type == RoutingType.PARALLEL:
+            if state.workflow_state and "agents_used" in state.workflow_state:
+                agents = state.workflow_state["agents_used"]
+                if agents:
+                    agents_display = ", ".join(
+                        a.replace("-agent", "").replace("-", " ").title()
+                        for a in agents
+                    )
+                    return f"🔄 **Parallel Agents:** {agents_display}"
+            return "🔄 **Parallel Execution**"
+
+        # Direct LLM or escalate
+        if routing_type == RoutingType.DIRECT:
+            return "💬 **Coordinator LLM**"
+
+        if routing_type == RoutingType.ESCALATE:
+            return "⚠️ **Escalated to Human**"
+
+        return ""
 
 
 # ─────────────────────────────────────────────────────────────────────────────

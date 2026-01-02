@@ -1,15 +1,17 @@
 #!/usr/bin/env python
 """OCI AI Agent Coordinator - Main Entry Point.
 
-Starts the coordinator with Slack integration and observability.
+Starts the coordinator with Slack and API integration.
 
 Usage:
-    # Load environment from .env.local
+    # Start both Slack and API (default)
     poetry run python -m src.main
 
-    # Or with explicit mode
-    poetry run python -m src.main --mode slack
-    poetry run python -m src.main --mode api
+    # Explicit modes
+    poetry run python -m src.main --mode both      # Slack + API (default)
+    poetry run python -m src.main --mode slack     # Slack only
+    poetry run python -m src.main --mode api       # API only
+    poetry run python -m src.main --mode api --port 8080  # Custom port
 """
 
 from __future__ import annotations
@@ -41,10 +43,33 @@ from src.mcp.registry import (
     ServerRegistry,
 )
 from src.observability import init_observability, shutdown_observability
+from src.resilience import (
+    HealthMonitor,
+    HealthCheck,
+    HealthCheckResult,
+    HealthStatus,
+    Bulkhead,
+    DeadLetterQueue,
+)
 
 # Global references for cleanup
 _registry: ServerRegistry | None = None
 _catalog: ToolCatalog | None = None
+_health_monitor: HealthMonitor | None = None
+_bulkhead: Bulkhead | None = None
+_deadletter_queue: DeadLetterQueue | None = None
+
+# Initialization lock to prevent race conditions in concurrent startup
+_init_lock: asyncio.Lock | None = None
+_initialized: bool = False
+
+
+def _get_init_lock() -> asyncio.Lock:
+    """Get or create the initialization lock (must be created within event loop)."""
+    global _init_lock
+    if _init_lock is None:
+        _init_lock = asyncio.Lock()
+    return _init_lock
 
 
 def configure_logging() -> None:
@@ -99,137 +124,231 @@ logger = structlog.get_logger(__name__)
 
 
 async def initialize_coordinator() -> None:
-    """Initialize the coordinator and all components."""
-    logger.info("Initializing OCI AI Agent Coordinator")
+    """Initialize the coordinator and all components.
 
-    # Initialize observability first (tracing + logging)
-    # This sets up the tracer provider for all components
-    init_observability(agent_name="coordinator")
+    Uses an async lock to prevent race conditions if multiple startup
+    events occur concurrently (e.g., multiple Slack reconnects).
+    """
+    global _initialized, _registry, _catalog, _health_monitor, _bulkhead, _deadletter_queue
 
-    # Initialize OCI Logging handlers for ALL agents
-    # Each agent gets its own log stream for filtering in OCI Logging
-    from src.observability.oci_logging import init_oci_logging
-    agent_names = [
-        "db-troubleshoot-agent",
-        "log-analytics-agent",
-        "security-threat-agent",
-        "finops-agent",
-        "infrastructure-agent",
-        "slack-handler",
-    ]
-    for agent_name in agent_names:
-        handler = init_oci_logging(agent_name=agent_name)
-        if handler:
-            logger.debug(f"OCI Logging initialized for {agent_name}")
+    async with _get_init_lock():
+        if _initialized:
+            logger.debug("Coordinator already initialized, skipping")
+            return
 
-    logger.info("Observability initialized", agents=len(agent_names) + 1)
+        logger.info("Initializing OCI AI Agent Coordinator")
 
-    # Start OCA callback server for OAuth authentication
-    # This handles redirects from Oracle SSO when users log in via Slack
-    try:
-        from src.llm.oca_callback_server import start_callback_server
+        # Initialize observability first (tracing + logging)
+        # This sets up the tracer provider for all components
+        init_observability(agent_name="coordinator")
 
-        await start_callback_server()
-        logger.info("OCA callback server started (OAuth redirects enabled)")
-    except Exception as e:
-        logger.warning("OCA callback server failed to start", error=str(e))
+        # Initialize OCI Logging handlers for ALL agents
+        # Each agent gets its own log stream for filtering in OCI Logging
+        from src.observability.oci_logging import init_oci_logging
+        agent_names = [
+            "db-troubleshoot-agent",
+            "log-analytics-agent",
+            "security-threat-agent",
+            "finops-agent",
+            "infrastructure-agent",
+            "slack-handler",
+        ]
+        for agent_name in agent_names:
+            handler = init_oci_logging(agent_name=agent_name)
+            if handler:
+                logger.debug(f"OCI Logging initialized for {agent_name}")
 
-    # Initialize OCI discovery service for compartment caching
-    try:
-        from src.oci.discovery import initialize_discovery
+        logger.info("Observability initialized", agents=len(agent_names) + 1)
 
-        discovery = await initialize_discovery()
-        status = await discovery.get_status()
-        logger.info(
-            "OCI discovery initialized",
-            tenancies=status["tenancies"],
-            compartments=status["cached_compartments"],
-        )
-    except Exception as e:
-        logger.warning("OCI discovery initialization failed", error=str(e))
-
-    # Initialize MCP infrastructure
-    global _registry, _catalog
-    config = load_mcp_config()
-    enabled_servers = config.get_enabled_servers()
-    logger.info("MCP configuration loaded", servers=list(enabled_servers.keys()))
-
-    if enabled_servers:
+        # Start OCA callback server for OAuth authentication
+        # This handles redirects from Oracle SSO when users log in via Slack
         try:
-            registry, catalog = await initialize_mcp_from_config(config)
-            _registry = registry
-            _catalog = catalog
+            from src.llm.oca_callback_server import start_callback_server
 
-            # Connect registry events to catalog for dynamic updates
-            def on_registry_event(event_type: str, server_id: str, data: dict):
-                """Handle registry events to keep catalog in sync."""
-                if event_type in (
-                    EVENT_SERVER_CONNECTED,
-                    EVENT_SERVER_DISCONNECTED,
-                    EVENT_TOOLS_UPDATED,
-                ):
-                    # Invalidate catalog cache - tools will refresh on next access
-                    registry.invalidate_tool_cache()
-                    logger.debug(
-                        "Catalog invalidated due to registry event",
-                        event=event_type,
-                        server=server_id,
-                    )
+            await start_callback_server()
+            logger.info("OCA callback server started (OAuth redirects enabled)")
+        except Exception as e:
+            logger.warning("OCA callback server failed to start", error=str(e))
 
-            registry.on_event(on_registry_event)
+        # Initialize OCI discovery service for compartment caching
+        try:
+            from src.oci.discovery import initialize_discovery
 
-            # Start background health check loop
-            await registry.start_health_checks(interval_seconds=30)
-            logger.info("MCP health check loop started")
-
-            # Count connected servers
-            connected = sum(
-                1 for server_id in registry.list_servers()
-                if registry.get_status(server_id) == "connected"
-            )
+            discovery = await initialize_discovery()
+            status = await discovery.get_status()
             logger.info(
-                "MCP servers connected",
-                connected=connected,
-                total=len(registry.list_servers()),
-                tools=len(catalog.list_tools()),
+                "OCI discovery initialized",
+                tenancies=status["tenancies"],
+                compartments=status["cached_compartments"],
             )
         except Exception as e:
-            logger.warning("MCP initialization failed", error=str(e))
+            logger.warning("OCI discovery initialization failed", error=str(e))
 
-    # Initialize agent catalog with auto-discovery
-    agent_catalog = AgentCatalog.get_instance()
-    agent_catalog.auto_discover()
-    agents = agent_catalog.list_all()
-    logger.info("Agents discovered", count=len(agents))
+        # Initialize MCP infrastructure
+        config = load_mcp_config()
+        enabled_servers = config.get_enabled_servers()
+        logger.info("MCP configuration loaded", servers=list(enabled_servers.keys()))
 
-    # Initialize ShowOCI cache if enabled
-    if os.getenv("SHOWOCI_CACHE_ENABLED", "false").lower() == "true":
+        if enabled_servers:
+            try:
+                registry, catalog = await initialize_mcp_from_config(config)
+                _registry = registry
+                _catalog = catalog
+
+                # Connect registry events to catalog for dynamic updates
+                def on_registry_event(event_type: str, server_id: str, data: dict):
+                    """Handle registry events to keep catalog in sync."""
+                    if event_type in (
+                        EVENT_SERVER_CONNECTED,
+                        EVENT_SERVER_DISCONNECTED,
+                        EVENT_TOOLS_UPDATED,
+                    ):
+                        # Invalidate catalog cache - tools will refresh on next access
+                        registry.invalidate_tool_cache()
+                        logger.debug(
+                            "Catalog invalidated due to registry event",
+                            event=event_type,
+                            server=server_id,
+                        )
+
+                registry.on_event(on_registry_event)
+
+                # Start background health check loop
+                await registry.start_health_checks(interval_seconds=30)
+                logger.info("MCP health check loop started")
+
+                # Count connected servers
+                connected = sum(
+                    1 for server_id in registry.list_servers()
+                    if registry.get_status(server_id) == "connected"
+                )
+                logger.info(
+                    "MCP servers connected",
+                    connected=connected,
+                    total=len(registry.list_servers()),
+                    tools=len(catalog.list_tools()),
+                )
+            except Exception as e:
+                logger.warning("MCP initialization failed", error=str(e))
+
+        # ─────────────────────────────────────────────────────────────────────
+        # Initialize Resilience Infrastructure
+        # ─────────────────────────────────────────────────────────────────────
         try:
-            from src.showoci.cache_loader import ShowOCICacheLoader
+            # Initialize Bulkhead for resource isolation
+            _bulkhead = Bulkhead.get_instance()
+            logger.info("Bulkhead initialized", partitions=list(_bulkhead._partitions.keys()))
 
+            # Initialize Deadletter Queue for failed operations
             redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
-            profiles = os.getenv("OCI_PROFILES", "DEFAULT").split(",")
-            profiles = [p.strip() for p in profiles if p.strip()]
+            _deadletter_queue = DeadLetterQueue(redis_url=redis_url)
+            logger.info("Deadletter queue initialized")
 
-            cache_loader = ShowOCICacheLoader(
-                redis_url=redis_url,
-                profiles=profiles,
+            # Connect resilience to catalog
+            if _catalog:
+                _catalog._deadletter_queue = _deadletter_queue
+                _catalog._bulkhead = _bulkhead
+
+            # Initialize Health Monitor with auto-restart
+            _health_monitor = HealthMonitor.get_instance()
+
+            # Register MCP server health checks
+            if _registry:
+                for server_id in _registry.list_servers():
+                    # Create health check for each MCP server
+                    async def create_mcp_check(sid: str):
+                        async def check_mcp() -> HealthCheckResult:
+                            try:
+                                client = _registry.get_client(sid)
+                                if client:
+                                    # Quick tool list as health check
+                                    tools = client.list_tools() if hasattr(client, 'list_tools') else []
+                                    return HealthCheckResult(
+                                        status=HealthStatus.HEALTHY,
+                                        details={"tool_count": len(tools)},
+                                    )
+                                return HealthCheckResult(
+                                    status=HealthStatus.UNHEALTHY,
+                                    message="No client available",
+                                )
+                            except Exception as e:
+                                return HealthCheckResult(
+                                    status=HealthStatus.UNHEALTHY,
+                                    message=str(e),
+                                )
+                        return check_mcp
+
+                    async def create_mcp_restart(sid: str):
+                        async def restart_mcp() -> bool:
+                            try:
+                                await _registry.disconnect(sid)
+                                await asyncio.sleep(2)
+                                await _registry.connect(sid)
+                                return True
+                            except Exception:
+                                return False
+                        return restart_mcp
+
+                    check_func = await create_mcp_check(server_id)
+                    restart_func = await create_mcp_restart(server_id)
+
+                    _health_monitor.register_check(HealthCheck(
+                        name=f"mcp_{server_id}",
+                        check_func=check_func,
+                        restart_func=restart_func,
+                        interval_seconds=60.0,
+                        failure_threshold=3,
+                        critical=True,
+                    ))
+
+            # Start health monitoring
+            await _health_monitor.start()
+            logger.info(
+                "Health monitor started",
+                checks=list(_health_monitor._checks.keys()),
             )
 
-            # Run initial cache load in background
-            asyncio.create_task(_load_showoci_cache(cache_loader))
+        except Exception as e:
+            logger.warning("Resilience initialization failed", error=str(e))
 
-            # Start periodic refresh scheduler if configured
-            refresh_interval = float(os.getenv("SHOWOCI_REFRESH_HOURS", "4"))
-            if refresh_interval > 0:
-                await cache_loader.start_scheduler(interval_hours=refresh_interval)
-                logger.info(
-                    "ShowOCI cache scheduler started",
-                    interval_hours=refresh_interval,
+        # Initialize agent catalog with auto-discovery
+        agent_catalog = AgentCatalog.get_instance()
+        agent_catalog.auto_discover()
+        agents = agent_catalog.list_all()
+        logger.info("Agents discovered", count=len(agents))
+
+        # Initialize ShowOCI cache if enabled
+        if os.getenv("SHOWOCI_CACHE_ENABLED", "false").lower() == "true":
+            try:
+                from src.showoci.cache_loader import ShowOCICacheLoader
+
+                redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
+                profiles = os.getenv("OCI_PROFILES", "DEFAULT").split(",")
+                profiles = [p.strip() for p in profiles if p.strip()]
+
+                cache_loader = ShowOCICacheLoader(
+                    redis_url=redis_url,
                     profiles=profiles,
                 )
-        except Exception as e:
-            logger.warning("ShowOCI cache initialization failed", error=str(e))
+
+                # Run initial cache load in background
+                asyncio.create_task(_load_showoci_cache(cache_loader))
+
+                # Start periodic refresh scheduler if configured
+                refresh_interval = float(os.getenv("SHOWOCI_REFRESH_HOURS", "4"))
+                if refresh_interval > 0:
+                    await cache_loader.start_scheduler(interval_hours=refresh_interval)
+                    logger.info(
+                        "ShowOCI cache scheduler started",
+                        interval_hours=refresh_interval,
+                        profiles=profiles,
+                    )
+            except Exception as e:
+                logger.warning("ShowOCI cache initialization failed", error=str(e))
+
+        # Mark initialization complete
+        _initialized = True
+        logger.info("Coordinator initialization complete")
 
 
 async def _load_showoci_cache(cache_loader) -> None:
@@ -248,11 +367,44 @@ async def _load_showoci_cache(cache_loader) -> None:
         logger.error("ShowOCI cache load failed", error=str(e))
 
 
-async def run_slack_mode() -> None:
-    """Run in Slack integration mode."""
+def run_slack_mode_sync() -> None:
+    """Run Slack handler in blocking sync mode.
+
+    Only use this for standalone Slack-only mode.
+    For concurrent execution with API, use run_slack_mode_async().
+    """
     from src.channels.slack import create_slack_app
 
-    logger.info("Starting Slack integration mode")
+    app_token = os.getenv("SLACK_APP_TOKEN")
+    slack_handler = create_slack_app()
+
+    logger.info("Starting Slack handler in blocking sync mode")
+    slack_handler.start(socket_mode=bool(app_token))
+
+
+async def run_slack_mode_async() -> None:
+    """Run Slack handler in async mode for concurrent execution.
+
+    Uses AsyncSocketModeHandler which integrates properly with the
+    asyncio event loop, avoiding BrokenPipeError when running alongside
+    the API server.
+    """
+    from src.channels.slack import create_slack_app
+
+    slack_handler = create_slack_app()
+
+    logger.info("Starting Slack handler in async mode")
+    await slack_handler.start_async()
+
+
+async def run_slack_mode(blocking: bool = True) -> None:
+    """Run in Slack integration mode.
+
+    Args:
+        blocking: If True, runs in blocking sync mode (standalone).
+                  If False, runs in async mode for concurrent execution with API.
+    """
+    logger.info("Starting Slack integration mode", blocking=blocking, mode="sync" if blocking else "async")
 
     # Verify Slack tokens are configured
     bot_token = os.getenv("SLACK_BOT_TOKEN")
@@ -264,28 +416,26 @@ async def run_slack_mode() -> None:
 
     if not app_token:
         logger.warning("SLACK_APP_TOKEN not configured - Socket Mode disabled")
+        return
 
-    # Create and start Slack handler
-    slack_handler = create_slack_app()
+    if blocking:
+        # Handle shutdown gracefully for standalone mode
+        loop = asyncio.get_event_loop()
 
-    # Handle shutdown gracefully
-    loop = asyncio.get_event_loop()
+        def handle_shutdown(sig):
+            logger.info("Shutdown signal received", signal=sig.name)
+            shutdown_observability()
+            loop.stop()
 
-    def handle_shutdown(sig):
-        logger.info("Shutdown signal received", signal=sig.name)
-        shutdown_observability()
-        loop.stop()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            loop.add_signal_handler(sig, handle_shutdown, sig)
 
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, handle_shutdown, sig)
-
-    logger.info(
-        "Starting Slack handler",
-        socket_mode=bool(app_token),
-    )
-
-    # Start in blocking mode
-    slack_handler.start(socket_mode=bool(app_token))
+        # Run in blocking sync mode (standalone)
+        run_slack_mode_sync()
+    else:
+        # Run Slack in async mode - shares event loop with API server
+        # This avoids BrokenPipeError from competing event loops
+        await run_slack_mode_async()
 
 
 async def run_api_mode(port: int = 3001) -> None:
@@ -314,8 +464,8 @@ def main():
     parser.add_argument(
         "--mode",
         choices=["slack", "api", "both"],
-        default="slack",
-        help="Run mode: slack, api, or both",
+        default="both",
+        help="Run mode: slack, api, or both (default: both)",
     )
     parser.add_argument(
         "--port",
@@ -333,13 +483,14 @@ def main():
         await initialize_coordinator()
 
         if args.mode == "slack":
-            await run_slack_mode()
+            await run_slack_mode(blocking=True)
         elif args.mode == "api":
             await run_api_mode(args.port)
         elif args.mode == "both":
-            # Run both concurrently
+            # Run both concurrently using async Slack handler
+            logger.info("Starting both Slack and API modes concurrently", port=args.port)
             await asyncio.gather(
-                run_slack_mode(),
+                run_slack_mode(blocking=False),
                 run_api_mode(args.port),
             )
 

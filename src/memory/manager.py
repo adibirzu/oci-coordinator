@@ -214,7 +214,11 @@ class ATPMemoryStore(MemoryStore):
                 )
                 row = await cursor.fetchone()
                 if row:
-                    return json.loads(row[0])
+                    # Handle Oracle CLOB - async LOB requires await on .read()
+                    value_data = row[0]
+                    if hasattr(value_data, "read"):
+                        value_data = await value_data.read()
+                    return json.loads(value_data)
                 return None
         except Exception as e:
             self._logger.error("ATP get failed", key=key, error=str(e))

@@ -152,9 +152,15 @@ class MCPTransport(ABC):
 
     @abstractmethod
     async def send_request(
-        self, method: str, params: dict[str, Any] | None = None
+        self, method: str, params: dict[str, Any] | None = None, timeout: int | None = None
     ) -> Any:
-        """Send a JSON-RPC request and get response."""
+        """Send a JSON-RPC request and get response.
+
+        Args:
+            method: The JSON-RPC method name
+            params: Optional parameters for the method
+            timeout: Optional timeout in seconds (defaults to config.timeout_seconds)
+        """
         pass
 
 
@@ -295,9 +301,15 @@ class StdioTransport(MCPTransport):
         self._logger.info("MCP server disconnected")
 
     async def send_request(
-        self, method: str, params: dict[str, Any] | None = None
+        self, method: str, params: dict[str, Any] | None = None, timeout: int | None = None
     ) -> Any:
-        """Send JSON-RPC request via stdin."""
+        """Send JSON-RPC request via stdin.
+
+        Args:
+            method: The JSON-RPC method name
+            params: Optional parameters for the method
+            timeout: Optional timeout in seconds (defaults to config.timeout_seconds)
+        """
         if not self._process or not self._process.stdin:
             raise MCPError(-32600, "Not connected")
 
@@ -321,15 +333,18 @@ class StdioTransport(MCPTransport):
         self._process.stdin.write(request_data.encode())
         await self._process.stdin.drain()
 
+        # Use provided timeout or config default
+        effective_timeout = timeout if timeout is not None else self.config.timeout_seconds
+
         # Wait for response
         try:
             response = await asyncio.wait_for(
-                future, timeout=self.config.timeout_seconds
+                future, timeout=effective_timeout
             )
             return response
         except TimeoutError:
             del self._pending_requests[request_id]
-            raise MCPError(-32000, f"Request timeout: {method}")
+            raise MCPError(-32000, f"Request timeout: {method} (after {effective_timeout}s)")
 
     async def _read_responses(self) -> None:
         """Read responses from stdout."""
@@ -412,9 +427,15 @@ class HTTPTransport(MCPTransport):
         self._connected = False
 
     async def send_request(
-        self, method: str, params: dict[str, Any] | None = None
+        self, method: str, params: dict[str, Any] | None = None, timeout: int | None = None
     ) -> Any:
-        """Send JSON-RPC request over HTTP."""
+        """Send JSON-RPC request over HTTP.
+
+        Args:
+            method: The JSON-RPC method name
+            params: Optional parameters for the method
+            timeout: Optional timeout in seconds (defaults to config.timeout_seconds)
+        """
         if not self._client:
             raise MCPError(-32600, "Not connected")
 
@@ -428,11 +449,20 @@ class HTTPTransport(MCPTransport):
         if params:
             request["params"] = params
 
-        response = await self._client.post(
-            self.config.url,
-            json=request,
-        )
-        response.raise_for_status()
+        # Use provided timeout or config default
+        effective_timeout = timeout if timeout is not None else self.config.timeout_seconds
+
+        try:
+            response = await asyncio.wait_for(
+                self._client.post(
+                    self.config.url,
+                    json=request,
+                ),
+                timeout=effective_timeout,
+            )
+            response.raise_for_status()
+        except TimeoutError:
+            raise MCPError(-32000, f"Request timeout: {method} (after {effective_timeout}s)")
 
         data = response.json()
         if "error" in data:
@@ -599,15 +629,13 @@ class MCPClient:
                 try:
                     span.set_attribute("mcp.attempt", attempt + 1)
 
-                    # Use tool-specific timeout
-                    result = await asyncio.wait_for(
-                        self._transport.send_request(
-                            "tools/call",
-                            {
-                                "name": tool_name,
-                                "arguments": arguments,
-                            },
-                        ),
+                    # Pass tool-specific timeout to send_request
+                    result = await self._transport.send_request(
+                        "tools/call",
+                        {
+                            "name": tool_name,
+                            "arguments": arguments,
+                        },
                         timeout=timeout,
                     )
 

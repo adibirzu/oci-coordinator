@@ -8,7 +8,7 @@ log search, pattern detection, and correlation analysis.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import structlog
 from langgraph.graph import END, StateGraph
@@ -19,6 +19,11 @@ from src.agents.base import (
     BaseAgent,
     KafkaTopics,
 )
+from src.agents.self_healing import SelfHealingMixin
+
+if TYPE_CHECKING:
+    from src.mcp.catalog import ToolCatalog
+    from src.memory.manager import SharedMemoryManager
 
 logger = structlog.get_logger(__name__)
 
@@ -46,9 +51,9 @@ class LogAnalyticsState:
     result: str | None = None
 
 
-class LogAnalyticsAgent(BaseAgent):
+class LogAnalyticsAgent(BaseAgent, SelfHealingMixin):
     """
-    Log Analytics Agent.
+    Log Analytics Agent with Self-Healing Capabilities.
 
     Specializes in OCI Log Analytics operations:
     - Log search and query construction
@@ -56,7 +61,64 @@ class LogAnalyticsAgent(BaseAgent):
     - Service log correlation
     - Audit log analysis
     - Anomaly detection
+
+    Self-Healing Features:
+    - Automatic retry on log search timeouts
+    - Query correction for Logan syntax errors
+    - LLM-powered anomaly detection recovery
     """
+
+    # MCP tools from oci-unified and database-observatory servers
+    MCP_TOOLS = [
+        # OCI Unified observability tools
+        "oci_logging_list_log_groups",
+        "oci_logging_search_logs",
+        "oci_logging_get_log",
+        "oci_observability_query_logs",
+        # Database Observatory Logan tools
+        "oci_logan_execute_query",
+        "oci_logan_list_sources",
+        "oci_logan_list_entities",
+        "oci_logan_list_parsers",
+        "oci_logan_list_labels",
+        "oci_logan_list_groups",
+        "oci_logan_run_security_query",
+        "oci_logan_detect_anomalies",
+        "oci_logan_get_summary",
+        "oci_logan_suggest_query",
+        "oci_logan_list_active_sources",
+        "oci_logan_get_entity_logs",
+        "oci_logan_list_skills",
+    ]
+
+    def __init__(
+        self,
+        memory_manager: "SharedMemoryManager | None" = None,
+        tool_catalog: "ToolCatalog | None" = None,
+        config: dict[str, Any] | None = None,
+        llm: Any = None,
+    ):
+        """
+        Initialize Log Analytics Agent with self-healing.
+
+        Args:
+            memory_manager: Shared memory manager
+            tool_catalog: Tool catalog for MCP tools
+            config: Agent configuration
+            llm: LangChain LLM for analysis
+        """
+        super().__init__(memory_manager, tool_catalog, config)
+        self.llm = llm
+        self._graph: StateGraph | None = None
+
+        # Initialize self-healing capabilities
+        if llm:
+            self.init_self_healing(
+                llm=llm,
+                max_retries=3,
+                enable_validation=True,
+                enable_correction=True,
+            )
 
     @classmethod
     def get_definition(cls) -> AgentDefinition:
@@ -92,27 +154,7 @@ class LogAnalyticsAgent(BaseAgent):
                 "Log Analytics Expert Agent for OCI log search, pattern detection, "
                 "and correlation analysis across services."
             ),
-            mcp_tools=[
-                # OCI Unified observability tools
-                "oci_logging_list_log_groups",
-                "oci_logging_search_logs",
-                "oci_logging_get_log",
-                "oci_observability_query_logs",
-                # Database Observatory Logan tools
-                "oci_logan_execute_query",
-                "oci_logan_list_sources",
-                "oci_logan_list_entities",
-                "oci_logan_list_parsers",
-                "oci_logan_list_labels",
-                "oci_logan_list_groups",
-                "oci_logan_run_security_query",
-                "oci_logan_detect_anomalies",
-                "oci_logan_get_summary",
-                "oci_logan_suggest_query",
-                "oci_logan_list_active_sources",
-                "oci_logan_get_entity_logs",
-                "oci_logan_list_skills",
-            ],
+            mcp_tools=cls.MCP_TOOLS,
             mcp_servers=["oci-unified", "database-observatory"],
         )
 
@@ -157,20 +199,34 @@ class LogAnalyticsAgent(BaseAgent):
         return {"time_range": time_range, "phase": "search_logs"}
 
     async def _search_logs_node(self, state: LogAnalyticsState) -> dict[str, Any]:
-        """Search logs based on query parameters."""
+        """Search logs based on query parameters with self-healing."""
         self._logger.info("Searching logs", time_range=state.time_range)
 
         log_entries = []
         if self.tools:
             try:
-                result = await self.call_tool(
-                    "oci_observability_query_logs",
-                    {
-                        "compartment_id": state.compartment_id or "default",
-                        "query": state.search_pattern or "error",
-                        "time_range": state.time_range,
-                    },
-                )
+                # Use self-healing for automatic retry on log search issues
+                if self._self_healing_enabled:
+                    result = await self.healing_call_tool(
+                        "oci_observability_query_logs",
+                        {
+                            "compartment_id": state.compartment_id or "default",
+                            "query": state.search_pattern or "error",
+                            "time_range": state.time_range,
+                        },
+                        user_intent=state.query,
+                        validate=True,
+                        correct_on_failure=True,
+                    )
+                else:
+                    result = await self.call_tool(
+                        "oci_observability_query_logs",
+                        {
+                            "compartment_id": state.compartment_id or "default",
+                            "query": state.search_pattern or "error",
+                            "time_range": state.time_range,
+                        },
+                    )
                 if isinstance(result, list):
                     log_entries = result
             except Exception as e:

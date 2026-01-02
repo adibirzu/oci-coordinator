@@ -55,6 +55,8 @@ class ChatResponse(BaseModel):
     agent: str | None = Field(None, description="Agent that handled the request")
     tools_used: list[str] = Field(default_factory=list, description="Tools used in response")
     duration_ms: int = Field(..., description="Processing time in milliseconds")
+    content_type: str = Field("text", description="Content type: text, table, code, mixed")
+    structured_data: dict[str, Any] | None = Field(None, description="Structured data for tables/charts")
 
 
 class ToolRequest(BaseModel):
@@ -242,9 +244,10 @@ async def get_status() -> StatusResponse:
     try:
         registry = ServerRegistry.get_instance()
         for server_id in registry.list_servers():
+            info = registry.get_server_info(server_id)
             mcp_status[server_id] = {
                 "status": registry.get_status(server_id),
-                "tools": len(registry.get_tools(server_id) or []),
+                "tools": info["tool_count"] if info else 0,
             }
     except Exception as e:
         mcp_status["error"] = str(e)
@@ -280,23 +283,122 @@ async def get_status() -> StatusResponse:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# Content Type Detection
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def detect_content_type(response_text: str, result: dict | None) -> tuple[str, dict | None]:
+    """
+    Detect content type and extract structured data from response.
+
+    Returns:
+        tuple: (content_type, structured_data)
+        - content_type: 'text', 'table', 'code', or 'mixed'
+        - structured_data: dict with {title, columns, rows} for tables, None otherwise
+    """
+    import json
+    import re
+
+    # Check if result contains explicit structured data
+    if isinstance(result, dict):
+        if result.get("structured_data"):
+            return result.get("content_type", "table"), result["structured_data"]
+
+    # Try to detect table-like patterns in the response
+    # Look for JSON array patterns (common in cost/list responses)
+    json_array_match = re.search(r'\[[\s\S]*?\{[\s\S]*?"[^"]+"\s*:[\s\S]*?\}[\s\S]*?\]', response_text)
+    if json_array_match:
+        try:
+            data = json.loads(json_array_match.group())
+            if isinstance(data, list) and len(data) > 0 and isinstance(data[0], dict):
+                # Extract columns from first row
+                columns = list(data[0].keys())
+                return "table", {
+                    "columns": [{"key": c, "header": c.replace("_", " ").title()} for c in columns],
+                    "rows": data[:100],  # Limit rows
+                }
+        except json.JSONDecodeError:
+            pass
+
+    # Detect cost-related content
+    cost_patterns = [
+        r"Total\s*(?:Spend|Cost)[:\s]*[\$€₪]?[\d,]+(?:\.\d{2})?",
+        r"Service\s*\|\s*Cost\s*\|",
+        r"(?:cost|spend|budget)\s*(?:summary|breakdown|analysis)",
+    ]
+    for pattern in cost_patterns:
+        if re.search(pattern, response_text, re.IGNORECASE):
+            # Try to extract cost table from markdown
+            table_match = re.search(r'\|(.+)\|[\r\n]+\|[-:\s|]+\|[\r\n]+((?:\|.+\|[\r\n]*)+)', response_text)
+            if table_match:
+                header_line = table_match.group(1)
+                headers = [h.strip() for h in header_line.split("|") if h.strip()]
+                rows_text = table_match.group(2)
+                rows = []
+                for row_line in rows_text.strip().split("\n"):
+                    cells = [c.strip() for c in row_line.split("|") if c.strip()]
+                    if cells and len(cells) == len(headers):
+                        rows.append(dict(zip(headers, cells)))
+                if rows:
+                    return "table", {
+                        "title": "Cost Summary",
+                        "columns": [{"key": h, "header": h} for h in headers],
+                        "rows": rows,
+                    }
+            return "mixed", None
+
+    # Detect code blocks
+    if "```" in response_text:
+        return "code" if response_text.count("```") >= 2 else "mixed", None
+
+    return "text", None
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Chat Endpoints
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-@app.post("/chat", response_model=ChatResponse, tags=["Chat"])
-async def chat(request: ChatRequest) -> ChatResponse:
+@app.post("/chat", tags=["Chat"], response_model=None)
+async def chat(request: ChatRequest):
     """
     Process a chat message through the coordinator.
 
     The coordinator will:
-    1. Classify the intent
-    2. Route to the appropriate agent
-    3. Execute any necessary tools
-    4. Return the response
+    1. Check OCA authentication (if using OCA)
+    2. Classify the intent
+    3. Route to the appropriate agent
+    4. Execute any necessary tools
+    5. Return the response
     """
     start_time = time.time()
     thread_id = request.thread_id or str(uuid.uuid4())
+
+    # Check OCA authentication if using OCA provider
+    import os
+
+    llm_provider = os.getenv("LLM_PROVIDER", "").lower()
+    if llm_provider == "oracle_code_assist":
+        try:
+            from src.llm.oca import OCATokenManager
+
+            token_mgr = OCATokenManager()
+            if not token_mgr.is_authenticated():
+                auth_url = token_mgr.get_auth_url()
+                logger.info("OCA authentication required", thread_id=thread_id)
+                return JSONResponse(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    content={
+                        "error": "authentication_required",
+                        "auth_required": True,
+                        "auth_url": auth_url,
+                        "message": "Please login with Oracle SSO to continue",
+                    },
+                )
+        except ImportError:
+            logger.warning("OCA module not available, skipping auth check")
+        except Exception as e:
+            logger.warning("OCA auth check failed", error=str(e))
 
     logger.info(
         "Processing chat request",
@@ -357,12 +459,21 @@ async def chat(request: ChatRequest) -> ChatResponse:
             + 1,
         }
 
+        # Detect content type and extract structured data
+        final_response = response_text or "I encountered an issue processing your request."
+        content_type, structured_data = detect_content_type(
+            final_response,
+            result if isinstance(result, dict) else None
+        )
+
         return ChatResponse(
-            response=response_text or "I encountered an issue processing your request.",
+            response=final_response,
             thread_id=thread_id,
             agent=agent_used,
             tools_used=tools_used,
             duration_ms=duration_ms,
+            content_type=content_type,
+            structured_data=structured_data,
         )
 
     except Exception as e:
@@ -409,6 +520,58 @@ async def chat_stream(request: ChatRequest):
             "X-Thread-ID": thread_id,
         },
     )
+
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Utility Endpoints
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+@app.get("/logs", tags=["Utility"])
+async def get_logs(limit: int = 50) -> dict[str, Any]:
+    """
+    Get recent logs from the coordinator.
+    
+    Args:
+        limit: Number of lines to return (default: 50)
+    """
+    try:
+        log_file = "logs/coordinator.log"
+        if not os.path.exists(log_file):
+            return {"logs": [], "error": "Log file not found"}
+            
+        logs = []
+        # inefficient but simple for now - read last N lines
+        # simpler than backward reading for small N
+        with open(log_file, "r") as f:
+            lines = f.readlines()
+            # Parse structlog JSON lines if possible, or return raw
+            raw_lines = lines[-limit:]
+            
+            import json
+            for line in raw_lines:
+                try:
+                    data = json.loads(line)
+                    logs.append({
+                        "timestamp": data.get("timestamp", ""),
+                        "level": data.get("level", "INFO").upper(),
+                        "message": data.get("event", ""),
+                        "source": data.get("logger", "coordinator"),
+                        "raw": line
+                    })
+                except json.JSONDecodeError:
+                    logs.append({
+                        "timestamp": "", 
+                        "level": "INFO", 
+                        "message": line.strip(),
+                        "source": "system"
+                    })
+                    
+        return {"logs": logs}
+    except Exception as e:
+        logger.error("Failed to fetch logs", error=str(e))
+        return {"logs": [], "error": str(e)}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -599,9 +762,10 @@ async def list_mcp_servers() -> dict[str, Any]:
         servers = {}
 
         for server_id in registry.list_servers():
+            info = registry.get_server_info(server_id)
             servers[server_id] = {
                 "status": registry.get_status(server_id),
-                "tool_count": len(registry.get_tools(server_id) or []),
+                "tool_count": info["tool_count"] if info else 0,
             }
 
         return {"servers": servers, "count": len(servers)}
@@ -642,6 +806,72 @@ async def reconnect_mcp_server(server_id: str) -> dict[str, Any]:
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=str(e),
         )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Slack Integration Endpoints
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+@app.get("/slack/status", tags=["Slack"])
+async def get_slack_status() -> dict[str, Any]:
+    """Get Slack integration status.
+
+    Returns connection status, handler info, and recent activity.
+    """
+    import os
+
+    # Check if Slack tokens are configured
+    bot_token = os.getenv("SLACK_BOT_TOKEN", "")
+    app_token = os.getenv("SLACK_APP_TOKEN", "")
+
+    status_info = {
+        "configured": bool(bot_token and app_token),
+        "bot_token_valid": bot_token.startswith("xoxb-") if bot_token else False,
+        "app_token_valid": app_token.startswith("xapp-") if app_token else False,
+        "socket_mode_enabled": bool(app_token),
+        "timestamp": datetime.utcnow().isoformat(),
+    }
+
+    # Try to check actual connection status
+    if status_info["configured"] and status_info["bot_token_valid"]:
+        try:
+            from slack_sdk import WebClient
+            from slack_sdk.errors import SlackApiError
+
+            client = WebClient(token=bot_token)
+            response = client.auth_test()
+
+            if response["ok"]:
+                status_info["connection"] = {
+                    "status": "connected",
+                    "bot_id": response.get("bot_id"),
+                    "team": response.get("team"),
+                    "user": response.get("user"),
+                    "user_id": response.get("user_id"),
+                }
+            else:
+                status_info["connection"] = {
+                    "status": "error",
+                    "error": response.get("error", "Unknown error"),
+                }
+        except SlackApiError as e:
+            status_info["connection"] = {
+                "status": "error",
+                "error": e.response.get("error", str(e)),
+            }
+        except Exception as e:
+            status_info["connection"] = {
+                "status": "error",
+                "error": str(e),
+            }
+    else:
+        status_info["connection"] = {
+            "status": "not_configured",
+            "message": "Slack tokens not configured or invalid",
+        }
+
+    return status_info
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

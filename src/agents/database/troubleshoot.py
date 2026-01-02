@@ -30,6 +30,7 @@ from src.agents.base import (
 from src.agents.skills import (
     StepResult,
 )
+from src.agents.self_healing import SelfHealingMixin
 from src.observability import get_trace_id
 
 if TYPE_CHECKING:
@@ -257,14 +258,20 @@ Your expertise includes:
 Always provide structured analysis with health scores (0-100) and severity levels."""
 
 
-class DbTroubleshootAgent(BaseAgent):
+class DbTroubleshootAgent(BaseAgent, SelfHealingMixin):
     """
-    Database Troubleshooting Agent with MCP Integration.
+    Database Troubleshooting Agent with MCP Integration and Self-Healing.
 
     Uses the Database Observatory MCP server for:
     - OPSI operations insights (CPU, memory, I/O analysis)
     - SQLcl for direct database queries
     - Logan Analytics for log correlation
+
+    Self-Healing Capabilities:
+    - Automatic retry on tool failures with exponential backoff
+    - LLM-powered error analysis and root cause detection
+    - Parameter correction based on error messages
+    - Fallback to alternative tools (OPSI → Autonomous DB API)
 
     Workflow:
     1. Discover database using cache
@@ -362,18 +369,26 @@ class DbTroubleshootAgent(BaseAgent):
         llm: Any = None,
     ):
         """
-        Initialize DB Troubleshoot Agent.
+        Initialize DB Troubleshoot Agent with self-healing capabilities.
 
         Args:
             memory_manager: Shared memory manager
             tool_catalog: Tool catalog for MCP tools
             config: Agent configuration
-            llm: LangChain LLM for analysis
+            llm: LangChain LLM for analysis and self-healing
         """
         super().__init__(memory_manager, tool_catalog, config)
         self.llm = llm
         self._graph: StateGraph | None = None
         self._tracer = trace.get_tracer("oci-db-troubleshoot-agent")
+
+        # Initialize self-healing capabilities
+        self.init_self_healing(
+            llm=llm,
+            max_retries=3,
+            enable_validation=True,
+            enable_correction=True,
+        )
 
     def build_graph(self) -> StateGraph:
         """
@@ -411,13 +426,22 @@ class DbTroubleshootAgent(BaseAgent):
         self,
         tool_name: str,
         arguments: dict[str, Any],
+        user_intent: str | None = None,
+        use_self_healing: bool = True,
     ) -> dict[str, Any]:
         """
-        Call an MCP tool with tracing and error handling.
+        Call an MCP tool with tracing, self-healing, and error handling.
+
+        Self-healing features:
+        - Automatic retry on transient failures
+        - LLM-powered parameter correction
+        - Fallback to alternative tools
 
         Args:
             tool_name: Name of the MCP tool
             arguments: Tool arguments
+            user_intent: User query for context (helps with error correction)
+            use_self_healing: Whether to use self-healing (default True)
 
         Returns:
             Tool result or error dict
@@ -425,13 +449,31 @@ class DbTroubleshootAgent(BaseAgent):
         with self._tracer.start_as_current_span(f"mcp.tool.{tool_name}") as span:
             span.set_attribute("mcp.tool.name", tool_name)
             span.set_attribute("mcp.tool.args", str(arguments)[:200])
+            span.set_attribute("mcp.tool.self_healing", use_self_healing)
 
             start_time = time.time()
             try:
                 if not self.tools:
                     return {"success": False, "error": "Tool catalog not initialized"}
 
-                result = await self.call_tool(tool_name, arguments)
+                # Use self-healing if enabled and initialized
+                if use_self_healing and self._self_healing_enabled:
+                    result = await self.healing_call_tool(
+                        tool_name,
+                        arguments,
+                        user_intent=user_intent,
+                        validate=True,
+                        correct_on_failure=True,
+                    )
+                    # healing_call_tool returns None on complete failure
+                    if result is None:
+                        duration_ms = int((time.time() - start_time) * 1000)
+                        span.set_attribute("mcp.tool.success", False)
+                        span.set_attribute("mcp.tool.self_healed", True)
+                        return {"success": False, "error": "All retry attempts failed"}
+                else:
+                    # Direct call without self-healing
+                    result = await self.call_tool(tool_name, arguments)
 
                 duration_ms = int((time.time() - start_time) * 1000)
                 span.set_attribute("mcp.tool.duration_ms", duration_ms)
@@ -441,6 +483,7 @@ class DbTroubleshootAgent(BaseAgent):
                     "MCP tool call completed",
                     tool=tool_name,
                     duration_ms=duration_ms,
+                    self_healing=use_self_healing,
                     trace_id=get_trace_id(),
                 )
 

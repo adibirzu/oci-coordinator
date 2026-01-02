@@ -1,0 +1,228 @@
+{
+  "suite": "MCP Tool Test - 2026-01-02T15:36:59.544921",
+  "started": "2026-01-02T15:36:59.544933",
+  "finished": "2026-01-02T15:37:15.912921",
+  "total": 21,
+  "passed": 21,
+  "failed": 0,
+  "results": [
+    {
+      "tool": "oci_list_compartments",
+      "server": "oci-unified",
+      "success": true,
+      "duration_ms": 434,
+      "error": "",
+      "parameters": {
+        "limit": 10,
+        "format": "json"
+      }
+    },
+    {
+      "tool": "oci_list_compartments",
+      "server": "oci-unified",
+      "success": true,
+      "duration_ms": 223,
+      "error": "",
+      "parameters": {
+        "compartment_id": "ocid1.compartment.oc1..aaaaaaaagy3yddkkampnhj3cqm5ar7w2p7tuq5twbojyycvol6wugfav3ckq",
+        "limit": 5
+      }
+    },
+    {
+      "tool": "oci_get_compartment",
+      "server": "oci-unified",
+      "success": true,
+      "duration_ms": 262,
+      "error": "",
+      "parameters": {
+        "compartment_id": "ocid1.compartment.oc1..aaaaaaaagy3yddkkampnhj3cqm5ar7w2p7tuq5twbojyycvol6wugfav3ckq"
+      }
+    },
+    {
+      "tool": "oci_search_compartments",
+      "server": "oci-unified",
+      "success": true,
+      "duration_ms": 462,
+      "error": "",
+      "parameters": {
+        "query": "adrian",
+        "limit": 5
+      }
+    },
+    {
+      "tool": "oci_get_tenancy",
+      "server": "oci-unified",
+      "success": true,
+      "duration_ms": 243,
+      "error": "",
+      "parameters": {
+        "format": "json"
+      }
+    },
+    {
+      "tool": "oci_list_regions",
+      "server": "oci-unified",
+      "success": true,
+      "duration_ms": 330,
+      "error": "",
+      "parameters": {}
+    },
+    {
+      "tool": "oci_compute_list_instances",
+      "server": "oci-unified",
+      "success": true,
+      "duration_ms": 1618,
+      "error": "",
+      "parameters": {
+        "compartment_id": "ocid1.compartment.oc1..aaaaaaaagy3yddkkampnhj3cqm5ar7w2p7tuq5twbojyycvol6wugfav3ckq",
+        "limit": 10,
+        "format": "json"
+      }
+    },
+    {
+      "tool": "oci_compute_find_instance",
+      "server": "oci-unified",
+      "success": true,
+      "duration_ms": 865,
+      "error": "",
+      "parameters": {
+        "instance_name": "test",
+        "compartment_id": "ocid1.compartment.oc1..aaaaaaaagy3yddkkampnhj3cqm5ar7w2p7tuq5twbojyycvol6wugfav3ckq"
+      }
+    },
+    {
+      "tool": "oci_network_list_vcns",
+      "server": "oci-unified",
+      "success": true,
+      "duration_ms": 259,
+      "error": "",
+      "parameters": {
+        "compartment_id": "ocid1.compartment.oc1..aaaaaaaagy3yddkkampnhj3cqm5ar7w2p7tuq5twbojyycvol6wugfav3ckq",
+        "limit": 10,
+        "format": "json"
+      }
+    },
+    {
+      "tool": "oci_network_list_subnets",
+      "server": "oci-unified",
+      "success": true,
+      "duration_ms": 373,
+      "error": "",
+      "parameters": {
+        "compartment_id": "ocid1.compartment.oc1..aaaaaaaagy3yddkkampnhj3cqm5ar7w2p7tuq5twbojyycvol6wugfav3ckq",
+        "limit": 10
+      }
+    },
+    {
+      "tool": "oci_network_list_security_lists",
+      "server": "oci-unified",
+      "success": true,
+      "duration_ms": 227,
+      "error": "",
+      "parameters": {
+        "compartment_id": "ocid1.compartment.oc1..aaaaaaaagy3yddkkampnhj3cqm5ar7w2p7tuq5twbojyycvol6wugfav3ckq",
+        "limit": 10
+      }
+    },
+    {
+      "tool": "oci_cost_get_summary",
+      "server": "oci-unified",
+      "success": true,
+      "duration_ms": 2033,
+      "error": "",
+      "parameters": {
+        "days": 7
+      }
+    },
+    {
+      "tool": "oci_cost_get_summary",
+      "server": "oci-unified",
+      "success": true,
+      "duration_ms": 1325,
+      "error": "",
+      "parameters": {
+        "compartment_id": "ocid1.compartment.oc1..aaaaaaaagy3yddkkampnhj3cqm5ar7w2p7tuq5twbojyycvol6wugfav3ckq",
+        "days": 30
+      }
+    },
+    {
+      "tool": "oci_cost_get_summary",
+      "server": "oci-unified",
+      "success": true,
+      "duration_ms": 2469,
+      "error": "",
+      "parameters": {
+        "days": 30,
+        "service_filter": "database"
+      }
+    },
+    {
+      "tool": "oci_security_list_users",
+      "server": "oci-unified",
+      "success": true,
+      "duration_ms": 588,
+      "error": "",
+      "parameters": {
+        "compartment_id": "ocid1.compartment.oc1..aaaaaaaagy3yddkkampnhj3cqm5ar7w2p7tuq5twbojyycvol6wugfav3ckq",
+        "limit": 10
+      }
+    },
+    {
+      "tool": "oci_discovery_cache_status",
+      "server": "oci-unified",
+      "success": true,
+      "duration_ms": 4,
+      "error": "",
+      "parameters": {}
+    },
+    {
+      "tool": "oci_discovery_summary",
+      "server": "oci-unified",
+      "success": true,
+      "duration_ms": 8,
+      "error": "",
+      "parameters": {}
+    },
+    {
+      "tool": "oci_discovery_search",
+      "server": "oci-unified",
+      "success": true,
+      "duration_ms": 2,
+      "error": "",
+      "parameters": {
+        "query": "test",
+        "resource_type": "instance"
+      }
+    },
+    {
+      "tool": "search_capabilities",
+      "server": "oci-unified",
+      "success": true,
+      "duration_ms": 1,
+      "error": "",
+      "parameters": {
+        "query": "compute"
+      }
+    },
+    {
+      "tool": "search_capabilities",
+      "server": "oci-unified",
+      "success": true,
+      "duration_ms": 0,
+      "error": "",
+      "parameters": {
+        "query": "cost"
+      }
+    },
+    {
+      "tool": "search_capabilities",
+      "server": "oci-unified",
+      "success": true,
+      "duration_ms": 0,
+      "error": "",
+      "parameters": {
+        "query": "database"
+      }
+    }
+  ]
+}

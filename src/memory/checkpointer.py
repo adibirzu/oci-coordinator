@@ -243,7 +243,8 @@ class ATPCheckpointer(BaseCheckpointSaver):
             CheckpointTuple or None if not found
         """
         thread_id = config["configurable"]["thread_id"]
-        checkpoint_ns = config["configurable"].get("checkpoint_ns", "")
+        # Oracle treats empty strings as NULL, use 'default' as fallback
+        checkpoint_ns = config["configurable"].get("checkpoint_ns") or "default"
         checkpoint_id = config["configurable"].get("checkpoint_id")
 
         # Try cache first
@@ -306,9 +307,15 @@ class ATPCheckpointer(BaseCheckpointSaver):
 
                 ckpt_id, parent_id, ckpt_data, metadata_json = row
 
-                # Read CLOB data
-                checkpoint_str = ckpt_data.read() if hasattr(ckpt_data, "read") else ckpt_data
-                metadata_str = metadata_json.read() if metadata_json and hasattr(metadata_json, "read") else metadata_json
+                # Read CLOB data (async LOB requires await)
+                if hasattr(ckpt_data, "read"):
+                    checkpoint_str = await ckpt_data.read()
+                else:
+                    checkpoint_str = ckpt_data
+                if metadata_json and hasattr(metadata_json, "read"):
+                    metadata_str = await metadata_json.read()
+                else:
+                    metadata_str = metadata_json
                 metadata = json.loads(metadata_str) if metadata_str else {}
 
                 # Cache the result
@@ -336,11 +343,10 @@ class ATPCheckpointer(BaseCheckpointSaver):
                 pending_writes = []
                 async for write_row in cursor:
                     task_id, channel, type_name, value_json_clob = write_row
-                    value_str = (
-                        value_json_clob.read()
-                        if value_json_clob and hasattr(value_json_clob, "read")
-                        else value_json_clob
-                    )
+                    if value_json_clob and hasattr(value_json_clob, "read"):
+                        value_str = await value_json_clob.read()
+                    else:
+                        value_str = value_json_clob
                     if value_str:
                         value_data = json.loads(value_str)
                         value = self.serde.loads_typed((type_name, value_data))
@@ -396,7 +402,8 @@ class ATPCheckpointer(BaseCheckpointSaver):
             Updated config with checkpoint_id
         """
         thread_id = config["configurable"]["thread_id"]
-        checkpoint_ns = config["configurable"].get("checkpoint_ns", "")
+        # Oracle treats empty strings as NULL, use 'default' as fallback
+        checkpoint_ns = config["configurable"].get("checkpoint_ns") or "default"
         parent_checkpoint_id = config["configurable"].get("checkpoint_id")
 
         # Generate new checkpoint ID
@@ -405,16 +412,17 @@ class ATPCheckpointer(BaseCheckpointSaver):
         # Serialize checkpoint using JSON
         checkpoint_json = self._serialize_checkpoint(checkpoint)
 
-        # Serialize metadata
-        metadata_json = json.dumps(
-            {
+        # Serialize metadata (handle both dict and object)
+        if isinstance(metadata, dict):
+            meta_dict = metadata
+        else:
+            meta_dict = {
                 "source": metadata.source,
                 "step": metadata.step,
                 "writes": metadata.writes,
                 "parents": metadata.parents,
-            },
-            default=str,
-        )
+            }
+        metadata_json = json.dumps(meta_dict, default=str)
 
         # Save to ATP
         async with self._pool.acquire() as conn, conn.cursor() as cursor:
@@ -482,7 +490,8 @@ class ATPCheckpointer(BaseCheckpointSaver):
             task_id: Task identifier
         """
         thread_id = config["configurable"]["thread_id"]
-        checkpoint_ns = config["configurable"].get("checkpoint_ns", "")
+        # Oracle treats empty strings as NULL, use 'default' as fallback
+        checkpoint_ns = config["configurable"].get("checkpoint_ns") or "default"
         checkpoint_id = config["configurable"]["checkpoint_id"]
 
         async with self._pool.acquire() as conn, conn.cursor() as cursor:
@@ -547,7 +556,8 @@ class ATPCheckpointer(BaseCheckpointSaver):
             return []
 
         thread_id = config["configurable"]["thread_id"]
-        checkpoint_ns = config["configurable"].get("checkpoint_ns", "")
+        # Oracle treats empty strings as NULL, use 'default' as fallback
+        checkpoint_ns = config["configurable"].get("checkpoint_ns") or "default"
 
         results = []
         async with self._pool.acquire() as conn:
@@ -585,16 +595,15 @@ class ATPCheckpointer(BaseCheckpointSaver):
 
                 async for row in cursor:
                     ckpt_id, parent_id, ckpt_data, metadata_clob = row
-                    checkpoint_str = (
-                        ckpt_data.read()
-                        if hasattr(ckpt_data, "read")
-                        else ckpt_data
-                    )
-                    metadata_str = (
-                        metadata_clob.read()
-                        if metadata_clob and hasattr(metadata_clob, "read")
-                        else metadata_clob
-                    )
+                    # Async LOB requires await
+                    if hasattr(ckpt_data, "read"):
+                        checkpoint_str = await ckpt_data.read()
+                    else:
+                        checkpoint_str = ckpt_data
+                    if metadata_clob and hasattr(metadata_clob, "read"):
+                        metadata_str = await metadata_clob.read()
+                    else:
+                        metadata_str = metadata_clob
                     metadata = json.loads(metadata_str) if metadata_str else {}
 
                     checkpoint = self._deserialize_checkpoint(checkpoint_str)

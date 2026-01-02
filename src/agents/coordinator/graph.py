@@ -285,6 +285,12 @@ class LangGraphCoordinator:
 
     async def _init_atp_checkpointer(self) -> None:
         """Initialize ATP-backed checkpointer."""
+        # Allow disabling ATP checkpointer via environment variable
+        if os.getenv("DISABLE_ATP_CHECKPOINTER", "").lower() in ("true", "1", "yes"):
+            self._logger.info("ATP checkpointer disabled via DISABLE_ATP_CHECKPOINTER, using MemorySaver")
+            self._checkpointer = MemorySaver()
+            return
+
         try:
             from src.memory.checkpointer import ATPCheckpointer
 
@@ -472,54 +478,108 @@ class LangGraphCoordinator:
         try:
             result = await self._compiled_graph.ainvoke(initial_state, config)
 
-            # Extract results - handle both dict and object forms
-            routing_type = "direct"
-            routing = result.get("routing") if isinstance(result, dict) else getattr(result, "routing", None)
+            # Extract response from graph result
+            final_response = result.get("final_response", "")
+            if not final_response and result.get("messages"):
+                # Fallback: get content from last AI message
+                from langchain_core.messages import AIMessage
+                for msg in reversed(result.get("messages", [])):
+                    if isinstance(msg, AIMessage) and msg.content:
+                        final_response = str(msg.content)
+                        break
+
+            # Return successful result
+            # Extract routing type and target from the routing decision object
+            routing = result.get("routing")
+            routing_type = "unknown"
+            routing_target = None
             if routing:
-                # Handle both RoutingDecision objects and dicts
                 if hasattr(routing, "routing_type"):
                     routing_type = routing.routing_type.value if hasattr(routing.routing_type, "value") else str(routing.routing_type)
+                    routing_target = getattr(routing, "target", None)
                 elif isinstance(routing, dict):
-                    routing_type = routing.get("routing_type", "direct")
+                    routing_type = routing.get("routing_type", "unknown")
+                    routing_target = routing.get("target")
 
-            response = result.get("final_response", "") if isinstance(result, dict) else getattr(result, "final_response", "")
-            error = result.get("error") if isinstance(result, dict) else getattr(result, "error", None)
-
-            # Save to memory if session provided
-            if session_id and self.memory:
-                await self.memory.append_conversation(
-                    effective_thread_id,
-                    {
-                        "role": "user",
-                        "content": query,
-                    },
-                )
-                await self.memory.append_conversation(
-                    effective_thread_id,
-                    {
-                        "role": "assistant",
-                        "content": response,
-                    },
-                )
-
-            # Extract iteration count
-            iterations = result.get("iteration", 0) if isinstance(result, dict) else getattr(result, "iteration", 0)
-
-            self._logger.info(
-                "Query processed",
-                success=error is None,
-                routing_type=routing_type,
-                iterations=iterations,
-            )
+            # Get workflow/agent name with fallbacks
+            selected_workflow = result.get("workflow_name") or (routing_target if routing_type == "workflow" else None)
+            selected_agent = result.get("current_agent") or (routing_target if routing_type == "agent" else None)
 
             return {
-                "success": error is None,
-                "response": response,
+                "success": bool(final_response),
+                "response": final_response or "No response generated",
                 "routing_type": routing_type,
-                "iterations": iterations,
-                "error": error,
+                "iterations": result.get("iteration", 0),
+                "error": result.get("error"),
                 "thread_id": effective_thread_id,
+                "intent": result.get("intent"),
+                "selected_agent": selected_agent,
+                "selected_workflow": selected_workflow,
             }
+
+        except (TypeError, ValueError) as serde_error:
+            # Handle serialization/deserialization errors from checkpointer
+            # This can happen with MemorySaver when state schema changes
+            error_msg = str(serde_error)
+            self._logger.warning(
+                "Checkpointer serialization error, retrying with fresh state",
+                error=error_msg,
+            )
+            # Create a fresh thread_id to avoid stale checkpoint data
+            import uuid
+            fresh_thread_id = str(uuid.uuid4())
+            fresh_config = {"configurable": {"thread_id": fresh_thread_id}}
+            try:
+                result = await self._compiled_graph.ainvoke(initial_state, fresh_config)
+                effective_thread_id = fresh_thread_id  # Update to fresh thread
+
+                # Extract response from graph result (same as success path)
+                final_response = result.get("final_response", "")
+                if not final_response and result.get("messages"):
+                    from langchain_core.messages import AIMessage
+                    for msg in reversed(result.get("messages", [])):
+                        if isinstance(msg, AIMessage) and msg.content:
+                            final_response = str(msg.content)
+                            break
+
+                # Extract routing type and target from the routing decision object
+                routing = result.get("routing")
+                routing_type = "unknown"
+                routing_target = None
+                if routing:
+                    if hasattr(routing, "routing_type"):
+                        routing_type = routing.routing_type.value if hasattr(routing.routing_type, "value") else str(routing.routing_type)
+                        routing_target = getattr(routing, "target", None)
+                    elif isinstance(routing, dict):
+                        routing_type = routing.get("routing_type", "unknown")
+                        routing_target = routing.get("target")
+
+                # Get workflow/agent name with fallbacks
+                selected_workflow = result.get("workflow_name") or (routing_target if routing_type == "workflow" else None)
+                selected_agent = result.get("current_agent") or (routing_target if routing_type == "agent" else None)
+
+                return {
+                    "success": bool(final_response),
+                    "response": final_response or "No response generated",
+                    "routing_type": routing_type,
+                    "iterations": result.get("iteration", 0),
+                    "error": result.get("error"),
+                    "thread_id": effective_thread_id,
+                    "intent": result.get("intent"),
+                    "selected_agent": selected_agent,
+                    "selected_workflow": selected_workflow,
+                }
+
+            except Exception as retry_error:
+                self._logger.error("Retry also failed", error=str(retry_error))
+                return {
+                    "success": False,
+                    "response": f"Error processing request: {retry_error}",
+                    "routing_type": "error",
+                    "iterations": 0,
+                    "error": str(retry_error),
+                    "thread_id": effective_thread_id,
+                }
 
         except Exception as e:
             self._logger.error("Query processing failed", error=str(e))
@@ -567,8 +627,8 @@ class LangGraphCoordinator:
                 context={"thread_id": thread_id, "history": context_str},
             )
 
-            # Save to memory
-            if session_id and self.memory:
+            # Save to memory if thread_id provided (for conversation continuity)
+            if thread_id and self.memory:
                 await self.memory.append_conversation(
                     thread_id,
                     {"role": "user", "content": query},

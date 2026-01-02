@@ -1456,9 +1456,16 @@ class SlackHandler:
                         if result and result.get("success"):
                             span.set_attribute("routing.type", result.get("routing_type", "langgraph"))
                             span.set_attribute("routing.method", "langgraph")
+                            # Get the actual workflow/agent name for attribution
+                            agent_id = (
+                                result.get("selected_workflow")
+                                or result.get("selected_agent")
+                                or result.get("routing_type")
+                                or "coordinator"
+                            )
                             return {
                                 "type": "agent_response",
-                                "agent_id": result.get("routing_type", "coordinator"),
+                                "agent_id": agent_id,
                                 "query": text,
                                 "message": result.get("response", ""),
                                 "sections": [],
@@ -1531,8 +1538,36 @@ class SlackHandler:
                 if not hasattr(self, "_langgraph_coordinator") or self._langgraph_coordinator is None:
                     # Initialize coordinator components
                     llm = get_llm()
-                    tool_catalog = ToolCatalog.get_instance()
+
+                    # Use MCPConnectionManager for persistent tool catalog connections
+                    # This ensures we reuse the initialized MCP connections from main.py
+                    from src.mcp.connection_manager import MCPConnectionManager
+                    try:
+                        mcp_manager = await MCPConnectionManager.get_instance()
+                        tool_catalog = await mcp_manager.get_tool_catalog()
+                        if tool_catalog:
+                            logger.debug(
+                                "Using persistent MCP connections for LangGraph",
+                                tool_count=len(tool_catalog.list_tools()),
+                            )
+                    except Exception as e:
+                        logger.warning(
+                            "MCPConnectionManager failed, falling back to direct catalog",
+                            error=str(e),
+                        )
+                        tool_catalog = ToolCatalog.get_instance()
+
                     agent_catalog = AgentCatalog.get_instance()
+
+                    # Warn if no tools available (likely MCP connection issue)
+                    if tool_catalog is None:
+                        logger.warning(
+                            "No tool catalog available for LangGraph coordinator",
+                        )
+                    elif len(tool_catalog.list_tools()) == 0:
+                        logger.warning(
+                            "Tool catalog is empty - MCP servers may not be connected",
+                        )
 
                     # Initialize memory manager
                     redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")

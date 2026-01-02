@@ -22,6 +22,7 @@ import structlog
 if TYPE_CHECKING:
     from langgraph.graph import StateGraph
 
+    from src.agents.protocol import AgentMessage, AgentResult, MessageBus
     from src.agents.skills import SkillExecutionResult, SkillExecutor
     from src.formatting.base import StructuredResponse
     from src.mcp.catalog import ToolCatalog
@@ -356,6 +357,269 @@ class BaseAgent(ABC):
     def get_skills(self) -> list[str]:
         """Get agent skills/workflows."""
         return self.get_definition().skills
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Inter-Agent Communication
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _get_message_bus(self) -> "MessageBus":
+        """Get the global message bus for inter-agent communication."""
+        from src.agents.protocol import get_message_bus
+
+        return get_message_bus()
+
+    async def request_agent_assistance(
+        self,
+        target_agent_id: str,
+        query: str,
+        context: dict[str, Any] | None = None,
+        boundaries: list[str] | None = None,
+        timeout_seconds: int = 60,
+    ) -> "AgentResult":
+        """
+        Request assistance from another agent via the message bus.
+
+        Use this when your agent needs specialized knowledge or capabilities
+        from another agent. The request is routed through the coordinator's
+        message bus with proper tracking and timeout handling.
+
+        Args:
+            target_agent_id: ID of the agent to request help from
+                (e.g., "db-troubleshoot-agent", "finops-agent")
+            query: The question or task for the target agent
+            context: Shared context data to pass to the target agent
+            boundaries: Task boundaries to prevent scope creep
+            timeout_seconds: Maximum time to wait for response
+
+        Returns:
+            AgentResult with success status and result data
+
+        Example:
+            # From infrastructure agent, request database analysis
+            result = await self.request_agent_assistance(
+                target_agent_id="db-troubleshoot-agent",
+                query="What is the CPU usage for database X?",
+                context={"database_id": "ocid1..."},
+                boundaries=["Focus only on CPU metrics"],
+            )
+            if result.success:
+                cpu_analysis = result.result
+        """
+        from src.agents.protocol import AgentMessage, MessagePriority
+
+        message_bus = self._get_message_bus()
+        my_id = self.get_definition().agent_id
+
+        self._logger.info(
+            "Requesting agent assistance",
+            from_agent=my_id,
+            target_agent=target_agent_id,
+            query_length=len(query),
+        )
+
+        message = AgentMessage(
+            sender=my_id,
+            recipient=target_agent_id,
+            intent=query,
+            payload=context or {},
+            boundaries=boundaries or [],
+            context={
+                "requesting_agent": my_id,
+                "request_type": "assistance",
+                **(context or {}),
+            },
+            priority=MessagePriority.NORMAL,
+            timeout_seconds=timeout_seconds,
+        )
+
+        result = await message_bus.send(message, wait_for_result=True)
+
+        if result:
+            self._logger.info(
+                "Agent assistance response received",
+                target_agent=target_agent_id,
+                success=result.success,
+                execution_time_ms=result.execution_time_ms,
+            )
+        else:
+            self._logger.warning(
+                "No response from agent assistance request",
+                target_agent=target_agent_id,
+            )
+
+        return result
+
+    async def delegate_subtask(
+        self,
+        capability: str,
+        query: str,
+        context: dict[str, Any] | None = None,
+        boundaries: list[str] | None = None,
+    ) -> "AgentResult | None":
+        """
+        Delegate a subtask to an agent with the specified capability.
+
+        This method finds an appropriate agent by capability rather than
+        by explicit ID, making it more flexible for task delegation.
+
+        Args:
+            capability: Required capability (e.g., "cost-analysis", "log-search")
+            query: The subtask to delegate
+            context: Context data for the subtask
+            boundaries: Scope boundaries for the subtask
+
+        Returns:
+            AgentResult if an agent was found and responded, None otherwise
+
+        Example:
+            # Delegate cost analysis to whoever has that capability
+            result = await self.delegate_subtask(
+                capability="cost-analysis",
+                query="What are the costs for compartment X?",
+                context={"compartment_id": "ocid1..."},
+            )
+        """
+        from src.agents.catalog import AgentCatalog
+
+        # Try to get agent catalog to find agent by capability
+        try:
+            catalog = AgentCatalog.get_instance()
+            agents = catalog.get_by_capability(capability)
+
+            if not agents:
+                self._logger.warning(
+                    "No agent found for capability",
+                    capability=capability,
+                )
+                return None
+
+            # Use first matching agent
+            target_agent = agents[0]
+            return await self.request_agent_assistance(
+                target_agent_id=target_agent.agent_id,
+                query=query,
+                context=context,
+                boundaries=boundaries,
+            )
+
+        except Exception as e:
+            self._logger.error(
+                "Failed to delegate subtask",
+                capability=capability,
+                error=str(e),
+            )
+            return None
+
+    async def broadcast_context(
+        self,
+        context_key: str,
+        context_value: Any,
+    ) -> None:
+        """
+        Share context with all agents via shared memory.
+
+        Use this to propagate discoveries or state that other agents
+        might find useful (e.g., resolved compartment IDs, discovered
+        resource relationships).
+
+        Args:
+            context_key: Key to store the context under
+            context_value: Value to share (must be JSON-serializable)
+
+        Example:
+            # Share discovered database-to-compartment mapping
+            await self.broadcast_context(
+                "discovered_mapping",
+                {"database_id": "ocid1...", "compartment_name": "Production"},
+            )
+        """
+        if not self.memory:
+            self._logger.warning("Memory not available for context broadcast")
+            return
+
+        # Store in shared namespace accessible to all agents
+        await self.memory.set(
+            f"shared_context:{context_key}",
+            context_value,
+            ttl=3600,  # 1 hour TTL
+        )
+
+        self._logger.debug(
+            "Context broadcasted",
+            key=context_key,
+            from_agent=self.get_definition().agent_id,
+        )
+
+    async def get_shared_context(self, context_key: str) -> Any | None:
+        """
+        Retrieve context shared by other agents.
+
+        Args:
+            context_key: Key to retrieve
+
+        Returns:
+            Shared context value or None if not found
+        """
+        if not self.memory:
+            return None
+
+        return await self.memory.get(f"shared_context:{context_key}")
+
+    def discover_agents(
+        self,
+        capability: str | None = None,
+        domain: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """
+        Discover available agents to request help from.
+
+        Args:
+            capability: Filter by capability (e.g., "cost-analysis")
+            domain: Filter by domain (e.g., "database")
+
+        Returns:
+            List of agent info dicts with id, role, capabilities, skills
+
+        Example:
+            # Find all agents
+            all_agents = self.discover_agents()
+
+            # Find agents that can do cost analysis
+            cost_agents = self.discover_agents(capability="cost-analysis")
+
+            # Find database-related agents
+            db_agents = self.discover_agents(domain="database")
+        """
+        from src.agents.catalog import AgentCatalog
+
+        try:
+            catalog = AgentCatalog.get_instance()
+
+            if capability:
+                agents = catalog.get_by_capability(capability)
+            elif domain:
+                agents = catalog.get_by_domain(domain)
+            else:
+                agents = catalog.list_all()
+
+            # Filter out self
+            my_id = self.get_definition().agent_id
+
+            return [
+                {
+                    "agent_id": agent.agent_id,
+                    "role": agent.role,
+                    "capabilities": agent.capabilities,
+                    "skills": agent.skills,
+                    "description": agent.description,
+                }
+                for agent in agents
+                if agent.agent_id != my_id
+            ]
+
+        except Exception as e:
+            self._logger.error("Failed to discover agents", error=str(e))
+            return []
 
     # ─────────────────────────────────────────────────────────────────────────
     # Skill Execution

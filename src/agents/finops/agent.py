@@ -8,7 +8,7 @@ and optimization recommendations in OCI.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import structlog
 from langgraph.graph import END, StateGraph
@@ -19,6 +19,11 @@ from src.agents.base import (
     BaseAgent,
     KafkaTopics,
 )
+from src.agents.self_healing import SelfHealingMixin
+
+if TYPE_CHECKING:
+    from src.mcp.catalog import ToolCatalog
+    from src.memory.manager import SharedMemoryManager
 
 logger = structlog.get_logger(__name__)
 
@@ -46,9 +51,9 @@ class FinOpsState:
     result: str | None = None
 
 
-class FinOpsAgent(BaseAgent):
+class FinOpsAgent(BaseAgent, SelfHealingMixin):
     """
-    FinOps Agent.
+    FinOps Agent with Self-Healing Capabilities.
 
     Specializes in OCI cost management:
     - Cost analysis and breakdown
@@ -56,7 +61,48 @@ class FinOpsAgent(BaseAgent):
     - Budget tracking
     - Rightsizing recommendations
     - Usage trend analysis
+
+    Self-Healing Features:
+    - Automatic retry with parameter correction on API failures
+    - Pre-validation of tool calls before execution
+    - LLM-powered error analysis for complex issues
     """
+
+    # MCP tools from oci-unified server
+    MCP_TOOLS = [
+        "oci_cost_get_summary",
+        "oci_cost_get_usage_report",
+        "oci_cost_get_forecast",
+    ]
+
+    def __init__(
+        self,
+        memory_manager: "SharedMemoryManager | None" = None,
+        tool_catalog: "ToolCatalog | None" = None,
+        config: dict[str, Any] | None = None,
+        llm: Any = None,
+    ):
+        """
+        Initialize FinOps Agent with self-healing.
+
+        Args:
+            memory_manager: Shared memory manager
+            tool_catalog: Tool catalog for MCP tools
+            config: Agent configuration
+            llm: LangChain LLM for analysis
+        """
+        super().__init__(memory_manager, tool_catalog, config)
+        self.llm = llm
+        self._graph: StateGraph | None = None
+
+        # Initialize self-healing capabilities
+        if llm:
+            self.init_self_healing(
+                llm=llm,
+                max_retries=3,
+                enable_validation=True,
+                enable_correction=True,
+            )
 
     @classmethod
     def get_definition(cls) -> AgentDefinition:
@@ -92,9 +138,7 @@ class FinOpsAgent(BaseAgent):
                 "FinOps Expert Agent for cost analysis, budget tracking, "
                 "and optimization recommendations in OCI."
             ),
-            mcp_tools=[
-                "oci_cost_get_summary",  # Primary cost tool with 30s timeout
-            ],
+            mcp_tools=cls.MCP_TOOLS,
             mcp_servers=["oci-unified"],
         )
 
@@ -158,14 +202,27 @@ class FinOpsAgent(BaseAgent):
                     pass
 
             # Get cost summary - compartment_id=None uses tenancy from OCI config
+            # Use self-healing tool call for automatic retry and parameter correction
             try:
-                summary_result = await self.call_tool(
-                    "oci_cost_get_summary",
-                    {
-                        "compartment_id": state.compartment_id,  # None is valid, tool handles it
-                        "days": days,
-                    },
-                )
+                if self._self_healing_enabled:
+                    summary_result = await self.healing_call_tool(
+                        "oci_cost_get_summary",
+                        {
+                            "compartment_id": state.compartment_id,  # None is valid, tool handles it
+                            "days": days,
+                        },
+                        user_intent=state.query,
+                        validate=True,
+                        correct_on_failure=True,
+                    )
+                else:
+                    summary_result = await self.call_tool(
+                        "oci_cost_get_summary",
+                        {
+                            "compartment_id": state.compartment_id,  # None is valid, tool handles it
+                            "days": days,
+                        },
+                    )
 
                 # Parse JSON response
                 if isinstance(summary_result, str):

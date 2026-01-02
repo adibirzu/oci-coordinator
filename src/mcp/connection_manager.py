@@ -130,7 +130,13 @@ class MCPConnectionManager:
                 self._initializing = False
 
     async def _initialize_connections(self) -> None:
-        """Initialize MCP server connections."""
+        """Initialize MCP server connections.
+
+        Reuses existing singletons if they are healthy (have connected servers
+        and tools). This prevents destroying a properly initialized catalog
+        when called from different contexts (e.g., Slack handler after main
+        initialization).
+        """
         from src.mcp.catalog import ToolCatalog
         from src.mcp.config import initialize_mcp_from_config, load_mcp_config
         from src.mcp.registry import ServerRegistry
@@ -139,7 +145,37 @@ class MCPConnectionManager:
         start_time = time.time()
 
         try:
-            # Reset any existing singletons to ensure clean state
+            # Check if existing singletons are healthy before resetting
+            existing_registry = ServerRegistry._instance
+            existing_catalog = ToolCatalog._instance
+
+            if existing_registry is not None and existing_catalog is not None:
+                # Check if they have connected servers and tools
+                try:
+                    connected = existing_registry.list_connected()
+                    tools = existing_catalog.list_tools()
+
+                    if connected and tools:
+                        # Reuse existing healthy singletons
+                        self._registry = existing_registry
+                        self._catalog = existing_catalog
+                        self._init_time = time.time() - start_time
+
+                        self._logger.info(
+                            "Reusing existing MCP connections",
+                            duration_s=f"{self._init_time:.2f}",
+                            connected_servers=connected,
+                            tool_count=len(tools),
+                        )
+                        self._last_health_check = datetime.utcnow()
+                        return
+                except Exception as e:
+                    self._logger.debug(
+                        "Existing singletons not healthy, reinitializing",
+                        error=str(e),
+                    )
+
+            # Reset singletons only if they're not healthy
             ServerRegistry.reset_instance()
             ToolCatalog.reset_instance()
 

@@ -8,10 +8,14 @@ This software was created to showcase Oracle Cloud Infrastructure (OCI) AI Integ
 
 ## Features
 
-- **Multi-Agent Orchestration**: Coordinate 5 specialized agents for database, logging, security, cost, and infrastructure operations
-- **Workflow-First Design**: 70%+ deterministic workflows via MCP tools; LLM reasoning for complex analysis
+- **Multi-Agent Orchestration**: Coordinate 6 specialized agents for database, logging, security, cost, infrastructure, and error analysis
+- **Workflow-First Design**: 70%+ deterministic workflows via MCP tools (16 pre-built workflows); LLM reasoning for complex analysis
 - **Database Observatory Integration**: Full OPSI, SQLcl, and Logan Analytics via MCP
-- **Slack Integration**: Real-time chatbot with Socket Mode support
+- **Slack Integration**: Real-time chatbot with Socket Mode and 3-second ack pattern
+- **REST API**: FastAPI server with SSE streaming support
+- **Self-Healing**: Automatic error recovery with parameter correction and smart retries
+- **Resilience Infrastructure**: Bulkhead isolation, circuit breakers, dead letter queues
+- **RAG**: OCI GenAI embeddings with Redis vector store for documentation context
 - **OCI APM Tracing**: Full OpenTelemetry integration with trace-log correlation
 - **OCI Logging**: Per-agent dedicated logs with trace ID injection
 - **Multi-LLM Support**: Anthropic Claude, OpenAI GPT, OCI GenAI, Oracle Code Assist
@@ -152,6 +156,7 @@ poetry run black src/
 | **Security Threat** | MITRE mapping, compliance | `list_problems`, `get_findings` | security, threat, compliance |
 | **FinOps** | Cost analysis, optimization | `get_cost_summary`, `oci_cost_spikes`, `oci_cost_budget_status` | cost, budget, spending |
 | **Infrastructure** | Compute, network management | `list_instances`, `manage_vcn`, `start_by_name` | instance, VM, VCN |
+| **Error Analysis** | Log error detection, admin todos | `oci_logging_search_logs`, pattern detection | error scan, patterns, admin |
 
 ### FinOps AI Agent
 
@@ -293,12 +298,15 @@ oci-coordinator/
 │   │   ├── coordinator/          # LangGraph coordinator
 │   │   │   ├── graph.py          # StateGraph with intent routing
 │   │   │   ├── orchestrator.py   # Parallel orchestration with loop prevention
+│   │   │   ├── workflows.py      # 16 pre-built deterministic workflows
 │   │   │   └── state.py          # Conversation state management
 │   │   ├── database/             # DB Troubleshoot Agent
 │   │   ├── log_analytics/        # Log Analytics Agent
 │   │   ├── security/             # Security Threat Agent
 │   │   ├── finops/               # FinOps Agent
-│   │   └── infrastructure/       # Infrastructure Agent
+│   │   ├── infrastructure/       # Infrastructure Agent
+│   │   ├── error_analysis/       # Error Analysis Agent with admin todos
+│   │   └── self_healing/         # Self-healing framework (analyzer, corrector)
 │   ├── channels/                 # Input channel integrations
 │   │   └── slack.py              # Slack Bot with LangGraph integration
 │   ├── mcp/                      # MCP client infrastructure
@@ -311,12 +319,28 @@ oci-coordinator/
 │   ├── llm/                      # Multi-LLM factory
 │   │   ├── factory.py            # LLM provider factory
 │   │   └── oca.py                # Oracle Code Assist integration
+│   ├── memory/                   # Shared memory layer
+│   │   ├── manager.py            # Memory abstraction (Redis + ATP)
+│   │   ├── checkpointer.py       # ATP-backed LangGraph checkpointer
+│   │   └── context.py            # Context compression
+│   ├── cache/                    # OCI resource caching
+│   │   └── oci_resource_cache.py # Redis cache with tag invalidation
+│   ├── rag/                      # RAG with OCI GenAI
+│   │   ├── embeddings.py         # OCI GenAI embeddings
+│   │   ├── vector_store.py       # Redis vector store
+│   │   └── retriever.py          # High-level retrieval
+│   ├── resilience/               # Resilience infrastructure
+│   │   ├── bulkhead.py           # Resource isolation
+│   │   ├── deadletter.py         # Failed operation queue
+│   │   └── health.py             # Health monitoring
 │   ├── observability/            # Tracing and logging
 │   │   ├── tracing.py            # OpenTelemetry → OCI APM
 │   │   └── oci_logging.py        # OCI Logging with trace correlation
 │   ├── formatting/               # Response formatters
 │   │   ├── base.py               # Structured response models
 │   │   └── slack.py              # Slack Block Kit + native tables
+│   ├── evaluation/               # Evaluation framework
+│   │   └── judge.py              # LLM-as-a-Judge
 │   ├── api/                      # FastAPI endpoints
 │   │   └── main.py               # REST API with chat, tools, agents
 │   └── main.py                   # Application entry point
@@ -368,33 +392,27 @@ View correlated logs in OCI Console:
 - [x] Database Observatory MCP integration
 - [x] Agent catalog with auto-discovery
 - [x] Skill system with step execution
-- [x] DB Troubleshoot Agent with full workflow
-- [x] Log Analytics Agent
-- [x] Security Threat Agent
-- [x] FinOps Agent
-- [x] Infrastructure Agent
-- [x] Slack Bot integration (Socket Mode + LangGraph)
+- [x] 6 Specialized Agents (DB Troubleshoot, Log Analytics, Security, FinOps, Infrastructure, Error Analysis)
+- [x] Slack Bot integration (Socket Mode + LangGraph + 3-second ack)
 - [x] Instance operations by name (`oci_compute_*_by_name`)
-- [x] Structured response formatting
-- [x] **LangGraph coordinator with intent routing**
-- [x] **Multi-agent parallel orchestration with loop prevention**
-- [x] **FastAPI REST API server**
-- [x] **Tool aliases for backward compatibility**
-- [x] **Domain-based dynamic tool discovery**
-- [x] **ToolConverter for MCP → LangChain**
-- [x] **Slack 3-second ack pattern with thinking messages**
-- [x] **Duplicate capability detection in agent registration**
+- [x] Structured response formatting with Slack table blocks
+- [x] LangGraph coordinator with intent routing
+- [x] Multi-agent parallel orchestration with loop prevention
+- [x] 16 pre-built deterministic workflows
+- [x] FastAPI REST API server with SSE streaming
+- [x] Tool aliases and domain-based dynamic discovery
+- [x] ToolConverter for MCP → LangChain
+- [x] RAG with OCI GenAI embeddings
+- [x] LLM-as-a-Judge evaluation framework
+- [x] Self-healing framework (error analysis, parameter correction)
+- [x] Resilience infrastructure (Bulkhead, Circuit Breaker, DLQ)
+- [x] Redis caching with tag-based invalidation
+- [x] Context compression for long conversations
 - [x] 212+ tests passing (80%+ coverage target)
-
-### In Progress 🔄
-- [ ] RAG integration for documentation context
-- [ ] Streaming responses for API
 
 ### Planned 📋
 - [ ] Microsoft Teams integration
 - [ ] Web UI dashboard
-- [ ] LLM-as-a-Judge evaluation framework
-- [ ] Redis state persistence
 - [ ] OKE deployment manifests
 
 ## Testing

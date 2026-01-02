@@ -11,16 +11,23 @@ from src.mcp.server.auth import get_oci_config, get_usage_client
 _tracer = trace.get_tracer("mcp-oci-cost")
 
 # Timeout for OCI Usage API (seconds) - Usage API can be slow
-COST_API_TIMEOUT = 30
+# Set to 60s to match server-level timeout and give the API more time
+COST_API_TIMEOUT = 60
 
 
 async def _get_cost_summary_logic(
     compartment_id: str | None = None,
     days: int = 30,
+    service_filter: str | None = None,
 ) -> str:
     """Internal logic for cost summary.
 
     Returns structured JSON data that can be formatted by the presentation layer.
+
+    Args:
+        compartment_id: OCID of the compartment (defaults to tenancy root)
+        days: Number of days to look back
+        service_filter: Optional service name filter (e.g., "Database", "Autonomous")
     """
     with _tracer.start_as_current_span("mcp.cost.get_summary") as span:
         # Get tenancy ID from config if not provided
@@ -81,9 +88,34 @@ async def _get_cost_summary_logic(
             service_costs: dict[str, float] = {}
             currency = usages[0].currency if usages else "USD"
 
+            # Common service name mappings for filtering
+            SERVICE_FILTER_PATTERNS = {
+                "database": ["database", "autonomous", "atp", "adw", "exadata", "mysql", "nosql"],
+                "compute": ["compute", "instance", "virtual machine"],
+                "storage": ["storage", "block", "object", "file", "archive"],
+                "network": ["network", "vcn", "load balancer", "fastconnect", "vpn"],
+            }
+
             for u in usages:
                 service = getattr(u, 'service', 'Other')
                 amount = u.computed_amount or 0
+
+                # Apply service filter if provided
+                if service_filter:
+                    filter_lower = service_filter.lower()
+                    service_lower = service.lower()
+
+                    # Check direct match or pattern match
+                    matched = filter_lower in service_lower
+
+                    # Check category patterns
+                    if not matched and filter_lower in SERVICE_FILTER_PATTERNS:
+                        patterns = SERVICE_FILTER_PATTERNS[filter_lower]
+                        matched = any(p in service_lower for p in patterns)
+
+                    if not matched:
+                        continue  # Skip non-matching services
+
                 service_costs[service] = service_costs.get(service, 0) + amount
 
             # Sort by cost descending and calculate percentages
@@ -103,8 +135,10 @@ async def _get_cost_summary_logic(
 
             span.set_attribute("total_cost", total)
             span.set_attribute("services_count", len(services_data))
+            span.set_attribute("service_filter", service_filter or "none")
 
-            return json.dumps({
+            # Build response with filter info if applied
+            response_data = {
                 "type": "cost_summary",
                 "summary": {
                     "total": f"{total:,.2f} {currency}",
@@ -112,7 +146,17 @@ async def _get_cost_summary_logic(
                     "days": days,
                 },
                 "services": services_data,
-            })
+            }
+
+            if service_filter:
+                response_data["filter"] = service_filter
+                response_data["summary"]["filter_applied"] = service_filter
+
+            # Handle case where filter matched nothing
+            if service_filter and not services_data:
+                response_data["message"] = f"No costs found for services matching '{service_filter}'"
+
+            return json.dumps(response_data)
 
         except Exception as e:
             span.set_attribute("error", str(e))
@@ -124,15 +168,20 @@ async def _get_cost_summary_logic(
 
 def register_cost_tools(mcp):
     @mcp.tool()
-    async def oci_cost_get_summary(compartment_id: str | None = None, days: int = 30) -> str:
+    async def oci_cost_get_summary(
+        compartment_id: str | None = None,
+        days: int = 30,
+        service_filter: str | None = None,
+    ) -> str:
         """Get summarized cost for a compartment or the entire tenancy.
 
         Args:
             compartment_id: OCID of the compartment (defaults to tenancy root for full account costs)
             days: Number of days to look back (default 30)
+            service_filter: Filter by service type (e.g., "database", "compute", "storage", "network")
 
         Returns:
             JSON with cost summary including total spend and per-service breakdown.
             Note: This API has a 30s timeout. For slow responses, check the OCI console directly.
         """
-        return await _get_cost_summary_logic(compartment_id, days)
+        return await _get_cost_summary_logic(compartment_id, days, service_filter)

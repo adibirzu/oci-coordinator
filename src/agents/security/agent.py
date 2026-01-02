@@ -8,7 +8,7 @@ and compliance monitoring in OCI.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import structlog
 from langgraph.graph import END, StateGraph
@@ -19,6 +19,11 @@ from src.agents.base import (
     BaseAgent,
     KafkaTopics,
 )
+from src.agents.self_healing import SelfHealingMixin
+
+if TYPE_CHECKING:
+    from src.mcp.catalog import ToolCatalog
+    from src.memory.manager import SharedMemoryManager
 
 logger = structlog.get_logger(__name__)
 
@@ -45,9 +50,9 @@ class SecurityState:
     result: str | None = None
 
 
-class SecurityThreatAgent(BaseAgent):
+class SecurityThreatAgent(BaseAgent, SelfHealingMixin):
     """
-    Security Threat Agent.
+    Security Threat Agent with Self-Healing Capabilities.
 
     Specializes in OCI security operations:
     - Threat indicator correlation
@@ -55,7 +60,53 @@ class SecurityThreatAgent(BaseAgent):
     - Cloud Guard problem analysis
     - Security posture assessment
     - Compliance monitoring
+
+    Self-Healing Features:
+    - Automatic retry on Cloud Guard API timeouts
+    - Parameter correction for security tool calls
+    - LLM-powered threat analysis recovery
     """
+
+    # MCP tools for security analysis
+    MCP_TOOLS = [
+        "oci_security_list_problems",
+        "oci_security_get_problem",
+        "oci_security_list_users",
+        "oci_security_list_groups",
+        "oci_security_list_policies",
+        "oci_security_get_security_assessment",
+        "oci_security_list_cloud_guard_problems",
+        "oci_security_audit",
+    ]
+
+    def __init__(
+        self,
+        memory_manager: "SharedMemoryManager | None" = None,
+        tool_catalog: "ToolCatalog | None" = None,
+        config: dict[str, Any] | None = None,
+        llm: Any = None,
+    ):
+        """
+        Initialize Security Threat Agent with self-healing.
+
+        Args:
+            memory_manager: Shared memory manager
+            tool_catalog: Tool catalog for MCP tools
+            config: Agent configuration
+            llm: LangChain LLM for analysis
+        """
+        super().__init__(memory_manager, tool_catalog, config)
+        self.llm = llm
+        self._graph: StateGraph | None = None
+
+        # Initialize self-healing capabilities
+        if llm:
+            self.init_self_healing(
+                llm=llm,
+                max_retries=3,
+                enable_validation=True,
+                enable_correction=True,
+            )
 
     @classmethod
     def get_definition(cls) -> AgentDefinition:
@@ -91,13 +142,7 @@ class SecurityThreatAgent(BaseAgent):
                 "Security Expert Agent for threat detection, compliance monitoring, "
                 "and MITRE ATT&CK analysis in OCI environments."
             ),
-            mcp_tools=[
-                "oci_security_list_problems",
-                "oci_security_get_problem",
-                "oci_security_list_users",
-                "oci_security_list_policies",
-                "oci_security_get_security_assessment",
-            ],
+            mcp_tools=cls.MCP_TOOLS,
             mcp_servers=["oci-unified", "oci-mcp-security"],
         )
 
@@ -141,16 +186,26 @@ class SecurityThreatAgent(BaseAgent):
         return {"threat_type": threat_type, "phase": "check_cloud_guard"}
 
     async def _check_cloud_guard_node(self, state: SecurityState) -> dict[str, Any]:
-        """Check Cloud Guard for security problems."""
+        """Check Cloud Guard for security problems with self-healing."""
         self._logger.info("Checking Cloud Guard")
 
         problems = []
         if self.tools:
             try:
-                result = await self.call_tool(
-                    "oci_security_list_problems",
-                    {"compartment_id": state.compartment_id or "default"},
-                )
+                # Use self-healing for automatic retry on Cloud Guard API issues
+                if self._self_healing_enabled:
+                    result = await self.healing_call_tool(
+                        "oci_security_list_problems",
+                        {"compartment_id": state.compartment_id or "default"},
+                        user_intent=state.query,
+                        validate=True,
+                        correct_on_failure=True,
+                    )
+                else:
+                    result = await self.call_tool(
+                        "oci_security_list_problems",
+                        {"compartment_id": state.compartment_id or "default"},
+                    )
                 if isinstance(result, list):
                     problems = result
             except Exception as e:

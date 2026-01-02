@@ -12,6 +12,7 @@ Features:
 - Dynamic tool/skill registration at runtime
 - Per-interaction refresh for hot-reload support
 - Usage tracking and statistics
+- Resilience: deadletter queue, bulkhead isolation
 """
 
 from __future__ import annotations
@@ -21,13 +22,17 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import structlog
 from langchain_core.tools import StructuredTool
 
 from src.mcp.client import ToolCallResult, ToolDefinition
 from src.mcp.registry import ServerRegistry
+
+if TYPE_CHECKING:
+    from src.resilience.deadletter import DeadLetterQueue
+    from src.resilience.bulkhead import Bulkhead
 
 logger = structlog.get_logger(__name__)
 
@@ -90,11 +95,12 @@ TOOL_ALIASES: dict[str, str] = {
 # MCP Server to Domain Mapping
 # ═══════════════════════════════════════════════════════════════════════════════
 # Maps MCP servers to their supported domains for agent routing
+# Server names must match config/mcp_servers.yaml
 MCP_SERVER_DOMAINS: dict[str, list[str]] = {
-    "mcp-oci": ["compute", "network", "database", "observability", "discovery", "identity"],
-    "oci-mcp-security": ["security", "cloudguard", "vss", "bastion", "audit", "kms", "waf", "datasafe", "accessgov"],
-    "finopsai-mcp": ["cost", "finops", "budget", "forecast", "optimization"],
-    "database-observatory": ["sql", "performance", "awr", "schema", "opsi", "sqlwatch"],
+    "oci-unified": ["identity", "compute", "network", "cost", "security", "observability", "discovery"],
+    "database-observatory": ["database", "opsi", "logan", "sql", "performance", "awr", "schema", "sqlwatch"],
+    "oci-infrastructure": ["compute", "network", "security", "cost", "database", "observability"],
+    "finopsai": ["cost", "budget", "finops", "anomaly", "forecasting", "rightsizing"],
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -114,7 +120,7 @@ DOMAIN_PREFIXES: dict[str, list[str]] = {
 
 TOOL_TIERS: dict[str, ToolTier] = {
     # ═══════════════════════════════════════════════════════════════════════════
-    # mcp-oci Tools (Reference Implementation)
+    # oci-unified & oci-infrastructure Tools
     # ═══════════════════════════════════════════════════════════════════════════
     # Tier 1: Discovery (Instant, no risk)
     "oci_ping": ToolTier(1, 50, "none"),
@@ -174,7 +180,7 @@ TOOL_TIERS: dict[str, ToolTier] = {
     "restart_instance": ToolTier(4, 10000, "medium", True),
     "get_instance_metrics": ToolTier(3, 2000, "low"),
     # ═══════════════════════════════════════════════════════════════════════════
-    # oci-mcp-security Tools (v2.0 with oci_security_ prefix)
+    # Security Tools (oci_security_ prefix)
     # ═══════════════════════════════════════════════════════════════════════════
     # Tier 1: Health & Discovery
     "oci_security_ping": ToolTier(1, 50, "none"),
@@ -228,7 +234,7 @@ TOOL_TIERS: dict[str, ToolTier] = {
     "oci_security_cloudguard_remediate_problem": ToolTier(4, 5000, "medium", True),
     "oci_security_bastion_terminate_session": ToolTier(4, 3000, "high", True),
     # ═══════════════════════════════════════════════════════════════════════════
-    # finopsai-mcp Tools (v2.0 with oci_cost_ prefix)
+    # finopsai Tools (oci_cost_ prefix)
     # ═══════════════════════════════════════════════════════════════════════════
     # Tier 1: Health & Discovery
     "oci_cost_ping": ToolTier(1, 50, "none"),
@@ -248,7 +254,7 @@ TOOL_TIERS: dict[str, ToolTier] = {
     # Tier 4: Schedule Management (CREATE requires confirmation)
     "oci_cost_schedules": ToolTier(2, 600, "none"),  # LIST is safe, CREATE checks action param
     # ═══════════════════════════════════════════════════════════════════════════
-    # mcp-oci-database-observatory Tools
+    # database-observatory Tools
     # ═══════════════════════════════════════════════════════════════════════════
     # Tier 2: SQLcl & Database
     "execute_sql": ToolTier(3, 5000, "medium"),  # SQL execution is moderate risk
@@ -265,7 +271,7 @@ TOOL_TIERS: dict[str, ToolTier] = {
     "analyze_io_usage": ToolTier(3, 2000, "low"),
     "query_warehouse_standard": ToolTier(3, 5000, "low"),
     # ═══════════════════════════════════════════════════════════════════════════
-    # opsi (mcp-oci-opsi) Tools
+    # OPSI Tools (database-observatory)
     # ═══════════════════════════════════════════════════════════════════════════
     # Tier 2: Database Management
     "list_tablespaces": ToolTier(2, 500, "none"),
@@ -309,7 +315,12 @@ class ToolCatalog:
 
     _instance: ToolCatalog | None = None
 
-    def __init__(self, registry: ServerRegistry | None = None):
+    def __init__(
+        self,
+        registry: ServerRegistry | None = None,
+        deadletter_queue: "DeadLetterQueue | None" = None,
+        bulkhead: "Bulkhead | None" = None,
+    ):
         self._registry = registry or ServerRegistry.get_instance()
         self._tools: dict[str, ToolDefinition] = {}
         self._tool_to_server: dict[str, str] = {}
@@ -321,6 +332,10 @@ class ToolCatalog:
         self._refresh_interval = timedelta(seconds=DEFAULT_REFRESH_INTERVAL_SECONDS)
         self._stale_threshold = timedelta(seconds=STALE_THRESHOLD_SECONDS)
         self._logger = logger.bind(component="ToolCatalog")
+
+        # Resilience components (optional)
+        self._deadletter_queue = deadletter_queue
+        self._bulkhead = bulkhead
 
     @classmethod
     def get_instance(cls, registry: ServerRegistry | None = None) -> ToolCatalog:
@@ -888,6 +903,11 @@ class ToolCatalog:
         """
         Execute a tool on its server.
 
+        Includes resilience patterns:
+        - Circuit breaker to prevent cascading failures
+        - Bulkhead for resource isolation
+        - Deadletter queue for failed operations
+
         Args:
             tool_name: Name of the tool to execute
             arguments: Tool arguments
@@ -897,12 +917,67 @@ class ToolCatalog:
         """
         start_time = time.time()
 
+        # Debug logging for tool execution
+        self._logger.debug(
+            "Tool execute called",
+            tool_name=tool_name,
+            arguments=str(arguments)[:500],
+            argument_keys=list(arguments.keys()) if arguments else [],
+        )
+
         tool_def = self.get_tool(tool_name)
+        if tool_def:
+            self._logger.debug(
+                "Tool resolved",
+                tool_name=tool_name,
+                server_id=tool_def.server_id,
+            )
         if not tool_def:
             return ToolCallResult(
                 tool_name=tool_name,
                 success=False,
                 error=f"Tool not found: {tool_name}",
+            )
+
+        # ─────────────────────────────────────────────────────────────────────
+        # Bulkhead Acquisition
+        # ─────────────────────────────────────────────────────────────────────
+        # Acquire bulkhead slot for resource isolation
+        bulkhead_handle = None
+        if self._bulkhead:
+            partition = self._bulkhead.get_partition_for_tool(tool_name)
+            try:
+                bulkhead_handle = await self._bulkhead.acquire(partition, timeout=30.0)
+            except asyncio.TimeoutError:
+                self._logger.warning(
+                    "Bulkhead timeout",
+                    tool=tool_name,
+                    partition=partition.value,
+                )
+                return ToolCallResult(
+                    tool_name=tool_name,
+                    success=False,
+                    error=f"Resource pool {partition.value} exhausted (bulkhead timeout)",
+                )
+
+        # ─────────────────────────────────────────────────────────────────────
+        # Circuit Breaker Check
+        # ─────────────────────────────────────────────────────────────────────
+        # Check if server circuit is open (too many recent failures)
+        server_id = tool_def.server_id
+        server_info = self._registry._servers.get(server_id)
+        if server_info and server_info.is_circuit_open:
+            self._logger.warning(
+                "Circuit breaker open, rejecting tool call",
+                tool=tool_name,
+                server=server_id,
+                circuit_open_until=server_info.circuit_open_until,
+            )
+            return ToolCallResult(
+                tool_name=tool_name,
+                success=False,
+                error=f"Server {server_id} temporarily unavailable (circuit breaker open). "
+                      f"Will retry after {server_info.circuit_open_until}",
             )
 
         # Check if confirmation required
@@ -972,6 +1047,23 @@ class ToolCatalog:
 
         duration_ms = result.duration_ms or int((time.time() - start_time) * 1000)
 
+        # ─────────────────────────────────────────────────────────────────────
+        # Circuit Breaker Recording
+        # ─────────────────────────────────────────────────────────────────────
+        # Record success/failure for circuit breaker state management
+        if server_info:
+            if result.success:
+                server_info.record_success()
+            else:
+                server_info.record_failure()
+                if server_info.is_circuit_open:
+                    self._logger.warning(
+                        "Circuit breaker opened due to failures",
+                        server=server_id,
+                        failures=server_info.consecutive_failures,
+                        open_until=server_info.circuit_open_until,
+                    )
+
         # Track usage
         self._track_usage(tool_name, result.success, duration_ms)
 
@@ -987,6 +1079,36 @@ class ToolCatalog:
                 "tool": tool_name,
                 "error": result.error,
             })
+
+            # ─────────────────────────────────────────────────────────────────
+            # Deadletter Queue
+            # ─────────────────────────────────────────────────────────────────
+            # Enqueue failed operations for analysis and retry
+            if self._deadletter_queue:
+                try:
+                    from src.resilience.deadletter import FailureType
+                    await self._deadletter_queue.enqueue(
+                        failure_type=FailureType.TOOL_CALL,
+                        operation=tool_name,
+                        error=result.error or "Unknown error",
+                        params=arguments,
+                        context={
+                            "server_id": server_id,
+                            "duration_ms": duration_ms,
+                            "circuit_open": server_info.is_circuit_open if server_info else False,
+                        },
+                    )
+                except Exception as dlq_error:
+                    self._logger.warning(
+                        "Failed to enqueue to deadletter",
+                        error=str(dlq_error),
+                    )
+
+        # ─────────────────────────────────────────────────────────────────────
+        # Bulkhead Release
+        # ─────────────────────────────────────────────────────────────────────
+        if bulkhead_handle:
+            await bulkhead_handle.__aexit__(None, None, None)
 
         self._logger.info(
             "Tool executed",

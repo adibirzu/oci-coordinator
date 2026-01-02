@@ -28,6 +28,7 @@ from src.agents.base import (
     BaseAgent,
     KafkaTopics,
 )
+from src.agents.self_healing import SelfHealingMixin
 from src.observability import get_trace_id
 
 if TYPE_CHECKING:
@@ -145,15 +146,20 @@ All tools support two response formats:
 """
 
 
-class InfrastructureAgent(BaseAgent):
+class InfrastructureAgent(BaseAgent, SelfHealingMixin):
     """
-    Infrastructure Agent with OCI MCP Server Integration.
+    Infrastructure Agent with OCI MCP Server Integration and Self-Healing.
 
     Specializes in OCI infrastructure operations using the mcp-oci MCP server:
     - Instance management (start, stop, restart, metrics)
     - Network topology analysis
     - Security configuration
     - Resource inventory and health checks
+
+    Self-Healing Features:
+    - Automatic retry on compute API failures
+    - Parameter correction for network tool calls
+    - LLM-powered infrastructure troubleshooting
 
     Workflow:
     1. Analyze request to determine action type
@@ -245,7 +251,7 @@ class InfrastructureAgent(BaseAgent):
         llm: Any = None,
     ):
         """
-        Initialize Infrastructure Agent.
+        Initialize Infrastructure Agent with self-healing.
 
         Args:
             memory_manager: Shared memory manager
@@ -257,6 +263,15 @@ class InfrastructureAgent(BaseAgent):
         self.llm = llm
         self._graph: StateGraph | None = None
         self._tracer = trace.get_tracer("oci-infrastructure-agent")
+
+        # Initialize self-healing capabilities
+        if llm:
+            self.init_self_healing(
+                llm=llm,
+                max_retries=3,
+                enable_validation=True,
+                enable_correction=True,
+            )
 
     def build_graph(self) -> StateGraph:
         """
@@ -308,13 +323,17 @@ class InfrastructureAgent(BaseAgent):
         self,
         tool_name: str,
         arguments: dict[str, Any],
+        user_intent: str | None = None,
+        use_self_healing: bool = True,
     ) -> dict[str, Any]:
         """
-        Call an MCP tool with tracing and error handling.
+        Call an MCP tool with tracing, error handling, and self-healing.
 
         Args:
             tool_name: Name of the MCP tool
             arguments: Tool arguments
+            user_intent: Original user query for context in self-healing
+            use_self_healing: Whether to use self-healing capabilities
 
         Returns:
             Tool result or error dict
@@ -322,13 +341,24 @@ class InfrastructureAgent(BaseAgent):
         with self._tracer.start_as_current_span(f"mcp.tool.{tool_name}") as span:
             span.set_attribute("mcp.tool.name", tool_name)
             span.set_attribute("mcp.tool.args", str(arguments)[:200])
+            span.set_attribute("mcp.self_healing", use_self_healing and self._self_healing_enabled)
 
             start_time = time.time()
             try:
                 if not self.tools:
                     return {"success": False, "error": "Tool catalog not initialized"}
 
-                result = await self.call_tool(tool_name, arguments)
+                # Use self-healing tool call if enabled
+                if use_self_healing and self._self_healing_enabled:
+                    result = await self.healing_call_tool(
+                        tool_name,
+                        arguments,
+                        user_intent=user_intent,
+                        validate=True,
+                        correct_on_failure=True,
+                    )
+                else:
+                    result = await self.call_tool(tool_name, arguments)
 
                 duration_ms = int((time.time() - start_time) * 1000)
                 span.set_attribute("mcp.tool.duration_ms", duration_ms)
@@ -338,6 +368,7 @@ class InfrastructureAgent(BaseAgent):
                     "MCP tool call completed",
                     tool=tool_name,
                     duration_ms=duration_ms,
+                    self_healing=use_self_healing,
                     trace_id=get_trace_id(),
                 )
 

@@ -9,7 +9,7 @@ The OCI AI Agent Coordinator is a Python-based LangGraph orchestration system th
 | Phase | Status | Key Components |
 |-------|--------|----------------|
 | 1. Environment & LLM | ✅ Complete | Multi-LLM factory, OCA OAuth |
-| 2. Unified MCP Layer | ✅ Complete | 5 MCP servers, 150+ tools, ToolCatalog |
+| 2. Unified MCP Layer | ✅ Complete | 4 MCP servers, 158+ tools, ToolCatalog |
 | 3. LangGraph Coordinator | ✅ Complete | See details below |
 | 4. Production Readiness | 🔄 In Progress | Teams integration, OKE deployment |
 
@@ -241,7 +241,7 @@ tools = catalog.get_tools_for_domain("database")
 
 ## MCP Server Integration
 
-The system integrates with **5 MCP servers** providing **150+ tools** across all OCI domains.
+The system integrates with **4 MCP servers** providing **158+ tools** across all OCI domains.
 
 Configure in `config/mcp_servers.yaml`:
 
@@ -252,48 +252,43 @@ servers:
     command: python
     args: ["-m", "src.mcp.server.main"]
     enabled: true
-    domains: [compute, network, security, identity, cost, observability, discovery]
+    domains: [identity, compute, network, cost, security, observability]
+    timeout_seconds: 60
 
   database-observatory:
     transport: stdio
     command: python
     args: ["-m", "src.mcp_server"]
-    working_dir: /Users/abirzu/dev/MCP/mcp-oci-database-observatory
+    working_dir: /path/to/mcp-oci-database-observatory
     enabled: true
     domains: [database, opsi, logan, observability]
+    timeout_seconds: 60
 
-  mcp-oci:
+  oci-infrastructure:
     transport: stdio
-    command: python
-    args: ["-m", "oci_mcp.server"]
-    working_dir: /Users/abirzu/dev/MCP/mcp-oci
+    command: uv
+    args: ["run", "python", "-m", "mcp_server_oci.server"]
+    working_dir: /path/to/mcp-oci
     enabled: true
-    domains: [compute, database, network, identity, objectstorage]
+    domains: [compute, network, security, cost, database, observability]
+    timeout_seconds: 60
 
-  finopsai-mcp:
+  finopsai:
     transport: stdio
     command: python
     args: ["-m", "finopsai_mcp.server"]
-    working_dir: /Users/abirzu/dev/MCP/finopsai-mcp
-    enabled: false  # Enable for multicloud cost analysis
-    domains: [cost, kubernetes, sustainability]
-
-  oci-mcp-security:
-    transport: stdio
-    command: python
-    args: ["-m", "oci_security_mcp.server"]
-    working_dir: /Users/abirzu/dev/MCP/oci-mcp-security
-    enabled: false  # Enable for advanced security tools
-    domains: [security, cloudguard, vss, waf, bastion]
+    working_dir: /path/to/finopsai-mcp
+    enabled: true
+    domains: [cost, budget, finops, anomaly, forecasting, rightsizing]
+    timeout_seconds: 120
 ```
 
 | Server | Tools | Transport | Purpose |
 |--------|-------|-----------|---------|
-| **oci-unified** | 30 | stdio | Compute, network, security, identity, cost (30s timeout), discovery |
-| **database-observatory** | 30+ | stdio | OPSI, SQLcl, Logan unified for database observability |
-| **mcp-oci** | 50+ | stdio | Full OCI SDK wrapper (fallback for comprehensive coverage) |
-| **finopsai-mcp** | 33 | stdio | Multicloud cost (AWS/GCP/Azure), Kubernetes, sustainability |
-| **oci-mcp-security** | 41+ | stdio | CloudGuard, VSS, WAF, Bastion, KMS security tools |
+| **oci-unified** | 31 | stdio | Identity, compute, network, security, cost (60s timeout), discovery |
+| **database-observatory** | 50+ | stdio | OPSI, SQLcl, Logan unified for database observability |
+| **oci-infrastructure** | 44 | stdio | Full OCI SDK wrapper (fallback for comprehensive coverage) |
+| **finopsai** | 33 | stdio | Multicloud cost (OCI/AWS/Azure/GCP), anomaly detection, rightsizing |
 
 **Tool Timeouts:**
 - Cost tools: 30 seconds (OCI Usage API can be slow)
@@ -1250,3 +1245,32 @@ poetry run python -m src.evaluation.runner --mock --verbose
 - [FastMCP](https://github.com/jlowin/fastmcp)
 - [ShowOCI (Oracle)](https://github.com/oracle/oci-python-sdk/tree/master/examples/showoci)
 - [Anthropic Agent Best Practices](https://www.anthropic.com/engineering/building-effective-agents)
+
+## Feature Mapping Matrix
+
+> **Full details**: See `docs/FEATURE_MAPPING.md` for comprehensive tool-to-feature mapping.
+
+| Feature | Agent | Primary MCP Tools | Test Status |
+|---------|-------|-------------------|-------------|
+| **Identity Management** | `CoordinatorAgent` | `oci_list_compartments`, `oci_get_tenancy`, `oci_list_regions` | ✅ 6/6 |
+| **Compute Operations** | `InfrastructureAgent` | `oci_compute_list_instances`, `oci_compute_find_instance` | ✅ 2/2 |
+| **Network Operations** | `InfrastructureAgent` | `oci_network_list_vcns`, `oci_network_list_subnets` | ✅ 3/3 |
+| **Cost Analysis** | `FinOpsAgent` | `oci_cost_get_summary` (30s timeout) | ✅ 3/3 |
+| **Security Audit** | `SecurityThreatAgent` | `oci_security_list_users` | ✅ 1/1 |
+| **DB Troubleshooting** | `DbTroubleshootAgent` | `oci_database_execute_sql`, `oci_opsi_get_fleet_summary` | ✅ |
+| **Log Analysis** | `LogAnalyticsAgent` | `oci_observability_query_logs`, `oci_logan_search` | ✅ |
+| **Resource Discovery** | `CoordinatorAgent` | `oci_discovery_summary`, `oci_discovery_search` | ✅ 3/3 |
+
+**MCP Server Distribution**:
+| Server | Tools | Domains |
+|--------|-------|---------|
+| oci-unified | 31 | identity, compute, network, cost, security, discovery |
+| database-observatory | 50+ | database, opsi, logan |
+| oci-infrastructure | 44 | Full OCI SDK wrapper |
+| finopsai-mcp | 33 | Multicloud FinOps |
+
+## Deployment
+
+The system is deployed via GitHub Actions to OCI Cloud Run or Cloud Shell.
+- **Workflow**: `.github/workflows/build-deploy.yaml`
+- **Target**: OCI Cloud Run (Containerized) or Cloud Shell (Scripted)

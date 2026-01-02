@@ -36,12 +36,6 @@ class AgentMetadata:
     })
 
 @dataclass
-class KafkaTopics:
-    """Message topics for event-driven communication."""
-    consume: List[str] = field(default_factory=list)  # Topics agent listens to
-    produce: List[str] = field(default_factory=list)  # Topics agent publishes to
-
-@dataclass
 class AgentDefinition:
     """
     Complete Agent Object Definition.
@@ -57,8 +51,7 @@ class AgentDefinition:
     capabilities: List[str]          # High-level capability domains
     skills: List[str]                # Specific skills/workflows agent can execute
 
-    # Communication
-    kafka_topics: KafkaTopics        # Event-driven messaging topics
+    # Health & Monitoring
     health_endpoint: str             # Health check URL
 
     # Metadata
@@ -79,53 +72,41 @@ class AgentDefinition:
 
 ```json
 {
-  "agent_id": "db-troubleshoot-agent-c5b6cd64b-2v8rr",
+  "agent_id": "db-troubleshoot-agent-c5b6cd64b",
   "role": "db-troubleshoot-agent",
   "capabilities": [
     "database-analysis",
     "performance-diagnostics",
-    "sql-tuning"
+    "sql-tuning",
+    "blocking-analysis"
   ],
   "skills": [
     "rca_workflow",
     "blocking_analysis",
-    "wait_event_analysis"
+    "wait_event_analysis",
+    "awr_analysis"
   ],
-  "kafka_topics": {
-    "consume": [
-      "commands.db-troubleshoot-agent"
-    ],
-    "produce": [
-      "results.db-troubleshoot-agent"
-    ]
-  },
-  "health_endpoint": "http://db-agent.oci-coordinator.local:8000/health",
+  "health_endpoint": "http://localhost:8010/health",
   "metadata": {
     "version": "1.0.0",
     "namespace": "oci-coordinator",
-    "max_iterations": 15
+    "max_iterations": 15,
+    "timeout_seconds": 300
   },
   "description": "Database Expert Agent for performance analysis, troubleshooting, and SQL tuning. Provides root cause analysis using AWR, ASH, and wait event diagnostics.",
-  "capabilities": [
-    "analyze errors, exceptions, and stack traces with root cause analysis",
-    "interpret AWR and ASH reports with actionable recommendations",
-    "identify blocking sessions and lock contention issues",
-    "analyze SQL execution plans and suggest optimizations",
-    "troubleshoot database performance with step-by-step solutions",
-    "provide Oracle DBA best practices and prevention strategies"
-  ],
   "status": "healthy",
-  "registered_at": "2025-12-29T13:46:15.861719+00:00",
-  "last_heartbeat": "2025-12-30T14:43:18.208715+00:00",
+  "registered_at": "2026-01-01T10:00:00.000000+00:00",
+  "last_heartbeat": "2026-01-02T14:30:00.000000+00:00",
   "mcp_tools": [
     "oci_database_list_autonomous",
     "oci_database_get_autonomous",
-    "oci_observability_get_metrics",
-    "oci_observability_query_logs"
+    "oci_opsi_get_fleet_summary",
+    "oci_opsi_analyze_cpu",
+    "oci_database_execute_sql"
   ],
   "mcp_servers": [
-    "oci-unified-mcp",
-    "sqlcl"
+    "oci-unified",
+    "database-observatory"
   ]
 }
 ```
@@ -151,14 +132,6 @@ class AgentDefinition:
 | Skill Name | `{workflow}_workflow` | `rca_workflow` |
 | Tool Name | `oci_{domain}_{action}_{resource}` | `oci_database_list_autonomous` |
 
-### Topic Naming
-
-| Topic Type | Convention | Example |
-|------------|------------|---------|
-| Command Topic | `commands.{agent-role}` | `commands.db-troubleshoot-agent` |
-| Result Topic | `results.{agent-role}` | `results.db-troubleshoot-agent` |
-| Event Topic | `events.{domain}.{event-type}` | `events.database.alert` |
-
 ### File Structure
 
 ```
@@ -166,14 +139,18 @@ src/agents/
 ├── __init__.py
 ├── base.py                      # BaseAgent class
 ├── catalog.py                   # AgentCatalog with auto-registration
+├── skills.py                    # Skill definitions and executor
+├── react_agent.py               # ReAct agent with tool discovery
 ├── coordinator/
 │   ├── __init__.py
 │   ├── graph.py                 # LangGraph coordinator
+│   ├── orchestrator.py          # Parallel multi-agent orchestration
+│   ├── workflows.py             # 16 pre-built deterministic workflows
+│   ├── nodes.py                 # Graph node implementations
 │   └── state.py                 # CoordinatorState
 ├── database/
 │   ├── __init__.py
-│   ├── troubleshoot.py          # DbTroubleshootAgent
-│   └── observatory.py           # DatabaseObservatoryAgent
+│   └── troubleshoot.py          # DbTroubleshootAgent
 ├── log_analytics/
 │   ├── __init__.py
 │   └── agent.py                 # LogAnalyticsAgent
@@ -183,9 +160,20 @@ src/agents/
 ├── finops/
 │   ├── __init__.py
 │   └── agent.py                 # FinOpsAgent
-└── infrastructure/
+├── infrastructure/
+│   ├── __init__.py
+│   └── agent.py                 # InfrastructureAgent
+├── error_analysis/
+│   ├── __init__.py
+│   ├── agent.py                 # ErrorAnalysisAgent
+│   └── todo_manager.py          # AdminTodoManager for action items
+└── self_healing/
     ├── __init__.py
-    └── agent.py                 # InfrastructureAgent
+    ├── analyzer.py              # ErrorAnalyzer - categorize errors
+    ├── corrector.py             # ParameterCorrector - fix params
+    ├── validator.py             # LogicValidator - pre-execution
+    ├── retry.py                 # RetryStrategy - smart retries
+    └── mixin.py                 # SelfHealingMixin for agents
 ```
 
 ---
@@ -1261,12 +1249,155 @@ async def test_agent_with_mcp_server():
 
 ---
 
+## Error Analysis Agent
+
+The Error Analysis Agent scans OCI logs for errors and creates admin todo items for significant issues.
+
+### Capabilities
+
+| Feature | Description |
+|---------|-------------|
+| Error Detection | Scan OCI logs for error patterns |
+| Pattern Recognition | Detect ORA-, OOM, timeout, auth failures |
+| LLM Analysis | Analyze patterns for root cause |
+| Todo Management | Create action items for admins |
+
+### Error Patterns
+
+| Pattern | Severity | Category |
+|---------|----------|----------|
+| ORA-00060 (Deadlock) | CRITICAL | database |
+| ORA-04031 (Shared Pool) | CRITICAL | database |
+| OutOfMemory/OOM | CRITICAL | compute |
+| Connection timeout | HIGH | network |
+| Authentication failed | HIGH | security |
+| HTTP 4xx/5xx | MEDIUM | api |
+
+### Admin Todo Manager
+
+```python
+from src.agents.error_analysis import ErrorAnalysisAgent
+
+agent = ErrorAnalysisAgent(llm=llm, tool_catalog=catalog)
+
+# Analyze logs for errors
+result = await agent.invoke("Scan logs for errors", time_range_hours=1)
+
+# Get pending admin todos
+todos = await agent.get_pending_todos()
+
+# Resolve a todo
+await agent.resolve_todo("todo-abc123", "Fixed by increasing connection pool")
+```
+
+---
+
+## Self-Healing Framework
+
+The self-healing framework provides automatic error recovery and parameter correction.
+
+### Components
+
+| Component | Purpose |
+|-----------|---------|
+| `ErrorAnalyzer` | Categorize errors, suggest recovery |
+| `ParameterCorrector` | Fix incorrect tool parameters |
+| `LogicValidator` | Pre-execution validation |
+| `RetryStrategy` | Smart retry with backoff |
+| `SelfHealingMixin` | Mixin for agent inheritance |
+
+### Error Categories
+
+| Category | Recovery Action |
+|----------|-----------------|
+| `PERMISSION` | Suggest IAM policy fix |
+| `NOT_FOUND` | Parameter correction |
+| `TIMEOUT` | Retry with backoff |
+| `RATE_LIMIT` | Wait and retry |
+| `VALIDATION` | Correct parameters |
+| `TRANSIENT` | Simple retry |
+
+### Using Self-Healing in Agents
+
+```python
+from src.agents.base import BaseAgent
+from src.agents.self_healing import SelfHealingMixin
+
+class MyAgent(BaseAgent, SelfHealingMixin):
+    def __init__(self, llm, tool_catalog, ...):
+        super().__init__(...)
+        self.init_self_healing(llm, max_retries=3)
+
+    async def invoke(self, query):
+        # Use healing_call_tool for auto-retry with correction
+        result = await self.healing_call_tool(
+            "oci_database_execute_sql",
+            {"query": "SELECT * FROM users"},
+            user_intent=query,
+        )
+        return result
+```
+
+---
+
+## Resilience Infrastructure
+
+Production-grade resilience patterns for fault tolerance.
+
+### Components
+
+| Component | Purpose |
+|-----------|---------|
+| `DeadLetterQueue` | Persist failed operations for retry |
+| `Bulkhead` | Resource isolation between domains |
+| `HealthMonitor` | Component health with auto-restart |
+
+### Bulkhead Partitions
+
+| Partition | Max Concurrent | Tool Prefixes |
+|-----------|----------------|---------------|
+| DATABASE | 3 | `oci_database_`, `oci_opsi_` |
+| INFRASTRUCTURE | 5 | `oci_compute_`, `oci_network_` |
+| COST | 2 | `oci_cost_` |
+| SECURITY | 3 | `oci_security_` |
+| DISCOVERY | 2 | `oci_search_`, `oci_list_` |
+| LLM | 5 | LLM calls |
+
+### Circuit Breaker
+
+The tool catalog includes circuit breaker logic:
+- Tracks consecutive failures per MCP server
+- Opens circuit after 3 failures (60s cooldown)
+- Rejects tool calls to unhealthy servers immediately
+- Auto-closes circuit after successful health check
+
+```python
+from src.resilience import Bulkhead, DeadLetterQueue, HealthMonitor
+
+# Bulkhead for resource isolation
+bulkhead = Bulkhead.get_instance()
+async with bulkhead.acquire("database"):
+    result = await execute_database_operation()
+
+# Health monitor with auto-restart
+monitor = HealthMonitor.get_instance()
+monitor.register_check(HealthCheck(
+    name="mcp_database",
+    check_func=check_mcp_health,
+    restart_func=restart_mcp_server,
+    failure_threshold=3,
+))
+await monitor.start()
+```
+
+---
+
 ## Summary
 
 This reference document establishes:
 
 1. **Standard Agent Schema** - Consistent structure for all agents
-2. **Naming Conventions** - Clear patterns for IDs, classes, files, and topics
+2. **Naming Conventions** - Clear patterns for IDs, classes, and files
 3. **Auto-Registration** - Automatic discovery and catalog management
 4. **Shared Memory** - Tiered storage with Redis (hot) and ATP (persistent)
 5. **MCP Integration** - Reference servers and configuration patterns
@@ -1274,5 +1405,8 @@ This reference document establishes:
 7. **Best Practices** - Agentic loop design, error handling, observability
 8. **Skill Framework** - Reusable workflow definitions and execution
 9. **Testing Patterns** - Unit and integration testing strategies
+10. **Error Analysis Agent** - Log scanning and admin todo management
+11. **Self-Healing Framework** - Automatic error recovery and retries
+12. **Resilience Infrastructure** - Bulkhead, circuit breaker, dead letter queues
 
 All new agents must follow this specification to ensure proper integration with the OCI Coordinator orchestration system.
