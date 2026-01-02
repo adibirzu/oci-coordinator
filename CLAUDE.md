@@ -5,32 +5,26 @@
 The OCI AI Agent Coordinator is a Python-based LangGraph orchestration system that manages specialized AI agents for Oracle Cloud Infrastructure operations. It acts as a central hub receiving requests from multiple channels (Slack, Teams, Web, API) and routing them to specialized agents via MCP (Model Context Protocol) servers.
 
 **Status**: Phase 4 - Production Readiness (In Progress)
-- Phase 1: Project Environment & LLM Setup ✅
-- Phase 2: Unified MCP Layer ✅
-- Phase 3: LangGraph Coordinator Core ✅
-  - Agent Catalog with auto-discovery ✅
-  - Skill framework with step execution ✅
-  - DB Troubleshoot Agent with MCP integration ✅
-  - Slack Bot integration ✅
-  - OCI APM + OCI Logging ✅
-  - **Tool Aliases & Dynamic Discovery ✅** (2025-12-31)
-  - **Slack → LangGraph Integration ✅** (2025-12-31)
-  - **ToolConverter for MCP → LangChain ✅** (2025-12-31)
-  - **FastAPI REST API Server ✅** (2025-12-31)
-  - **Loop Prevention in Orchestrator ✅** (2025-12-31)
-  - **3-Second Ack Pattern for Slack ✅** (2025-12-31)
-  - **Parallel Multi-Agent Orchestrator ✅** (2026-01-01)
-  - **Pre-built Deterministic Workflows (20+) ✅** (2026-01-01)
-  - **Context Compression for Long Conversations ✅** (2026-01-01)
-  - **RAG with OCI GenAI ✅** (Complete)
-  - **LLM-as-a-Judge Evaluation Framework ✅** (Complete)
-  - **SSE Streaming API ✅** (Complete)
-  - **Cost Tool Timeout & Resilience ✅** (2026-01-01)
-  - **Slack Table Visualization for Cost/List Data ✅** (2026-01-01)
-- Phase 4: Evaluation & Production 🔄
-  - Microsoft Teams integration ⏳
-  - Web UI dashboard ⏳
-  - OKE deployment manifests ⏳
+
+| Phase | Status | Key Components |
+|-------|--------|----------------|
+| 1. Environment & LLM | ✅ Complete | Multi-LLM factory, OCA OAuth |
+| 2. Unified MCP Layer | ✅ Complete | 5 MCP servers, 150+ tools, ToolCatalog |
+| 3. LangGraph Coordinator | ✅ Complete | See details below |
+| 4. Production Readiness | 🔄 In Progress | Teams integration, OKE deployment |
+
+**Phase 3 Highlights:**
+- LangGraph coordinator with intent routing and parallel orchestration
+- 6 specialized agents: DB Troubleshoot, Log Analytics, Security, FinOps, Infrastructure, Error Analysis
+- 16 pre-built deterministic workflows for common operations
+- RAG with OCI GenAI embeddings
+- Self-healing framework with error recovery
+- Resilience infrastructure (Bulkhead, Circuit Breaker, Dead Letter Queue)
+- Slack integration with 3-second ack pattern
+- FastAPI REST API with SSE streaming
+- OCI APM tracing + per-agent OCI Logging
+
+**Last Updated**: 2026-01-02
 
 ## Quick Start
 
@@ -41,14 +35,14 @@ poetry install
 # Run tests (212 passing)
 poetry run pytest --cov=src
 
-# Start Slack bot (includes OCA callback server)
-poetry run python -m src.main --mode slack
+# Start coordinator (Slack + API on port 3001) - DEFAULT
+poetry run python -m src.main
 
-# Start API server
-poetry run python -m src.main --mode api --port 3001
-
-# Start both
-poetry run python -m src.main --mode both
+# Or with explicit modes
+poetry run python -m src.main --mode both      # Slack + API (default)
+poetry run python -m src.main --mode slack     # Slack only
+poetry run python -m src.main --mode api       # API only
+poetry run python -m src.main --port 8080      # Custom API port
 ```
 
 **On startup, the following services are initialized:**
@@ -181,14 +175,6 @@ tools = catalog.get_tools_for_domain("database")
 | Test file | `tests/test_{module}.py` | `test_mcp_server.py` |
 | Prompt file | `prompts/{NN}-{AGENT-NAME}.md` | `01-DB-TROUBLESHOOT-AGENT.md` |
 
-### Message Topics (Kafka)
-
-| Type | Convention | Example |
-|------|------------|---------|
-| Command | `commands.{agent-role}` | `commands.db-troubleshoot-agent` |
-| Result | `results.{agent-role}` | `results.db-troubleshoot-agent` |
-| Event | `events.{domain}.{event-type}` | `events.database.alert` |
-
 ---
 
 ## Key Directories
@@ -199,7 +185,9 @@ tools = catalog.get_tools_for_domain("database")
 | `src/agents/catalog.py` | Agent Catalog with auto-registration |
 | `src/agents/skills.py` | Skill execution framework |
 | `src/agents/coordinator/` | LangGraph coordinator with orchestrator |
+| `src/agents/error_analysis/` | Error Analysis Agent with admin todo management |
 | `src/agents/protocol.py` | A2A message protocol for agents |
+| `data/admin_todos.json` | Admin todo list for Error Analysis Agent |
 | `src/mcp/` | MCP client infrastructure |
 | `src/mcp/client.py` | Multi-transport MCP client |
 | `src/mcp/registry.py` | Server connection management |
@@ -214,15 +202,19 @@ tools = catalog.get_tools_for_domain("database")
 | `src/memory/checkpointer.py` | ATP-backed LangGraph checkpointer |
 | `src/memory/context.py` | Context compression for long conversations |
 | `src/channels/` | Input channel handlers |
-| `src/channels/slack.py` | Slack bot integration |
+| `src/channels/slack.py` | Slack bot integration with catalog and memory |
+| `src/channels/slack_catalog.py` | Enterprise troubleshooting catalog |
+| `src/channels/conversation.py` | Thread-based conversation memory |
 | `src/channels/async_runtime.py` | Shared async event loop for handlers |
 | `src/formatting/` | Channel-aware response formatting |
 | `src/observability/` | OpenTelemetry tracing |
 | `src/evaluation/` | Evaluation framework (judge, metrics) |
+| `src/resilience/` | Resilience patterns (Bulkhead, DLQ, HealthMonitor) |
+| `src/rag/` | RAG with OCI GenAI embeddings |
 | `src/api/` | FastAPI REST API server |
 | `src/api/main.py` | Chat, tools, agents, MCP endpoints |
 | `tests/` | Pytest test suite (212 tests) |
-| `prompts/` | Agent system prompts (6 agents) |
+| `prompts/` | Agent system prompts (7 agents) |
 | `scripts/` | Utility scripts (oca_auth.py, etc.) |
 | `conductor/` | Project management (plans, workflow) |
 | `docs/` | Architecture and reference docs |
@@ -249,6 +241,8 @@ tools = catalog.get_tools_for_domain("database")
 
 ## MCP Server Integration
 
+The system integrates with **5 MCP servers** providing **150+ tools** across all OCI domains.
+
 Configure in `config/mcp_servers.yaml`:
 
 ```yaml
@@ -267,13 +261,39 @@ servers:
     working_dir: /Users/abirzu/dev/MCP/mcp-oci-database-observatory
     enabled: true
     domains: [database, opsi, logan, observability]
+
+  mcp-oci:
+    transport: stdio
+    command: python
+    args: ["-m", "oci_mcp.server"]
+    working_dir: /Users/abirzu/dev/MCP/mcp-oci
+    enabled: true
+    domains: [compute, database, network, identity, objectstorage]
+
+  finopsai-mcp:
+    transport: stdio
+    command: python
+    args: ["-m", "finopsai_mcp.server"]
+    working_dir: /Users/abirzu/dev/MCP/finopsai-mcp
+    enabled: false  # Enable for multicloud cost analysis
+    domains: [cost, kubernetes, sustainability]
+
+  oci-mcp-security:
+    transport: stdio
+    command: python
+    args: ["-m", "oci_security_mcp.server"]
+    working_dir: /Users/abirzu/dev/MCP/oci-mcp-security
+    enabled: false  # Enable for advanced security tools
+    domains: [security, cloudguard, vss, waf, bastion]
 ```
 
-| Server | Path | Transport | Purpose |
-|--------|------|-----------|---------|
-| **oci-unified** | `src/mcp/server/` | stdio | Compute, network, security, identity, cost (30s timeout), discovery |
-| **database-observatory** | `mcp-oci-database-observatory/` | stdio | OPSI, SQLcl, Logan unified |
-| **oci-infrastructure** | `mcp-oci/` | stdio | Full OCI management (fallback) |
+| Server | Tools | Transport | Purpose |
+|--------|-------|-----------|---------|
+| **oci-unified** | 30 | stdio | Compute, network, security, identity, cost (30s timeout), discovery |
+| **database-observatory** | 30+ | stdio | OPSI, SQLcl, Logan unified for database observability |
+| **mcp-oci** | 50+ | stdio | Full OCI SDK wrapper (fallback for comprehensive coverage) |
+| **finopsai-mcp** | 33 | stdio | Multicloud cost (AWS/GCP/Azure), Kubernetes, sustainability |
+| **oci-mcp-security** | 41+ | stdio | CloudGuard, VSS, WAF, Bastion, KMS security tools |
 
 **Tool Timeouts:**
 - Cost tools: 30 seconds (OCI Usage API can be slow)
@@ -486,12 +506,22 @@ tools = await catalog.get_all_tools()
 - Tool validation before execution
 
 ### 3. LangGraph Coordinator (`src/agents/coordinator/`)
+- **8 Graph Nodes**: input → classifier → router → workflow|parallel|agent → action → output
 - Workflow-first routing (70%+ deterministic)
 - Intent classification with confidence scoring
 - Multi-agent orchestration
 - State persistence via checkpoints
 - **Slack Integration**: Slack handler uses LangGraph coordinator for routing (enable via `USE_LANGGRAPH_COORDINATOR=true`)
 - **Fallback Routing**: If coordinator fails, falls back to keyword-based agent routing
+
+**Routing Thresholds:**
+| Threshold | Value | Action |
+|-----------|-------|--------|
+| Workflow | ≥ 0.80 | Direct workflow execution |
+| Parallel | ≥ 0.60 + 2+ domains | Multi-agent parallel |
+| Agent | ≥ 0.60 | Single agent with tools |
+| Clarify | 0.30 - 0.60 | Ask clarifying question |
+| Escalate | < 0.30 | Human handoff |
 
 ```python
 # Slack → LangGraph flow (in src/channels/slack.py)
@@ -526,19 +556,29 @@ result = await coordinator.invoke(
 ```
 
 ### 5. Pre-built Workflows (`src/agents/coordinator/workflows.py`)
-- 20+ deterministic workflows for common OCI operations
+- **16 deterministic workflows** for common OCI operations
 - Execute without LLM reasoning for fast, predictable responses
 - Triggered when classifier confidence ≥ 0.80
-- Multiple intent aliases for reliable routing
+- **40+ intent aliases** for reliable routing
 
-| Category | Workflows | Intent Aliases |
-|----------|-----------|----------------|
-| Identity | `list_compartments`, `get_tenancy`, `list_regions` | show_compartments, tenancy_info |
-| Compute | `list_instances`, `get_instance` | show_instances, describe_instance |
-| Network | `list_vcns`, `list_subnets` | show_networks, get_subnets |
-| Cost | `cost_summary` | get_costs, show_spending, tenancy_costs, how_much_spent |
-| Discovery | `discovery_summary`, `search_resources` | resource_summary, find_resource |
-| Help | `search_capabilities`, `help` | capabilities, what_can_you_do |
+| Category | Workflow | Intent Aliases |
+|----------|----------|----------------|
+| Identity | `list_compartments` | show_compartments, get_compartments |
+| Identity | `get_tenancy_info` | tenancy_info, whoami |
+| Identity | `list_regions` | show_regions, available_regions |
+| Compute | `list_instances` | show_instances, get_vms |
+| Compute | `get_instance` | describe_instance, instance_details |
+| Network | `list_vcns` | show_networks, get_vcns |
+| Network | `list_subnets` | get_subnets, show_subnets |
+| Cost | `cost_summary` | get_costs, tenancy_costs, how_much_spent, monthly_cost |
+| Discovery | `discovery_summary` | resource_summary, what_resources |
+| Discovery | `search_resources` | find_resource, search_oci |
+| Help | `search_capabilities` | capabilities, what_can_you_do |
+| Help | `help` | help_me, how_to |
+| Database | `db_health_check` | database_status, db_health |
+| Database | `fleet_summary` | opsi_summary, db_fleet |
+| Security | `security_overview` | security_status, threats |
+| Logs | `recent_errors` | show_errors, log_errors |
 
 **Cost Workflow Details:**
 The `cost_summary` workflow has 10 intent aliases to reliably capture cost queries:
@@ -637,13 +677,60 @@ result = formatter.format_table_from_list(
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/health` | GET | Health check with component status |
-| `/chat` | POST | Process chat message through coordinator |
+| `/chat` | POST | Process chat message through coordinator (returns `content_type`, `structured_data`) |
 | `/tools` | GET | List tools with filtering (query, domain, tier) |
 | `/tools/execute` | POST | Execute a specific tool |
 | `/agents` | GET | List registered agents |
 | `/mcp/servers` | GET | MCP server status |
+| `/slack/status` | GET | Slack connection status (bot_id, team, connected) |
 
-### 11. ToolConverter (`src/mcp/tools/converter.py`)
+### 11. Slack Integration (`src/channels/`)
+
+Enterprise-grade Slack integration with conversation memory and troubleshooting catalog:
+
+**Components:**
+| Component | Purpose |
+|-----------|---------|
+| `slack.py` | Main Slack handler with 3-second ack pattern |
+| `slack_catalog.py` | Interactive troubleshooting catalog |
+| `conversation.py` | Thread-based conversation memory |
+
+**Troubleshooting Catalog (`slack_catalog.py`):**
+- 6 categories: Database, Cost, Security, Infrastructure, Logs, Discovery
+- 20+ quick actions with one-click execution
+- 3 enterprise runbooks with guided steps
+- Context-aware follow-up suggestions
+- Error recovery blocks with actionable alternatives
+
+**Conversation Memory (`conversation.py`):**
+- Thread-based message tracking
+- Redis persistence (24-hour TTL)
+- Topic detection for routing hints
+- Query type tracking for follow-ups
+
+**Slack Commands:**
+| Command | Description |
+|---------|-------------|
+| `help`, `?` | Show help menu with quick actions |
+| `catalog`, `menu` | Open troubleshooting catalog |
+| `runbook`, `runbooks` | Show available runbooks |
+
+**Interactive Buttons:**
+- Category navigation (Database, Cost, Security, etc.)
+- Quick action execution (one-click workflows)
+- Follow-up suggestions after responses
+- Error recovery options
+
+```python
+# Catalog category selection triggers quick actions
+# User clicks: Database → DB Health Check
+# Handler executes: "database health check" query
+
+# Follow-up suggestions appear after each response
+# Based on query type (cost → "Show database costs specifically")
+```
+
+### 12. ToolConverter (`src/mcp/tools/converter.py`)
 - Converts MCP tools to LangChain StructuredTools
 - Dynamic Pydantic model generation from JSON schema
 - Domain-based tool filtering via `DOMAIN_PREFIXES`
@@ -664,7 +751,7 @@ db_tools = converter.get_domain_tools("database")
 safe_tools = converter.get_safe_tools()
 ```
 
-### 12. RAG with OCI AI Studio (`src/rag/`)
+### 13. RAG with OCI AI Studio (`src/rag/`)
 
 Retrieval-Augmented Generation using OCI Generative AI service:
 
@@ -709,6 +796,109 @@ OCI_GENAI_ENDPOINT=https://inference.generativeai.us-chicago-1.oci.oraclecloud.c
 
 # Vector Store
 REDIS_URL=redis://localhost:6379
+```
+
+### 14. Resilience Infrastructure (`src/resilience/`)
+
+Production-grade resilience patterns for fault tolerance and self-healing:
+
+| Component | Purpose | Key Features |
+|-----------|---------|--------------|
+| `DeadLetterQueue` | Persist failed operations | Redis-backed, retry support, failure pattern tracking |
+| `Bulkhead` | Resource isolation | Partitioned semaphores, per-domain limits |
+| `HealthMonitor` | Component health tracking | Auto-restart, event callbacks, metrics |
+| `RateLimitedLLM` | LLM concurrency control | Semaphore-based, timeout support |
+
+**Bulkhead Partitions:**
+| Partition | Max Concurrent | Tool Prefixes |
+|-----------|----------------|---------------|
+| DATABASE | 3 | `oci_database_`, `oci_opsi_`, `execute_sql` |
+| INFRASTRUCTURE | 5 | `oci_compute_`, `oci_network_` |
+| COST | 2 | `oci_cost_` |
+| SECURITY | 3 | `oci_security_` |
+| DISCOVERY | 2 | `oci_search_`, `oci_list_` |
+| LLM | 5 | LLM calls |
+| DEFAULT | 10 | Catch-all |
+
+**Circuit Breaker Integration:**
+The tool catalog includes circuit breaker logic that:
+- Tracks consecutive failures per MCP server
+- Opens circuit after 3 failures (60s cooldown)
+- Rejects tool calls to unhealthy servers immediately
+- Auto-closes circuit after successful health check
+
+**Usage Example:**
+```python
+from src.resilience import (
+    Bulkhead, DeadLetterQueue, HealthMonitor,
+    HealthCheck, HealthStatus
+)
+
+# Bulkhead for resource isolation
+bulkhead = Bulkhead.get_instance()
+async with bulkhead.acquire("database"):
+    result = await execute_database_operation()
+
+# Deadletter queue for failed operations
+dlq = DeadLetterQueue(redis_url="redis://localhost:6379")
+await dlq.enqueue(
+    failure_type="tool_call",
+    operation="oci_cost_get_summary",
+    error="Timeout after 30s",
+    params={"days": 30},
+)
+
+# Health monitor with auto-restart
+monitor = HealthMonitor.get_instance()
+monitor.register_check(HealthCheck(
+    name="mcp_database",
+    check_func=check_mcp_health,
+    restart_func=restart_mcp_server,
+    failure_threshold=3,
+))
+await monitor.start()
+```
+
+### 15. Self-Healing Framework (`src/agents/self_healing/`)
+
+LLM-powered error analysis and automatic recovery:
+
+| Component | Purpose |
+|-----------|---------|
+| `ErrorAnalyzer` | Categorize errors, suggest recovery actions |
+| `ParameterCorrector` | Fix incorrect tool parameters |
+| `LogicValidator` | Pre-execution validation |
+| `RetryStrategy` | Smart retry with exponential backoff |
+| `SelfHealingMixin` | Mixin for any agent to inherit self-healing |
+
+**Error Categories:**
+| Category | Recovery Action |
+|----------|-----------------|
+| `PERMISSION` | Suggest IAM policy fix |
+| `NOT_FOUND` | Parameter correction |
+| `TIMEOUT` | Retry with backoff |
+| `RATE_LIMIT` | Wait and retry |
+| `VALIDATION` | Correct parameters |
+| `TRANSIENT` | Simple retry |
+
+**Using Self-Healing in Agents:**
+```python
+from src.agents.base import BaseAgent
+from src.agents.self_healing import SelfHealingMixin
+
+class MyAgent(BaseAgent, SelfHealingMixin):
+    def __init__(self, llm, tool_catalog, ...):
+        super().__init__(...)
+        self.init_self_healing(llm, max_retries=3)
+
+    async def invoke(self, query):
+        # Use healing_call_tool for auto-retry with correction
+        result = await self.healing_call_tool(
+            "oci_database_execute_sql",
+            {"query": "SELECT * FROM users"},
+            user_intent=query,
+        )
+        return result
 ```
 
 ---
@@ -916,6 +1106,42 @@ result = await log_agent.invoke("Search for errors in the last hour")
 # Returns: patterns, anomalies, cross-service correlations
 ```
 
+### Error Analysis Agent (`src/agents/error_analysis/agent.py`)
+
+Log error detection with admin todo management:
+
+| Feature | Description | MCP Tools |
+|---------|-------------|-----------|
+| Error Identification | Find errors in OCI logs | `oci_logging_search_logs` |
+| Pattern Detection | Detect common error patterns (ORA-, OOM, auth failures) | Built-in regex |
+| LLM Analysis | Analyze patterns for root cause | LangChain LLM |
+| Admin Todo Management | Create action items for significant errors | `AdminTodoManager` |
+
+**Error Patterns Detected:**
+| Pattern | Severity | Category |
+|---------|----------|----------|
+| ORA-00060 (Deadlock) | CRITICAL | database |
+| ORA-04031 (Shared Pool) | CRITICAL | database |
+| OutOfMemory/OOM | CRITICAL | compute |
+| Connection timeout/refused | HIGH | network |
+| Authentication failed | HIGH | security |
+| HTTP 4xx/5xx | MEDIUM | api |
+| Rate limited | MEDIUM | api |
+
+**Admin Todo Storage:** JSON file at `data/admin_todos.json`
+
+```python
+# Analyze logs for errors
+result = await error_agent.invoke("Scan logs for errors", time_range_hours=1)
+# Returns: patterns found, todos created, recommendations
+
+# Get pending admin todos
+todos = await error_agent.get_pending_todos()
+
+# Resolve a todo
+await error_agent.resolve_todo("todo-abc123", "Fixed by increasing connection pool")
+```
+
 ---
 
 ## Agent System Prompts
@@ -928,6 +1154,7 @@ result = await log_agent.invoke("Search for errors in the last hour")
 | Security | `03-SECURITY-THREAT-AGENT.md` | security, threat, MITRE |
 | FinOps | `04-FINOPS-AGENT.md` | cost, budget, spending |
 | Infrastructure | `05-INFRASTRUCTURE-AGENT.md` | compute, network, VCN |
+| Error Analysis | `src/agents/error_analysis/agent.py` | error scan, admin todos, patterns |
 
 ---
 
