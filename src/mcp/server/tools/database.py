@@ -15,7 +15,7 @@ from typing import Any
 
 from fastmcp import FastMCP
 
-from ..auth import get_database_management_client, get_oci_config_with_region
+from src.mcp.server.auth import get_database_management_client, get_oci_config_with_region
 
 
 async def _call_oci(client_method, **kwargs):
@@ -111,9 +111,8 @@ async def _list_managed_databases_logic(
                 if len(all_databases) >= limit:
                     break
 
-            except oci.exceptions.ServiceError as e:
-                if e.status != 404:
-                    continue  # Skip inaccessible compartments
+            except oci.exceptions.ServiceError:
+                continue  # Skip inaccessible compartments (404, 403, etc.)
             except Exception:
                 continue
 

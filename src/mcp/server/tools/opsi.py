@@ -14,7 +14,7 @@ from typing import Any
 
 from fastmcp import FastMCP
 
-from ..auth import get_opsi_client, get_oci_config_with_region
+from src.mcp.server.auth import get_opsi_client, get_oci_config_with_region
 
 
 async def _list_database_insights_logic(
