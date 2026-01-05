@@ -100,7 +100,7 @@ def save_token(token: dict):
     print(f"[OCA Auth] Token saved to {TOKEN_CACHE_PATH}")
 
 
-def get_auth_url(verifier: str, challenge: str) -> str:
+def get_auth_url(verifier: str, challenge: str, state: str, nonce: str) -> str:
     """Generate OAuth authorization URL."""
     params = {
         "response_type": "code",
@@ -109,6 +109,8 @@ def get_auth_url(verifier: str, challenge: str) -> str:
         "scope": "openid offline_access",
         "code_challenge": challenge,
         "code_challenge_method": "S256",
+        "state": state,
+        "nonce": nonce,
     }
     return f"{AUTHZ_ENDPOINT}?{urllib.parse.urlencode(params)}"
 
@@ -225,8 +227,12 @@ def run_auth_flow():
     verifier, challenge = generate_pkce_pair()
     save_verifier(verifier)
 
+    # Generate state and nonce for CSRF protection and OpenID Connect
+    state = secrets.token_urlsafe(32)
+    nonce = secrets.token_urlsafe(32)
+
     # Get auth URL
-    auth_url = get_auth_url(verifier, challenge)
+    auth_url = get_auth_url(verifier, challenge, state, nonce)
 
     # Start callback server
     server = http.server.HTTPServer((CALLBACK_HOST, CALLBACK_PORT), CallbackHandler)

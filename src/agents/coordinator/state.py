@@ -7,13 +7,65 @@ including intent classification, workflow routing, and agent context.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import contextvars
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Annotated, Any
 
 from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
+
+from src.agents.coordinator.transparency import (
+    AgentCandidate,
+    ThinkingStep,
+    ThinkingTrace,
+)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Context Variable for Thinking Callback
+# ─────────────────────────────────────────────────────────────────────────────
+# This context variable stores the thinking update callback OUTSIDE of the
+# CoordinatorState to avoid msgpack serialization issues with LangGraph's
+# MemorySaver checkpointer. Callables cannot be serialized by msgpack.
+
+_thinking_callback: contextvars.ContextVar[Callable[[ThinkingStep], None] | None] = (
+    contextvars.ContextVar("thinking_callback", default=None)
+)
+
+
+def set_thinking_callback(callback: Callable[[ThinkingStep], None] | None) -> contextvars.Token:
+    """
+    Set the thinking update callback in the current context.
+
+    This should be called before invoking the LangGraph coordinator.
+    The callback receives ThinkingStep updates for real-time UI updates (e.g., Slack).
+
+    Args:
+        callback: Async or sync callback function, or None to clear
+
+    Returns:
+        Token that can be used to reset the context variable
+
+    Example:
+        token = set_thinking_callback(my_callback)
+        try:
+            result = await graph.ainvoke(state, config)
+        finally:
+            reset_thinking_callback(token)
+    """
+    return _thinking_callback.set(callback)
+
+
+def get_thinking_callback() -> Callable[[ThinkingStep], None] | None:
+    """Get the thinking update callback from the current context."""
+    return _thinking_callback.get()
+
+
+def reset_thinking_callback(token: contextvars.Token) -> None:
+    """Reset the thinking callback to its previous value using the token."""
+    _thinking_callback.reset(token)
 
 
 class RoutingType(str, Enum):
@@ -228,10 +280,25 @@ class CoordinatorState:
     output_format: str = "markdown"  # markdown, slack, teams, html, plain
     channel_type: str | None = None  # slack, teams, web, api, cli
 
+    # Transparency layer - tracks thinking process for user visibility
+    thinking_trace: ThinkingTrace | None = None
+    agent_candidates: list[AgentCandidate] = field(default_factory=list)
+    enhanced_query: str | None = None  # LLM-enhanced version of original query
+
+    # DEPRECATED: Use set_thinking_callback() context variable instead.
+    # This field is kept for backward compatibility but should not be used.
+    # The callback is stored in a context variable to avoid msgpack serialization
+    # issues with LangGraph's MemorySaver checkpointer.
+    on_thinking_update: Any = None  # Deprecated - use context variable
+
+    # Metadata for profile-aware operations (OCI profile, context, etc.)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
     def to_dict(self) -> dict[str, Any]:
         """Serialize state to dictionary (for debugging/logging)."""
         return {
             "query": self.query,
+            "enhanced_query": self.enhanced_query,
             "intent": self.intent.to_dict() if self.intent else None,
             "routing": self.routing.to_dict() if self.routing else None,
             "tool_calls": [tc.to_dict() for tc in self.tool_calls],
@@ -242,7 +309,51 @@ class CoordinatorState:
             "max_iterations": self.max_iterations,
             "error": self.error,
             "has_final_response": self.final_response is not None,
+            "thinking_trace": self.thinking_trace.to_dict() if self.thinking_trace else None,
+            "agent_candidates": [c.to_dict() for c in self.agent_candidates],
+            "metadata": self.metadata,
         }
+
+    def add_thinking_step(
+        self,
+        phase: "ThinkingPhase",
+        message: str,
+        data: dict[str, Any] | None = None,
+    ) -> None:
+        """
+        Add a thinking step to the trace and trigger update callback.
+
+        Args:
+            phase: The thinking phase
+            message: Human-readable message
+            data: Additional phase-specific data
+        """
+        import asyncio
+        import inspect
+        from src.agents.coordinator.transparency import ThinkingPhase, ThinkingStep
+
+        if self.thinking_trace is None:
+            from src.agents.coordinator.transparency import create_thinking_trace
+            self.thinking_trace = create_thinking_trace()
+
+        step = self.thinking_trace.add_step(phase, message, data)
+
+        # Trigger callback for real-time updates (e.g., Slack)
+        # Use context variable to get callback (avoids msgpack serialization issues)
+        callback = get_thinking_callback()
+        if callback and callable(callback):
+            try:
+                result = callback(step)
+                # Handle async callbacks by scheduling them
+                if inspect.iscoroutine(result):
+                    try:
+                        loop = asyncio.get_running_loop()
+                        loop.create_task(result)
+                    except RuntimeError:
+                        # No running loop, try to run synchronously
+                        pass
+            except Exception:
+                pass  # Don't let callback errors break the flow
 
     def should_continue(self) -> bool:
         """Check if graph execution should continue."""
@@ -269,40 +380,97 @@ class CoordinatorState:
 # Workflow-First Routing Thresholds
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Target: 70%+ of requests handled by deterministic workflows
-WORKFLOW_CONFIDENCE_THRESHOLD = 0.80  # Route to workflow if confidence >= 0.80
-AGENT_CONFIDENCE_THRESHOLD = 0.60  # Route to agent if confidence >= 0.60
-ESCALATION_CONFIDENCE_THRESHOLD = 0.30  # Escalate if confidence < 0.30
+# UPDATED: Balance between fast workflows and LLM-powered reasoning
+# Simple queries (list_compartments, tenancy_info) → workflows
+# Complex queries (analysis, temporal, optimization) → LLM agents
+WORKFLOW_CONFIDENCE_THRESHOLD = 0.90  # Only route to workflow with very high confidence
+AGENT_CONFIDENCE_THRESHOLD = 0.50  # Lower threshold to use agents more often
+ESCALATION_CONFIDENCE_THRESHOLD = 0.25  # Lower threshold before escalating
 PARALLEL_DOMAIN_THRESHOLD = 2  # Use parallel if 2+ domains involved
 
+# Query complexity indicators that should trigger agent routing
+COMPLEXITY_KEYWORDS = [
+    # Temporal reasoning
+    "november", "december", "january", "last month", "this month", "previous",
+    "yesterday", "last week", "this week", "year to date", "ytd", "quarter",
+    "compared to", "comparison", "trend", "change", "growth", "decline",
+    # Analysis keywords
+    "why", "explain", "analyze", "analysis", "understand", "investigate",
+    "root cause", "reason", "insight", "recommendation", "optimize", "suggest",
+    # Complex operations
+    "forecast", "predict", "anomaly", "unusual", "spike", "drop",
+    "correlate", "correlation", "relationship", "impact",
+]
 
-def determine_routing(intent: IntentClassification) -> RoutingDecision:
+
+def has_complexity_indicators(query: str) -> bool:
+    """Check if query contains complexity indicators requiring LLM reasoning."""
+    query_lower = query.lower()
+    return any(kw in query_lower for kw in COMPLEXITY_KEYWORDS)
+
+
+def determine_routing(
+    intent: IntentClassification,
+    original_query: str | None = None,
+) -> RoutingDecision:
     """
     Determine routing based on intent classification.
 
-    Workflow-First Design:
-    - High confidence (>=0.80) + workflow match → WORKFLOW
+    UPDATED Routing Strategy:
+    - Simple queries + very high confidence (>=0.90) → WORKFLOW
+    - Complex queries (temporal, analytical) → AGENT (with LLM reasoning)
     - Multi-domain (2+) + analysis/troubleshoot → PARALLEL
-    - Medium confidence (>=0.60) + agent match → AGENT
-    - Low confidence (<0.30) → ESCALATE
+    - Medium confidence (>=0.50) + agent match → AGENT
+    - Low confidence (<0.25) → ESCALATE
     - Otherwise → DIRECT (LLM handles it)
+
+    The key change: Complex queries that need reasoning (temporal, analytical,
+    optimization) are now routed to LLM-powered agents even if a workflow exists.
 
     Args:
         intent: Classified intent
+        original_query: Original query for complexity detection
 
     Returns:
         Routing decision
     """
-    # Check for workflow match with high confidence
+    # Check if query requires LLM reasoning (temporal, analytical, etc.)
+    needs_llm_reasoning = False
+    if original_query and has_complexity_indicators(original_query):
+        needs_llm_reasoning = True
+
+    # Also check if category suggests need for reasoning
+    if intent.category in (IntentCategory.ANALYSIS, IntentCategory.TROUBLESHOOT):
+        needs_llm_reasoning = True
+
+    # Route complex queries to agents for LLM-powered reasoning
+    if needs_llm_reasoning and intent.suggested_agent:
+        return RoutingDecision(
+            routing_type=RoutingType.AGENT,
+            target=intent.suggested_agent,
+            confidence=intent.confidence,
+            reasoning=f"Query requires LLM reasoning (complexity indicators detected) - routing to agent '{intent.suggested_agent}'",
+            fallback=RoutingDecision(
+                routing_type=RoutingType.WORKFLOW,
+                target=intent.suggested_workflow,
+                confidence=intent.confidence * 0.8,
+                reasoning="Fallback to workflow if agent fails",
+            )
+            if intent.suggested_workflow
+            else None,
+        )
+
+    # Check for workflow match with very high confidence (simple queries only)
     if (
         intent.confidence >= WORKFLOW_CONFIDENCE_THRESHOLD
         and intent.suggested_workflow
+        and not needs_llm_reasoning
     ):
         return RoutingDecision(
             routing_type=RoutingType.WORKFLOW,
             target=intent.suggested_workflow,
             confidence=intent.confidence,
-            reasoning=f"High confidence ({intent.confidence:.2f}) match for workflow '{intent.suggested_workflow}'",
+            reasoning=f"Simple query with high confidence ({intent.confidence:.2f}) - using workflow '{intent.suggested_workflow}'",
             fallback=RoutingDecision(
                 routing_type=RoutingType.AGENT,
                 target=intent.suggested_agent,

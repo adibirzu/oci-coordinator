@@ -9,7 +9,7 @@ This software was created to showcase Oracle Cloud Infrastructure (OCI) AI Integ
 ## Features
 
 - **Multi-Agent Orchestration**: Coordinate 6 specialized agents for database, logging, security, cost, infrastructure, and error analysis
-- **Workflow-First Design**: 70%+ deterministic workflows via MCP tools (16 pre-built workflows); LLM reasoning for complex analysis
+- **Workflow-First Design**: 70%+ deterministic workflows via MCP tools (35 pre-built workflows); LLM reasoning for complex analysis
 - **Database Observatory Integration**: Full OPSI, SQLcl, and Logan Analytics via MCP
 - **Slack Integration**: Real-time chatbot with Socket Mode and 3-second ack pattern
 - **REST API**: FastAPI server with SSE streaming support
@@ -320,8 +320,8 @@ oci-coordinator/
 │   │   ├── factory.py            # LLM provider factory
 │   │   └── oca.py                # Oracle Code Assist integration
 │   ├── memory/                   # Shared memory layer
-│   │   ├── manager.py            # Memory abstraction (Redis + ATP)
-│   │   ├── checkpointer.py       # ATP-backed LangGraph checkpointer
+│   │   ├── manager.py            # Memory abstraction (Redis cache)
+│   │   ├── checkpointer.py       # LangGraph checkpointer factory
 │   │   └── context.py            # Context compression
 │   ├── cache/                    # OCI resource caching
 │   │   └── oci_resource_cache.py # Redis cache with tag invalidation

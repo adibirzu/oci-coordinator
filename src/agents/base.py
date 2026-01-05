@@ -245,6 +245,14 @@ class BaseAgent(ABC):
             agent_role=self.get_definition().role,
             agent_id=self.get_definition().agent_id,
         )
+        if self.memory and self.tools:
+            try:
+                self.tools.set_memory_manager(self.memory)
+            except Exception as exc:
+                self._logger.debug(
+                    "Failed to attach memory manager to tool catalog",
+                    error=str(exc),
+                )
 
     @classmethod
     @abstractmethod

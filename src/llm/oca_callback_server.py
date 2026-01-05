@@ -15,9 +15,10 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import threading
 from collections.abc import Callable
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
@@ -31,13 +32,19 @@ IDCS_CLIENT_ID = "a8331954c0cf48ba99b5dd223a14c6ea"
 IDCS_OAUTH_URL = "https://idcs-9dc693e80d9b469480d7afe00e743931.identity.oraclecloud.com"
 TOKEN_ENDPOINT = f"{IDCS_OAUTH_URL}/oauth2/v1/token"
 
-CALLBACK_HOST = os.getenv("OCA_CALLBACK_HOST", "127.0.0.1")
+# Server binding - use 0.0.0.0 to accept connections from any interface
+SERVER_HOST = os.getenv("OCA_SERVER_HOST", "0.0.0.0")
 CALLBACK_PORT = int(os.getenv("OCA_CALLBACK_PORT", "48801"))
+
+# Callback host for redirect URI - this is what the browser accesses
+# Keep as 127.0.0.1 since browser runs locally
+CALLBACK_HOST = os.getenv("OCA_CALLBACK_HOST", "127.0.0.1")
 REDIRECT_URI = f"http://{CALLBACK_HOST}:{CALLBACK_PORT}/auth/oca"
 
 CACHE_DIR = Path(os.getenv("OCA_CACHE_DIR", Path.home() / ".oca"))
 TOKEN_CACHE_PATH = CACHE_DIR / "token.json"
 VERIFIER_CACHE_PATH = CACHE_DIR / "verifier.txt"
+STATE_CACHE_PATH = CACHE_DIR / "state.txt"
 
 
 def ensure_cache_dir() -> None:
@@ -55,10 +62,22 @@ def load_verifier() -> str | None:
     return None
 
 
+def load_state() -> str | None:
+    """Load saved OAuth state for CSRF verification."""
+    try:
+        if STATE_CACHE_PATH.exists():
+            return STATE_CACHE_PATH.read_text().strip()
+    except Exception as e:
+        logger.warning("Failed to load state", error=str(e))
+    return None
+
+
 def clear_verifier() -> None:
-    """Clear saved verifier."""
+    """Clear saved verifier and state."""
     if VERIFIER_CACHE_PATH.exists():
         VERIFIER_CACHE_PATH.unlink()
+    if STATE_CACHE_PATH.exists():
+        STATE_CACHE_PATH.unlink()
 
 
 def save_token(token: dict) -> None:
@@ -113,6 +132,15 @@ class OCACallbackHandler(BaseHTTPRequestHandler):
     # Class-level callback for token received
     on_token_received: Callable[[dict], None] | None = None
 
+    # Socket timeout to prevent hanging on stale connections
+    timeout = 10
+
+    def setup(self):
+        """Set up connection with socket timeout to prevent hangs."""
+        # Set socket-level timeout before calling parent setup
+        self.request.settimeout(self.timeout)
+        super().setup()
+
     def log_message(self, format, *args):
         """Suppress default HTTP logging."""
         pass
@@ -159,6 +187,24 @@ class OCACallbackHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "text/html")
             self.end_headers()
             self.wfile.write(b"Missing authorization code")
+            return
+
+        # Verify state parameter (CSRF protection)
+        returned_state = query.get("state", [None])[0]
+        saved_state = load_state()
+        if saved_state and returned_state != saved_state:
+            logger.error("State mismatch - possible CSRF attack")
+            self.send_response(400)
+            self.send_header("Content-Type", "text/html")
+            self.end_headers()
+            self.wfile.write(b"""
+                <html>
+                <body style="font-family: system-ui; text-align: center; padding: 50px;">
+                    <h1 style="color: #e74c3c;">Authentication Failed</h1>
+                    <p>Invalid state parameter. Please try logging in again from Slack.</p>
+                </body>
+                </html>
+            """)
             return
 
         # Load PKCE verifier
@@ -229,13 +275,30 @@ class OCACallbackHandler(BaseHTTPRequestHandler):
         self.wfile.write(json.dumps({"status": "ok", "service": "oca-callback"}).encode())
 
 
+class RobustHTTPServer(ThreadingHTTPServer):
+    """HTTP server with socket-level timeout and resilience to suspend/resume."""
+
+    # Allow address reuse to avoid "Address already in use" after restart
+    allow_reuse_address = True
+
+    def server_bind(self):
+        """Configure socket with timeout and reuse options."""
+        # Set socket options for resilience
+        self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        # Set socket timeout to prevent blocking indefinitely
+        self.socket.settimeout(5)
+        super().server_bind()
+
+
 class OCACallbackServer:
     """Background OCA callback server manager."""
 
     _instance: OCACallbackServer | None = None
-    _server: HTTPServer | None = None
+    _server: RobustHTTPServer | None = None
     _thread: threading.Thread | None = None
     _running: bool = False
+    _consecutive_errors: int = 0
+    MAX_CONSECUTIVE_ERRORS = 10
 
     @classmethod
     def get_instance(cls) -> OCACallbackServer:
@@ -262,8 +325,8 @@ class OCACallbackServer:
             if on_token_received:
                 OCACallbackHandler.on_token_received = on_token_received
 
-            # Create server
-            self._server = HTTPServer((CALLBACK_HOST, CALLBACK_PORT), OCACallbackHandler)
+            # Create server with robust socket configuration
+            self._server = RobustHTTPServer((SERVER_HOST, CALLBACK_PORT), OCACallbackHandler)
             self._server.timeout = 1  # Short timeout for clean shutdown
 
             # Start server thread
@@ -273,13 +336,14 @@ class OCACallbackServer:
                 daemon=True,
             )
             self._running = True
+            self._consecutive_errors = 0
             self._thread.start()
 
             logger.info(
                 "OCA callback server started",
-                host=CALLBACK_HOST,
+                bind_host=SERVER_HOST,
                 port=CALLBACK_PORT,
-                url=f"http://{CALLBACK_HOST}:{CALLBACK_PORT}/auth/oca",
+                redirect_uri=REDIRECT_URI,
             )
             return True
 
@@ -298,13 +362,36 @@ class OCACallbackServer:
             return False
 
     def _run_server(self) -> None:
-        """Server loop running in background thread."""
+        """Server loop running in background thread with error recovery."""
         while self._running:
             try:
                 self._server.handle_request()
+                # Reset error counter on successful request handling
+                self._consecutive_errors = 0
+            except socket.timeout:
+                # Socket timeout is expected, just continue
+                pass
+            except OSError as e:
+                # Socket errors may occur after suspend/resume
+                if self._running:
+                    self._consecutive_errors += 1
+                    logger.warning(
+                        "Callback server socket error",
+                        error=str(e),
+                        consecutive_errors=self._consecutive_errors,
+                    )
+                    if self._consecutive_errors >= self.MAX_CONSECUTIVE_ERRORS:
+                        logger.error("Too many consecutive errors, stopping server")
+                        self._running = False
+                        break
             except Exception as e:
                 if self._running:
-                    logger.warning("Callback server error", error=str(e))
+                    self._consecutive_errors += 1
+                    logger.warning(
+                        "Callback server error",
+                        error=str(e),
+                        consecutive_errors=self._consecutive_errors,
+                    )
 
     def stop(self) -> None:
         """Stop the callback server."""

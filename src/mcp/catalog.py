@@ -18,19 +18,25 @@ Features:
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
+import os
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import structlog
+import yaml
 from langchain_core.tools import StructuredTool
 
 from src.mcp.client import ToolCallResult, ToolDefinition
 from src.mcp.registry import ServerRegistry
 
 if TYPE_CHECKING:
+    from src.memory.manager import SharedMemoryManager
     from src.resilience.deadletter import DeadLetterQueue
     from src.resilience.bulkhead import Bulkhead
 
@@ -39,6 +45,14 @@ logger = structlog.get_logger(__name__)
 # Refresh configuration
 DEFAULT_REFRESH_INTERVAL_SECONDS = 30  # Minimum time between refreshes
 STALE_THRESHOLD_SECONDS = 60  # Consider catalog stale after this time
+CACHE_CONTEXT_ENV_KEYS = (
+    "OCI_PROFILE",
+    "OCI_CLI_PROFILE",
+    "OCI_CONFIG_FILE",
+    "OCI_REGION",
+    "OCI_TENANCY_OCID",
+    "COMPARTMENT_OCID",
+)
 
 
 @dataclass
@@ -49,6 +63,21 @@ class ToolTier:
     latency_estimate_ms: int
     risk_level: str  # none, low, medium, high
     requires_confirmation: bool = False
+
+
+@dataclass
+class ToolMetadata:
+    """Supplemental tool metadata sourced from server manifests."""
+
+    server_id: str
+    domain: str | None = None
+    read_only: bool | None = None
+    idempotent: bool | None = None
+    mutates: bool | None = None
+    requires_confirmation: bool | None = None
+    cache_ttl_seconds: int | None = None
+    timeouts: dict[str, Any] | None = None
+    source: str = "manifest"
 
 
 # Tool tier classifications
@@ -78,6 +107,17 @@ TOOL_ALIASES: dict[str, str] = {
     "get_sql_plan": "oci_database_get_sql_plan",
     "list_awr_snapshots": "oci_database_list_awr_snapshots",
     "sqlwatch_get_plan_history": "oci_sqlwatch_get_plan_history",
+    # DB Management legacy names → standardized names
+    "search_managed_databases": "oci_dbmgmt_search_databases",
+    "list_managed_databases": "oci_dbmgmt_list_databases",
+    "get_managed_database": "oci_dbmgmt_get_database",
+    "get_awr_report": "oci_dbmgmt_get_awr_report",
+    "get_awr_db_report": "oci_dbmgmt_get_awr_report",
+    "get_awr_db_report_auto": "oci_dbmgmt_get_awr_report_auto",
+    "list_awr_db_snapshots": "oci_dbmgmt_list_awr_snapshots",
+    "get_database_fleet_health": "oci_dbmgmt_get_fleet_health",
+    "get_database_metrics": "oci_dbmgmt_get_metrics",
+    "get_db_metrics": "oci_dbmgmt_get_metrics",
     "sqlwatch_analyze_regression": "oci_sqlwatch_analyze_regression",
     "query_warehouse_standard": "oci_opsi_query_warehouse",
     # Legacy short names
@@ -108,7 +148,7 @@ MCP_SERVER_DOMAINS: dict[str, list[str]] = {
 # ═══════════════════════════════════════════════════════════════════════════════
 # Used for dynamic tool discovery by domain
 DOMAIN_PREFIXES: dict[str, list[str]] = {
-    "database": ["oci_database_", "oci_opsi_", "execute_sql", "database_status"],
+    "database": ["oci_database_", "oci_opsi_", "oci_dbmgmt_", "execute_sql", "database_status"],
     "infrastructure": ["oci_compute_", "oci_network_", "oci_list_", "oci_get_", "oci_search_"],
     "finops": ["oci_cost_", "finops_"],
     "cost": ["oci_cost_"],
@@ -271,6 +311,21 @@ TOOL_TIERS: dict[str, ToolTier] = {
     "analyze_io_usage": ToolTier(3, 2000, "low"),
     "query_warehouse_standard": ToolTier(3, 5000, "low"),
     # ═══════════════════════════════════════════════════════════════════════════
+    # OCI Database Management (DB Mgmt) Tools - Standardized Names
+    # ═══════════════════════════════════════════════════════════════════════════
+    # Tier 2: Database Discovery & Metadata
+    "oci_dbmgmt_list_databases": ToolTier(2, 1000, "none"),
+    "oci_dbmgmt_get_database": ToolTier(2, 600, "none"),
+    "oci_dbmgmt_search_databases": ToolTier(2, 800, "none"),
+    "oci_dbmgmt_get_fleet_health": ToolTier(2, 1500, "none"),
+    # Tier 3: AWR Analysis (can take longer)
+    "oci_dbmgmt_list_awr_snapshots": ToolTier(2, 800, "none"),
+    "oci_dbmgmt_get_awr_report": ToolTier(3, 5000, "low"),  # AWR reports can take time
+    "oci_dbmgmt_get_awr_report_auto": ToolTier(3, 5000, "low"),  # Auto-finds snapshots
+    "oci_dbmgmt_get_metrics": ToolTier(2, 1000, "none"),
+    "oci_dbmgmt_get_top_sql": ToolTier(3, 2000, "low"),
+    "oci_dbmgmt_get_wait_events": ToolTier(3, 2000, "low"),
+    # ═══════════════════════════════════════════════════════════════════════════
     # OPSI Tools (database-observatory)
     # ═══════════════════════════════════════════════════════════════════════════
     # Tier 2: Database Management
@@ -287,6 +342,87 @@ TOOL_TIERS: dict[str, ToolTier] = {
     "sqlwatch_get_plan_history": ToolTier(3, 2000, "low"),
     "sqlwatch_analyze_regression": ToolTier(3, 3000, "low"),
 }
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Catalog Config Overrides (config/catalog/*)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_CATALOG_CONFIG_DIR = Path(__file__).resolve().parents[2] / "config" / "catalog"
+
+
+def _load_json_file(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text())
+    except Exception as exc:
+        logger.warning("Failed to load JSON config", path=str(path), error=str(exc))
+        return None
+
+
+def _load_yaml_file(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    try:
+        data = yaml.safe_load(path.read_text())
+        return data if isinstance(data, dict) else None
+    except Exception as exc:
+        logger.warning("Failed to load YAML config", path=str(path), error=str(exc))
+        return None
+
+
+def _coerce_tool_tiers(raw: dict[str, Any]) -> dict[str, ToolTier]:
+    converted: dict[str, ToolTier] = {}
+    for name, entry in raw.items():
+        if isinstance(entry, ToolTier):
+            converted[name] = entry
+            continue
+        if not isinstance(entry, dict):
+            continue
+        tier = int(entry.get("tier", 2))
+        latency = int(entry.get("latency_estimate_ms", 1000))
+        risk = str(entry.get("risk_level", "low"))
+        requires = bool(entry.get("requires_confirmation", False))
+        converted[name] = ToolTier(
+            tier=tier,
+            latency_estimate_ms=latency,
+            risk_level=risk,
+            requires_confirmation=requires,
+        )
+    return converted
+
+
+def _load_catalog_config() -> None:
+    """Load catalog overrides from config/catalog if present."""
+    global TOOL_ALIASES, DOMAIN_PREFIXES, MCP_SERVER_DOMAINS, TOOL_TIERS
+
+    aliases = _load_json_file(_CATALOG_CONFIG_DIR / "tool_aliases.json")
+    if aliases:
+        TOOL_ALIASES = aliases
+
+    prefixes = _load_json_file(_CATALOG_CONFIG_DIR / "domain_prefixes.json")
+    if prefixes:
+        DOMAIN_PREFIXES = prefixes
+
+    server_domains = _load_json_file(_CATALOG_CONFIG_DIR / "server_domains.json")
+    if server_domains:
+        MCP_SERVER_DOMAINS = server_domains
+
+    tiers_raw = _load_yaml_file(_CATALOG_CONFIG_DIR / "tool_tiers.yaml")
+    if tiers_raw:
+        TOOL_TIERS = _coerce_tool_tiers(tiers_raw)
+
+
+_load_catalog_config()
+
+
+def _manifest_overrides_enabled() -> bool:
+    return os.getenv("COORDINATOR_USE_MANIFEST_OVERRIDES", "true").lower() in (
+        "true",
+        "1",
+        "yes",
+        "on",
+    )
 
 
 def _tier_key(name: str) -> str:
@@ -320,6 +456,7 @@ class ToolCatalog:
         registry: ServerRegistry | None = None,
         deadletter_queue: "DeadLetterQueue | None" = None,
         bulkhead: "Bulkhead | None" = None,
+        memory_manager: "SharedMemoryManager | None" = None,
     ):
         self._registry = registry or ServerRegistry.get_instance()
         self._tools: dict[str, ToolDefinition] = {}
@@ -327,6 +464,7 @@ class ToolCatalog:
         self._custom_tools: dict[str, ToolDefinition] = {}  # Dynamically registered
         self._tool_callbacks: dict[str, list[Callable]] = {}  # Event callbacks
         self._tool_usage_stats: dict[str, dict] = {}  # Usage tracking
+        self._tool_metadata: dict[str, ToolMetadata] = {}  # Manifest metadata
         self._refresh_lock = asyncio.Lock() if hasattr(asyncio, 'Lock') else None
         self._last_refresh: datetime | None = None
         self._refresh_interval = timedelta(seconds=DEFAULT_REFRESH_INTERVAL_SECONDS)
@@ -336,18 +474,31 @@ class ToolCatalog:
         # Resilience components (optional)
         self._deadletter_queue = deadletter_queue
         self._bulkhead = bulkhead
+        self._memory_manager = memory_manager
 
     @classmethod
-    def get_instance(cls, registry: ServerRegistry | None = None) -> ToolCatalog:
+    def get_instance(
+        cls,
+        registry: ServerRegistry | None = None,
+        memory_manager: "SharedMemoryManager | None" = None,
+    ) -> ToolCatalog:
         """Get singleton instance."""
         if cls._instance is None:
-            cls._instance = cls(registry)
+            cls._instance = cls(registry, memory_manager=memory_manager)
+        elif memory_manager is not None:
+            cls._instance.set_memory_manager(memory_manager)
         return cls._instance
 
     @classmethod
     def reset_instance(cls) -> None:
         """Reset singleton (for testing)."""
         cls._instance = None
+
+    def set_memory_manager(self, memory_manager: "SharedMemoryManager | None") -> None:
+        """Attach a shared memory manager for tool result caching."""
+        self._memory_manager = memory_manager
+        if memory_manager:
+            self._logger.debug("Tool catalog memory manager attached")
 
     async def refresh(self) -> int:
         """
@@ -366,6 +517,7 @@ class ToolCatalog:
         """Internal refresh implementation."""
         self._tools.clear()
         self._tool_to_server.clear()
+        self._tool_metadata.clear()
 
         all_tools = self._registry.get_all_tools()
 
@@ -380,6 +532,9 @@ class ToolCatalog:
 
         # Update refresh timestamp
         self._last_refresh = datetime.utcnow()
+
+        # Apply manifest overrides (tier/risk/TTL)
+        await self._refresh_manifest_overrides()
 
         # Trigger refresh callbacks
         await self._trigger_event("refresh", {"tool_count": len(self._tools)})
@@ -638,6 +793,100 @@ class ToolCatalog:
             self._tool_callbacks[event] = []
         self._tool_callbacks[event].append(callback)
 
+    async def _refresh_manifest_overrides(self) -> None:
+        """Load tier/risk/TTL overrides from server manifests."""
+        if not _manifest_overrides_enabled():
+            self._logger.debug(
+                "Manifest overrides disabled",
+                env="COORDINATOR_USE_MANIFEST_OVERRIDES",
+            )
+            return
+
+        for server_id in self._registry.list_connected():
+            client = self._registry.get_client(server_id)
+            if not client or not client.resources:
+                continue
+
+            if "server://manifest" not in client.resources:
+                continue
+
+            try:
+                raw = await client.read_resource("server://manifest")
+                if not raw:
+                    continue
+                manifest = json.loads(raw) if isinstance(raw, str) else raw
+            except Exception as exc:
+                self._logger.warning(
+                    "Failed to read manifest",
+                    server_id=server_id,
+                    error=str(exc),
+                )
+                continue
+
+            tools = manifest.get("tools", [])
+            if not isinstance(tools, list):
+                continue
+
+            for tool in tools:
+                if not isinstance(tool, dict):
+                    continue
+                name = tool.get("name")
+                if not name:
+                    continue
+
+                cache_ttl = tool.get("cache_ttl_seconds")
+                if cache_ttl is not None:
+                    try:
+                        cache_ttl = int(cache_ttl)
+                    except (TypeError, ValueError):
+                        cache_ttl = None
+
+                timeouts = tool.get("timeouts") if isinstance(tool.get("timeouts"), dict) else None
+
+                metadata = ToolMetadata(
+                    server_id=server_id,
+                    domain=tool.get("domain"),
+                    read_only=tool.get("read_only"),
+                    idempotent=tool.get("idempotent"),
+                    mutates=tool.get("mutates"),
+                    requires_confirmation=tool.get("requires_confirmation"),
+                    cache_ttl_seconds=cache_ttl,
+                    timeouts=timeouts,
+                )
+
+                self._tool_metadata[name] = metadata
+                self._tool_metadata[f"{server_id}:{name}"] = metadata
+
+                tier_value = tool.get("tier")
+                if tier_value is not None:
+                    tier_info = ToolTier(
+                        tier=int(tier_value),
+                        latency_estimate_ms=int(tool.get("latency_ms", 1000)),
+                        risk_level=str(tool.get("risk", "low")),
+                        requires_confirmation=bool(tool.get("requires_confirmation", False)),
+                    )
+                    TOOL_TIERS[name] = tier_info
+                    TOOL_TIERS[f"{server_id}:{name}"] = tier_info
+
+                aliases = tool.get("aliases") or []
+                if isinstance(aliases, list):
+                    for alias in aliases:
+                        if alias and alias not in TOOL_ALIASES:
+                            TOOL_ALIASES[alias] = name
+
+                if timeouts:
+                    timeout_seconds = timeouts.get("default_seconds") or timeouts.get("timeout_seconds")
+                    if timeout_seconds is not None:
+                        try:
+                            client.config.tool_timeouts[name] = int(timeout_seconds)
+                        except (TypeError, ValueError):
+                            self._logger.debug(
+                                "Invalid manifest timeout value",
+                                tool=name,
+                                server_id=server_id,
+                                timeout_value=timeout_seconds,
+                            )
+
     async def _trigger_event(self, event: str, data: dict[str, Any]) -> None:
         """Trigger callbacks for an event."""
         callbacks = self._tool_callbacks.get(event, [])
@@ -719,6 +968,100 @@ class ToolCatalog:
 
         return all_stats
 
+    def get_tool_metadata(self, tool_name: str) -> ToolMetadata | None:
+        """Get tool metadata sourced from manifests."""
+        if tool_name in self._tool_metadata:
+            return self._tool_metadata[tool_name]
+        return self._tool_metadata.get(_tier_key(tool_name))
+
+    def _tool_matches_domain(
+        self,
+        tool_name: str,
+        tool_def: ToolDefinition,
+        domain: str,
+    ) -> bool:
+        domain_lower = domain.lower()
+        metadata = self._resolve_metadata_for_tool(tool_name, tool_def)
+        if metadata and metadata.domain:
+            return metadata.domain.lower() == domain_lower
+
+        prefixes = DOMAIN_PREFIXES.get(domain_lower, [])
+        if prefixes:
+            return any(
+                tool_name.startswith(prefix) or tool_def.name.startswith(prefix)
+                for prefix in prefixes
+            )
+
+        return tool_def.name.startswith(f"oci_{domain_lower}_")
+
+    def _resolve_metadata_for_tool(
+        self,
+        tool_name: str,
+        tool_def: ToolDefinition | None = None,
+    ) -> ToolMetadata | None:
+        candidates: list[str] = []
+        if tool_def:
+            candidates.append(f"{tool_def.server_id}:{tool_def.name}")
+            candidates.append(tool_def.name)
+        candidates.append(tool_name)
+
+        for candidate in candidates:
+            metadata = self.get_tool_metadata(candidate)
+            if metadata:
+                return metadata
+        return None
+
+    def _hash_arguments(self, arguments: dict[str, Any]) -> str:
+        payload = json.dumps(
+            arguments or {},
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def _tool_cache_context(self, tool_def: ToolDefinition) -> dict[str, Any]:
+        server_info = self._registry._servers.get(tool_def.server_id)
+        if not server_info:
+            return {}
+
+        env = server_info.config.env or {}
+        context = {
+            key: value
+            for key in CACHE_CONTEXT_ENV_KEYS
+            if (value := env.get(key))
+        }
+
+        if server_info.config.url:
+            context["server_url"] = server_info.config.url
+
+        return context
+
+    def _tool_cache_key(self, tool_def: ToolDefinition) -> str:
+        context = self._tool_cache_context(tool_def)
+        if not context:
+            return f"{tool_def.server_id}:{tool_def.name}"
+        return f"{tool_def.server_id}:{tool_def.name}:{self._hash_arguments(context)}"
+
+    def _cache_ttl_seconds(self, metadata: ToolMetadata | None) -> int | None:
+        if not metadata or metadata.cache_ttl_seconds is None:
+            return None
+
+        ttl = int(metadata.cache_ttl_seconds)
+        if ttl <= 0:
+            return None
+
+        if metadata.mutates is True or metadata.requires_confirmation is True:
+            return None
+
+        if metadata.mutates is False:
+            return ttl
+
+        if metadata.read_only is True or metadata.idempotent is True:
+            return ttl
+
+        return None
+
     def get_tool(self, tool_name: str) -> ToolDefinition | None:
         """Get a tool definition by name.
 
@@ -757,26 +1100,18 @@ class ToolCatalog:
     def get_tools_for_domain(self, domain: str) -> list[ToolDefinition]:
         """Get all tools for a specific domain.
 
-        Uses DOMAIN_PREFIXES to match tools by domain.
-
         Args:
             domain: Domain name (database, infrastructure, finops, etc.)
 
         Returns:
             List of tools matching the domain
         """
-        prefixes = DOMAIN_PREFIXES.get(domain.lower(), [])
-        if not prefixes:
-            self._logger.warning("Unknown domain", domain=domain)
-            return []
-
         matching_tools = []
         for name, tool_def in self._tools.items():
-            # Check if tool matches any prefix for this domain
-            for prefix in prefixes:
-                if name.startswith(prefix) or name == prefix:
-                    matching_tools.append(tool_def)
-                    break
+            if ":" in name:
+                continue
+            if self._tool_matches_domain(name, tool_def, domain):
+                matching_tools.append(tool_def)
 
         self._logger.debug(
             "Tools for domain",
@@ -784,6 +1119,30 @@ class ToolCatalog:
             count=len(matching_tools),
         )
         return matching_tools
+
+    def get_tool_domain(self, tool_name: str) -> str | None:
+        """Resolve a tool's domain using manifest metadata or naming."""
+        tool_def = self.get_tool(tool_name)
+        if not tool_def:
+            return None
+
+        metadata = self._resolve_metadata_for_tool(tool_def.name, tool_def)
+        if metadata and metadata.domain:
+            return metadata.domain
+
+        for domain, prefixes in DOMAIN_PREFIXES.items():
+            if any(
+                tool_def.name.startswith(prefix) or tool_name.startswith(prefix)
+                for prefix in prefixes
+            ):
+                return domain
+
+        if tool_def.name.startswith("oci_"):
+            parts = tool_def.name.split("_")
+            if len(parts) >= 3:
+                return parts[1]
+
+        return None
 
     def resolve_alias(self, tool_name: str) -> str:
         """Resolve a tool alias to its canonical name.
@@ -844,7 +1203,7 @@ class ToolCatalog:
                     continue
 
             if domain:
-                if domain.lower() not in name.lower():
+                if not self._tool_matches_domain(name, tool_def, domain):
                     continue
 
             # Get tier info
@@ -886,14 +1245,13 @@ class ToolCatalog:
         """
         domains: dict[str, list[str]] = {}
 
-        for name in self._tools:
-            # Extract domain from tool name (e.g., oci_compute_list -> compute)
-            parts = name.replace("oci_", "").split("_")
-            if parts:
-                domain = parts[0]
-                if domain not in domains:
-                    domains[domain] = []
-                domains[domain].append(name)
+        for name, tool_def in self._tools.items():
+            if ":" in name:
+                continue
+            domain = self.get_tool_domain(name)
+            if not domain:
+                continue
+            domains.setdefault(domain, []).append(name)
 
         return domains
 
@@ -939,26 +1297,81 @@ class ToolCatalog:
                 error=f"Tool not found: {tool_name}",
             )
 
+        cache_ttl_seconds = None
+        cache_key = None
+        args_hash = None
+
+        if self._memory_manager:
+            metadata = self._resolve_metadata_for_tool(tool_name, tool_def)
+            cache_ttl_seconds = self._cache_ttl_seconds(metadata)
+            if cache_ttl_seconds:
+                cache_key = self._tool_cache_key(tool_def)
+                args_hash = self._hash_arguments(arguments or {})
+                try:
+                    cached_result = await self._memory_manager.get_tool_result(
+                        cache_key, args_hash
+                    )
+                except Exception as exc:
+                    self._logger.warning(
+                        "Tool cache read failed",
+                        tool=tool_name,
+                        error=str(exc),
+                    )
+                else:
+                    if cached_result is not None:
+                        duration_ms = int((time.time() - start_time) * 1000)
+                        self._track_usage(tool_name, True, duration_ms)
+                        await self._trigger_event("tool_called", {
+                            "tool": tool_name,
+                            "success": True,
+                            "duration_ms": duration_ms,
+                            "cached": True,
+                        })
+                        return ToolCallResult(
+                            tool_name=tool_name,
+                            success=True,
+                            result=cached_result,
+                            duration_ms=duration_ms,
+                        )
+
         # ─────────────────────────────────────────────────────────────────────
         # Bulkhead Acquisition
         # ─────────────────────────────────────────────────────────────────────
         # Acquire bulkhead slot for resource isolation
+        # Timeout reduced from 30s to 10s - fail fast, don't cascade delays
         bulkhead_handle = None
+        bulkhead_skipped = False
         if self._bulkhead:
             partition = self._bulkhead.get_partition_for_tool(tool_name)
             try:
-                bulkhead_handle = await self._bulkhead.acquire(partition, timeout=30.0)
+                bulkhead_handle = await self._bulkhead.acquire(partition, timeout=10.0)
             except asyncio.TimeoutError:
-                self._logger.warning(
-                    "Bulkhead timeout",
-                    tool=tool_name,
-                    partition=partition.value,
-                )
-                return ToolCallResult(
-                    tool_name=tool_name,
-                    success=False,
-                    error=f"Resource pool {partition.value} exhausted (bulkhead timeout)",
-                )
+                # Check if this is a read-only operation (list, get, search, etc.)
+                # Read-only ops can proceed without isolation as a graceful degradation
+                read_only_prefixes = ("list_", "get_", "search_", "analyze_", "describe_")
+                is_read_only = any(
+                    tool_name.split("_", 2)[-1].startswith(prefix)
+                    for prefix in read_only_prefixes
+                ) or tool_name.endswith("_list") or "_get_" in tool_name
+
+                if is_read_only:
+                    self._logger.warning(
+                        "Bulkhead timeout, proceeding without isolation (read-only)",
+                        tool=tool_name,
+                        partition=partition.value,
+                    )
+                    bulkhead_skipped = True
+                else:
+                    self._logger.warning(
+                        "Bulkhead timeout",
+                        tool=tool_name,
+                        partition=partition.value,
+                    )
+                    return ToolCallResult(
+                        tool_name=tool_name,
+                        success=False,
+                        error=f"Resource pool {partition.value} exhausted (bulkhead timeout)",
+                    )
 
         # ─────────────────────────────────────────────────────────────────────
         # Circuit Breaker Check
@@ -1074,6 +1487,25 @@ class ToolCatalog:
                 "success": True,
                 "duration_ms": duration_ms,
             })
+            if (
+                cache_ttl_seconds
+                and self._memory_manager
+                and cache_key
+                and args_hash
+            ):
+                try:
+                    await self._memory_manager.set_tool_result(
+                        cache_key,
+                        args_hash,
+                        result.result,
+                        ttl=timedelta(seconds=cache_ttl_seconds),
+                    )
+                except Exception as exc:
+                    self._logger.warning(
+                        "Tool cache write failed",
+                        tool=tool_name,
+                        error=str(exc),
+                    )
         else:
             await self._trigger_event("tool_error", {
                 "tool": tool_name,

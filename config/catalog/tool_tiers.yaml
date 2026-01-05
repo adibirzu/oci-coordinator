@@ -1,0 +1,770 @@
+{
+  "analyze_cpu_usage": {
+    "latency_estimate_ms": 2000,
+    "requires_confirmation": false,
+    "risk_level": "low",
+    "tier": 3
+  },
+  "analyze_io_usage": {
+    "latency_estimate_ms": 2000,
+    "requires_confirmation": false,
+    "risk_level": "low",
+    "tier": 3
+  },
+  "analyze_memory_usage": {
+    "latency_estimate_ms": 2000,
+    "requires_confirmation": false,
+    "risk_level": "low",
+    "tier": 3
+  },
+  "analyze_wait_events": {
+    "latency_estimate_ms": 2000,
+    "requires_confirmation": false,
+    "risk_level": "low",
+    "tier": 3
+  },
+  "append_feedback": {
+    "latency_estimate_ms": 50,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 1
+  },
+  "compare_awr_periods": {
+    "latency_estimate_ms": 5000,
+    "requires_confirmation": false,
+    "risk_level": "low",
+    "tier": 3
+  },
+  "database_status": {
+    "latency_estimate_ms": 500,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 2
+  },
+  "execute_sql": {
+    "latency_estimate_ms": 5000,
+    "requires_confirmation": false,
+    "risk_level": "medium",
+    "tier": 3
+  },
+  "get_blocking_sessions": {
+    "latency_estimate_ms": 2000,
+    "requires_confirmation": false,
+    "risk_level": "low",
+    "tier": 3
+  },
+  "get_feedback": {
+    "latency_estimate_ms": 50,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 1
+  },
+  "get_fleet_summary": {
+    "latency_estimate_ms": 800,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 2
+  },
+  "get_instance_metrics": {
+    "latency_estimate_ms": 2000,
+    "requires_confirmation": false,
+    "risk_level": "low",
+    "tier": 3
+  },
+  "get_schema_info": {
+    "latency_estimate_ms": 1000,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 2
+  },
+  "get_sql_plan": {
+    "latency_estimate_ms": 600,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 2
+  },
+  "get_sql_statistics": {
+    "latency_estimate_ms": 2000,
+    "requires_confirmation": false,
+    "risk_level": "low",
+    "tier": 3
+  },
+  "list_awr_snapshots": {
+    "latency_estimate_ms": 600,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 2
+  },
+  "list_connections": {
+    "latency_estimate_ms": 500,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 2
+  },
+  "list_database_insights": {
+    "latency_estimate_ms": 600,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 2
+  },
+  "list_instances": {
+    "latency_estimate_ms": 500,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 2
+  },
+  "list_tablespaces": {
+    "latency_estimate_ms": 500,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 2
+  },
+  "list_users": {
+    "latency_estimate_ms": 500,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 2
+  },
+  "oci_compute_get_instance": {
+    "latency_estimate_ms": 400,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 2
+  },
+  "oci_compute_list_instances": {
+    "latency_estimate_ms": 500,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 2
+  },
+  "oci_compute_restart_instance": {
+    "latency_estimate_ms": 10000,
+    "requires_confirmation": true,
+    "risk_level": "medium",
+    "tier": 4
+  },
+  "oci_compute_start_instance": {
+    "latency_estimate_ms": 10000,
+    "requires_confirmation": true,
+    "risk_level": "medium",
+    "tier": 4
+  },
+  "oci_compute_stop_instance": {
+    "latency_estimate_ms": 10000,
+    "requires_confirmation": true,
+    "risk_level": "high",
+    "tier": 4
+  },
+  "oci_cost_budget_status": {
+    "latency_estimate_ms": 600,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 2
+  },
+  "oci_cost_by_compartment": {
+    "latency_estimate_ms": 800,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 2
+  },
+  "oci_cost_by_service": {
+    "latency_estimate_ms": 800,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 2
+  },
+  "oci_cost_by_tag": {
+    "latency_estimate_ms": 800,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 2
+  },
+  "oci_cost_detect_anomalies": {
+    "latency_estimate_ms": 3000,
+    "requires_confirmation": false,
+    "risk_level": "low",
+    "tier": 3
+  },
+  "oci_cost_focus_health": {
+    "latency_estimate_ms": 3000,
+    "requires_confirmation": false,
+    "risk_level": "low",
+    "tier": 3
+  },
+  "oci_cost_forecast_credits": {
+    "latency_estimate_ms": 800,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 2
+  },
+  "oci_cost_get_summary": {
+    "latency_estimate_ms": 800,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 2
+  },
+  "oci_cost_monthly_trend": {
+    "latency_estimate_ms": 800,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 2
+  },
+  "oci_cost_object_storage": {
+    "latency_estimate_ms": 800,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 2
+  },
+  "oci_cost_ping": {
+    "latency_estimate_ms": 50,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 1
+  },
+  "oci_cost_schedules": {
+    "latency_estimate_ms": 600,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 2
+  },
+  "oci_cost_service_drilldown": {
+    "latency_estimate_ms": 1000,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 2
+  },
+  "oci_cost_spikes": {
+    "latency_estimate_ms": 2000,
+    "requires_confirmation": false,
+    "risk_level": "low",
+    "tier": 3
+  },
+  "oci_cost_templates": {
+    "latency_estimate_ms": 50,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 1
+  },
+  "oci_cost_unit_cost": {
+    "latency_estimate_ms": 800,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 2
+  },
+  "oci_database_get_autonomous": {
+    "latency_estimate_ms": 400,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 2
+  },
+  "oci_database_get_awr_report": {
+    "latency_estimate_ms": 5000,
+    "requires_confirmation": false,
+    "risk_level": "low",
+    "tier": 3
+  },
+  "oci_database_list_autonomous": {
+    "latency_estimate_ms": 500,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 2
+  },
+  "oci_database_list_db_systems": {
+    "latency_estimate_ms": 500,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 2
+  },
+  "oci_database_list_mysql": {
+    "latency_estimate_ms": 500,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 2
+  },
+  "oci_database_scale": {
+    "latency_estimate_ms": 15000,
+    "requires_confirmation": true,
+    "risk_level": "high",
+    "tier": 4
+  },
+  "oci_dbmgmt_get_awr_report": {
+    "latency_estimate_ms": 5000,
+    "requires_confirmation": false,
+    "risk_level": "low",
+    "tier": 3
+  },
+  "oci_dbmgmt_get_awr_report_auto": {
+    "latency_estimate_ms": 5000,
+    "requires_confirmation": false,
+    "risk_level": "low",
+    "tier": 3
+  },
+  "oci_dbmgmt_get_database": {
+    "latency_estimate_ms": 600,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 2
+  },
+  "oci_dbmgmt_get_fleet_health": {
+    "latency_estimate_ms": 1500,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 2
+  },
+  "oci_dbmgmt_get_metrics": {
+    "latency_estimate_ms": 1000,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 2
+  },
+  "oci_dbmgmt_get_top_sql": {
+    "latency_estimate_ms": 2000,
+    "requires_confirmation": false,
+    "risk_level": "low",
+    "tier": 3
+  },
+  "oci_dbmgmt_get_wait_events": {
+    "latency_estimate_ms": 2000,
+    "requires_confirmation": false,
+    "risk_level": "low",
+    "tier": 3
+  },
+  "oci_dbmgmt_list_awr_snapshots": {
+    "latency_estimate_ms": 800,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 2
+  },
+  "oci_dbmgmt_list_databases": {
+    "latency_estimate_ms": 1000,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 2
+  },
+  "oci_dbmgmt_search_databases": {
+    "latency_estimate_ms": 800,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 2
+  },
+  "oci_get_cache_stats": {
+    "latency_estimate_ms": 50,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 1
+  },
+  "oci_get_capabilities": {
+    "latency_estimate_ms": 50,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 1
+  },
+  "oci_list_domains": {
+    "latency_estimate_ms": 50,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 1
+  },
+  "oci_network_analyze_security": {
+    "latency_estimate_ms": 2000,
+    "requires_confirmation": false,
+    "risk_level": "low",
+    "tier": 3
+  },
+  "oci_network_get_vcn": {
+    "latency_estimate_ms": 400,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 2
+  },
+  "oci_network_list_security_lists": {
+    "latency_estimate_ms": 500,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 2
+  },
+  "oci_network_list_subnets": {
+    "latency_estimate_ms": 500,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 2
+  },
+  "oci_network_list_vcns": {
+    "latency_estimate_ms": 500,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 2
+  },
+  "oci_observability_execute_log_query": {
+    "latency_estimate_ms": 3000,
+    "requires_confirmation": false,
+    "risk_level": "low",
+    "tier": 3
+  },
+  "oci_observability_get_alarm_history": {
+    "latency_estimate_ms": 600,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 2
+  },
+  "oci_observability_get_instance_metrics": {
+    "latency_estimate_ms": 2000,
+    "requires_confirmation": false,
+    "risk_level": "low",
+    "tier": 3
+  },
+  "oci_observability_list_alarms": {
+    "latency_estimate_ms": 500,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 2
+  },
+  "oci_observability_list_log_sources": {
+    "latency_estimate_ms": 500,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 2
+  },
+  "oci_observability_overview": {
+    "latency_estimate_ms": 3000,
+    "requires_confirmation": false,
+    "risk_level": "low",
+    "tier": 3
+  },
+  "oci_ping": {
+    "latency_estimate_ms": 50,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 1
+  },
+  "oci_search_tools": {
+    "latency_estimate_ms": 100,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 1
+  },
+  "oci_security_accessgov_get_instance": {
+    "latency_estimate_ms": 400,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 2
+  },
+  "oci_security_accessgov_list_instances": {
+    "latency_estimate_ms": 500,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 2
+  },
+  "oci_security_audit": {
+    "latency_estimate_ms": 5000,
+    "requires_confirmation": false,
+    "risk_level": "low",
+    "tier": 3
+  },
+  "oci_security_audit_get_configuration": {
+    "latency_estimate_ms": 400,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 2
+  },
+  "oci_security_audit_list_events": {
+    "latency_estimate_ms": 800,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 2
+  },
+  "oci_security_bastion_get": {
+    "latency_estimate_ms": 400,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 2
+  },
+  "oci_security_bastion_list": {
+    "latency_estimate_ms": 500,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 2
+  },
+  "oci_security_bastion_list_sessions": {
+    "latency_estimate_ms": 500,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 2
+  },
+  "oci_security_bastion_terminate_session": {
+    "latency_estimate_ms": 3000,
+    "requires_confirmation": true,
+    "risk_level": "high",
+    "tier": 4
+  },
+  "oci_security_cloudguard_get_problem": {
+    "latency_estimate_ms": 400,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 2
+  },
+  "oci_security_cloudguard_get_security_score": {
+    "latency_estimate_ms": 600,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 2
+  },
+  "oci_security_cloudguard_list_detectors": {
+    "latency_estimate_ms": 500,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 2
+  },
+  "oci_security_cloudguard_list_problems": {
+    "latency_estimate_ms": 600,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 2
+  },
+  "oci_security_cloudguard_list_recommendations": {
+    "latency_estimate_ms": 600,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 2
+  },
+  "oci_security_cloudguard_list_responders": {
+    "latency_estimate_ms": 500,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 2
+  },
+  "oci_security_cloudguard_remediate_problem": {
+    "latency_estimate_ms": 5000,
+    "requires_confirmation": true,
+    "risk_level": "medium",
+    "tier": 4
+  },
+  "oci_security_datasafe_get_assessment": {
+    "latency_estimate_ms": 400,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 2
+  },
+  "oci_security_datasafe_list_assessments": {
+    "latency_estimate_ms": 600,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 2
+  },
+  "oci_security_datasafe_list_findings": {
+    "latency_estimate_ms": 600,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 2
+  },
+  "oci_security_datasafe_list_targets": {
+    "latency_estimate_ms": 500,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 2
+  },
+  "oci_security_get_user": {
+    "latency_estimate_ms": 400,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 2
+  },
+  "oci_security_health": {
+    "latency_estimate_ms": 100,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 1
+  },
+  "oci_security_kms_get_key": {
+    "latency_estimate_ms": 400,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 2
+  },
+  "oci_security_kms_get_vault": {
+    "latency_estimate_ms": 400,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 2
+  },
+  "oci_security_kms_list_keys": {
+    "latency_estimate_ms": 500,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 2
+  },
+  "oci_security_kms_list_vaults": {
+    "latency_estimate_ms": 500,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 2
+  },
+  "oci_security_list_cloud_guard_problems": {
+    "latency_estimate_ms": 600,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 2
+  },
+  "oci_security_list_groups": {
+    "latency_estimate_ms": 500,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 2
+  },
+  "oci_security_list_policies": {
+    "latency_estimate_ms": 500,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 2
+  },
+  "oci_security_list_users": {
+    "latency_estimate_ms": 500,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 2
+  },
+  "oci_security_ping": {
+    "latency_estimate_ms": 50,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 1
+  },
+  "oci_security_skill_audit_digest": {
+    "latency_estimate_ms": 3000,
+    "requires_confirmation": false,
+    "risk_level": "low",
+    "tier": 3
+  },
+  "oci_security_skill_posture_summary": {
+    "latency_estimate_ms": 5000,
+    "requires_confirmation": false,
+    "risk_level": "low",
+    "tier": 3
+  },
+  "oci_security_skill_vulnerability_overview": {
+    "latency_estimate_ms": 5000,
+    "requires_confirmation": false,
+    "risk_level": "low",
+    "tier": 3
+  },
+  "oci_security_vss_get_host_scan": {
+    "latency_estimate_ms": 400,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 2
+  },
+  "oci_security_vss_list_container_scans": {
+    "latency_estimate_ms": 600,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 2
+  },
+  "oci_security_vss_list_host_scans": {
+    "latency_estimate_ms": 600,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 2
+  },
+  "oci_security_vss_list_vulnerabilities": {
+    "latency_estimate_ms": 800,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 2
+  },
+  "oci_security_waf_get_firewall": {
+    "latency_estimate_ms": 400,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 2
+  },
+  "oci_security_waf_get_policy": {
+    "latency_estimate_ms": 400,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 2
+  },
+  "oci_security_waf_list_firewalls": {
+    "latency_estimate_ms": 500,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 2
+  },
+  "oci_security_waf_list_policies": {
+    "latency_estimate_ms": 500,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 2
+  },
+  "oci_security_zones_get": {
+    "latency_estimate_ms": 400,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 2
+  },
+  "oci_security_zones_list": {
+    "latency_estimate_ms": 500,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 2
+  },
+  "oci_security_zones_list_policies": {
+    "latency_estimate_ms": 500,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 2
+  },
+  "oci_skill_troubleshoot_instance": {
+    "latency_estimate_ms": 10000,
+    "requires_confirmation": false,
+    "risk_level": "low",
+    "tier": 3
+  },
+  "query_warehouse_standard": {
+    "latency_estimate_ms": 5000,
+    "requires_confirmation": false,
+    "risk_level": "low",
+    "tier": 3
+  },
+  "restart_instance": {
+    "latency_estimate_ms": 10000,
+    "requires_confirmation": true,
+    "risk_level": "medium",
+    "tier": 4
+  },
+  "search_databases": {
+    "latency_estimate_ms": 600,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 2
+  },
+  "set_feedback": {
+    "latency_estimate_ms": 50,
+    "requires_confirmation": false,
+    "risk_level": "none",
+    "tier": 1
+  },
+  "sqlwatch_analyze_regression": {
+    "latency_estimate_ms": 3000,
+    "requires_confirmation": false,
+    "risk_level": "low",
+    "tier": 3
+  },
+  "sqlwatch_get_plan_history": {
+    "latency_estimate_ms": 2000,
+    "requires_confirmation": false,
+    "risk_level": "low",
+    "tier": 3
+  },
+  "start_instance": {
+    "latency_estimate_ms": 10000,
+    "requires_confirmation": true,
+    "risk_level": "medium",
+    "tier": 4
+  },
+  "stop_instance": {
+    "latency_estimate_ms": 10000,
+    "requires_confirmation": true,
+    "risk_level": "high",
+    "tier": 4
+  }
+}

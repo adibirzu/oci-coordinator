@@ -32,21 +32,24 @@ class BulkheadPartition(str, Enum):
     INFRASTRUCTURE = "infrastructure"  # Max 5 concurrent (compute, network)
     COST = "cost"                   # Max 2 concurrent (Usage API is slow)
     SECURITY = "security"           # Max 3 concurrent (Cloud Guard, VSS)
-    DISCOVERY = "discovery"         # Max 2 concurrent (resource discovery)
+    DISCOVERY = "discovery"         # Max 6 concurrent (resource discovery)
     LLM = "llm"                     # Max 5 concurrent (LLM calls)
     DEFAULT = "default"             # Max 10 concurrent (catch-all)
 
 
 # Default limits per partition
-# Increased limits for database and cost to handle parallel workflows
+# Tuned for typical concurrent request patterns:
+# - Database operations are most common, need headroom for parallel workflows
+# - Discovery operations do bulk listing and need high concurrency
+# - LLM calls are expensive and should be bounded
 DEFAULT_PARTITION_LIMITS = {
-    BulkheadPartition.DATABASE: 5,      # Increased from 3 for parallel operations
-    BulkheadPartition.INFRASTRUCTURE: 5,
-    BulkheadPartition.COST: 4,          # Increased from 2 for concurrent cost queries
-    BulkheadPartition.SECURITY: 3,
-    BulkheadPartition.DISCOVERY: 3,     # Increased from 2
-    BulkheadPartition.LLM: 5,
-    BulkheadPartition.DEFAULT: 10,
+    BulkheadPartition.DATABASE: 10,     # Increased from 5: DB workflows use 3+ tools each
+    BulkheadPartition.INFRASTRUCTURE: 8,  # Increased from 5 for parallel compute/network
+    BulkheadPartition.COST: 6,          # Increased from 4: cost queries are slow but parallelizable
+    BulkheadPartition.SECURITY: 5,      # Increased from 3 for concurrent Cloud Guard queries
+    BulkheadPartition.DISCOVERY: 10,    # Increased from 6 for parallel list/search operations
+    BulkheadPartition.LLM: 5,           # Keep bounded - LLM calls are expensive
+    BulkheadPartition.DEFAULT: 15,      # Increased from 10 for catch-all
 }
 
 # Map tool prefixes to partitions

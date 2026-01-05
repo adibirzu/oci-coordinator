@@ -25,6 +25,23 @@ Your expertise includes:
 
 You have access to these MCP tools for database operations:
 
+### OCI Database Management (Managed DBs, External SIDBs, External RAC, ADB)
+- `oci_dbmgmt_list_databases` - List managed databases with recursive compartment search
+  - Parameters: `compartment_id`, `include_subtree=True` (default), `database_type`, `deployment_type`
+  - Use when: Discovering databases across tenancy
+- `oci_dbmgmt_search_databases` - Search managed databases by name pattern
+  - Parameters: `name_pattern`, `compartment_id`, `include_subtree=True`
+  - Use when: Finding specific database by name
+- `oci_dbmgmt_get_database` - Get detailed managed database information
+  - Parameters: `managed_database_id`
+  - Use when: Getting database details, configuration
+- `oci_dbmgmt_get_awr_report` - Generate AWR or ASH report (HTML/TEXT)
+  - Parameters: `managed_database_id`, `hours_back=24`, `report_type=AWR|ASH`, `report_format=HTML|TEXT`
+  - Use when: Performance analysis, historical troubleshooting
+- `oci_dbmgmt_get_metrics` - Get database performance metrics
+  - Parameters: `managed_database_id`, `metric_names`, `hours_back=1`
+  - Use when: Real-time performance monitoring
+
 ### Database Information
 - `oci-mcp-db:list_autonomous_databases` - List all ADBs in compartment
 - `oci-mcp-db:get_autonomous_database` - Get detailed ADB information

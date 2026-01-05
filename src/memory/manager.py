@@ -3,7 +3,7 @@ Shared Memory Manager for OCI Coordinator.
 
 Provides tiered storage architecture:
 - Redis: Hot cache for session state, tool results (TTL: 1 hour)
-- OCI ATP: Persistent storage for conversation history, audit logs
+- Neo4j: Persistent storage for conversation history, audit logs (optional)
 - LangGraph: Graph state checkpoints (managed separately)
 """
 
@@ -131,202 +131,6 @@ class RedisMemoryStore(MemoryStore):
     async def close(self) -> None:
         """Close Redis connection."""
         await self.client.close()
-
-
-class ATPMemoryStore(MemoryStore):
-    """
-    OCI ATP-based persistent storage for long-term memory.
-
-    Used for:
-    - Conversation history
-    - Agent memory (learned patterns)
-    - Audit logs
-    - Agent registry
-
-    Requires tables: agent_memory, conversation_history, agent_audit_log
-    """
-
-    def __init__(self, connection_string: str | None = None):
-        """
-        Initialize ATP connection pool.
-
-        Args:
-            connection_string: Oracle connection string or TNS alias
-        """
-        self._connection_string = (
-            connection_string
-            or os.getenv("ATP_CONNECTION_STRING")
-            or os.getenv("ATP_TNS_NAME")
-        )
-        self._wallet_dir = (
-            os.getenv("ATP_WALLET_DIR")
-            or os.getenv("ATP_WALLET_LOCATION")
-        )
-        self._wallet_password = os.getenv("ATP_WALLET_PASSWORD")
-        self._user = os.getenv("ATP_USER", "ADMIN")
-        self._password = os.getenv("ATP_PASSWORD")
-        self._pool = None
-        self._logger = logger.bind(store="atp")
-
-    async def _get_pool(self) -> Any:
-        """Get or create connection pool."""
-        if self._pool is None:
-            try:
-                import oracledb
-
-                if not self._connection_string:
-                    raise ValueError("ATP connection string or TNS name not set")
-
-                use_thick = os.getenv("ATP_THICK_MODE", "false").lower() == "true"
-                if use_thick and self._wallet_dir:
-                    oracledb.init_oracle_client(config_dir=self._wallet_dir)
-
-                kwargs: dict[str, Any] = {}
-                if self._wallet_dir:
-                    kwargs["config_dir"] = self._wallet_dir
-                    if self._wallet_password:
-                        kwargs["wallet_password"] = self._wallet_password
-
-                # Note: create_pool_async is NOT a coroutine - it returns the pool directly
-                # The "async" refers to the pool type (async-capable), not the creation method
-                self._pool = oracledb.create_pool_async(
-                    user=self._user,
-                    password=self._password,
-                    dsn=self._connection_string,
-                    min=2,
-                    max=10,
-                    **kwargs,
-                )
-                self._logger.info("ATP connection pool created")
-            except Exception as e:
-                self._logger.error("Failed to create ATP pool", error=str(e))
-                raise
-        return self._pool
-
-    async def get(self, key: str) -> Any | None:
-        """Get value from ATP agent_memory table."""
-        try:
-            pool = await self._get_pool()
-            async with pool.acquire() as conn, conn.cursor() as cursor:
-                await cursor.execute(
-                    "SELECT value FROM agent_memory WHERE key = :key",
-                    {"key": key},
-                )
-                row = await cursor.fetchone()
-                if row:
-                    # Handle Oracle CLOB - async LOB requires await on .read()
-                    value_data = row[0]
-                    if hasattr(value_data, "read"):
-                        value_data = await value_data.read()
-                    return json.loads(value_data)
-                return None
-        except Exception as e:
-            self._logger.error("ATP get failed", key=key, error=str(e))
-            return None
-
-    async def set(
-        self, key: str, value: Any, ttl: timedelta | None = None
-    ) -> None:
-        """Set value in ATP using MERGE (upsert)."""
-        try:
-            pool = await self._get_pool()
-            serialized = json.dumps(value, default=str)
-            ttl_seconds = int(ttl.total_seconds()) if ttl else None
-
-            async with pool.acquire() as conn:
-                async with conn.cursor() as cursor:
-                    await cursor.execute(
-                        """
-                        MERGE INTO agent_memory t
-                        USING (SELECT :key as key FROM dual) s
-                        ON (t.key = s.key)
-                        WHEN MATCHED THEN
-                            UPDATE SET value = :value, updated_at = SYSTIMESTAMP, ttl_seconds = :ttl
-                        WHEN NOT MATCHED THEN
-                            INSERT (key, value, ttl_seconds)
-                            VALUES (:key, :value, :ttl)
-                        """,
-                        {"key": key, "value": serialized, "ttl": ttl_seconds},
-                    )
-                    await conn.commit()
-        except Exception as e:
-            self._logger.error("ATP set failed", key=key, error=str(e))
-            raise
-
-    async def delete(self, key: str) -> None:
-        """Delete value from ATP."""
-        try:
-            pool = await self._get_pool()
-            async with pool.acquire() as conn, conn.cursor() as cursor:
-                await cursor.execute(
-                    "DELETE FROM agent_memory WHERE key = :key",
-                    {"key": key},
-                )
-                await conn.commit()
-        except Exception as e:
-            self._logger.error("ATP delete failed", key=key, error=str(e))
-            raise
-
-    async def exists(self, key: str) -> bool:
-        """Check if key exists in ATP."""
-        try:
-            pool = await self._get_pool()
-            async with pool.acquire() as conn, conn.cursor() as cursor:
-                await cursor.execute(
-                    "SELECT 1 FROM agent_memory WHERE key = :key",
-                    {"key": key},
-                )
-                row = await cursor.fetchone()
-                return row is not None
-        except Exception as e:
-            self._logger.error("ATP exists check failed", key=key, error=str(e))
-            return False
-
-    async def append_audit_log(
-        self,
-        agent_id: str,
-        action: str,
-        request: dict[str, Any] | None = None,
-        response: dict[str, Any] | None = None,
-        duration_ms: int | None = None,
-        status: str = "success",
-        error_message: str | None = None,
-    ) -> None:
-        """Append entry to audit log."""
-        try:
-            pool = await self._get_pool()
-            async with pool.acquire() as conn:
-                async with conn.cursor() as cursor:
-                    await cursor.execute(
-                        """
-                        INSERT INTO agent_audit_log
-                        (agent_id, action, request, response, duration_ms, status, error_message)
-                        VALUES (:agent_id, :action, :request, :response, :duration_ms, :status, :error_message)
-                        """,
-                        {
-                            "agent_id": agent_id,
-                            "action": action,
-                            "request": json.dumps(request) if request else None,
-                            "response": json.dumps(response) if response else None,
-                            "duration_ms": duration_ms,
-                            "status": status,
-                            "error_message": error_message,
-                        },
-                    )
-                    await conn.commit()
-        except Exception as e:
-            self._logger.error(
-                "Failed to append audit log",
-                agent_id=agent_id,
-                action=action,
-                error=str(e),
-            )
-
-    async def close(self) -> None:
-        """Close ATP connection pool."""
-        if self._pool:
-            await self._pool.close()
-            self._pool = None
 
 
 class Neo4jMemoryStore(MemoryStore):
@@ -459,7 +263,7 @@ class SharedMemoryManager:
 
     Storage Tiers:
     - Cache (Redis): Fast access, TTL-based expiration
-    - Persistent (ATP or Neo4j): Long-term storage, audit trails
+    - Persistent (Neo4j): Long-term storage, audit trails (optional)
 
     Key Patterns:
     - session:{session_id} - Session state
@@ -470,7 +274,7 @@ class SharedMemoryManager:
     Usage:
         memory = SharedMemoryManager(
             redis_url="redis://localhost:6379",
-            atp_connection="user/pass@host:1521/service"
+            neo4j_uri="bolt://localhost:7687"
         )
 
         # Session state (cache only)
@@ -486,7 +290,6 @@ class SharedMemoryManager:
     def __init__(
         self,
         redis_url: str | None = "redis://localhost:6379",
-        atp_connection: str | None = None,
         neo4j_uri: str | None = None,
         use_in_memory: bool = False,
     ):
@@ -495,7 +298,6 @@ class SharedMemoryManager:
 
         Args:
             redis_url: Redis connection URL (None to skip Redis)
-            atp_connection: OCI ATP connection string (None for cache-only)
             neo4j_uri: Neo4j URI (optional persistent backend)
             use_in_memory: Use in-memory store instead of Redis (for testing)
         """
@@ -512,30 +314,27 @@ class SharedMemoryManager:
             self.cache = InMemoryStore()
             self._logger.warning("No cache configured, using in-memory fallback")
 
-        # Initialize persistent store
+        # Initialize persistent store (Neo4j only)
         persistent_backend = os.getenv("MEMORY_PERSISTENT_BACKEND", "").lower()
-        atp_configured = bool(
-            atp_connection
-            or os.getenv("ATP_CONNECTION_STRING")
-            or os.getenv("ATP_TNS_NAME")
-        )
+        disable_persistent = persistent_backend in {"none", "disabled", "off", "false"}
         neo4j_uri = neo4j_uri or os.getenv("NEO4J_URI")
         neo4j_user = os.getenv("NEO4J_USER")
         neo4j_password = os.getenv("NEO4J_PASSWORD")
+        if persistent_backend == "neo4j":
+            neo4j_uri = neo4j_uri or "bolt://localhost:7687"
+            neo4j_user = neo4j_user or "neo4j"
+            neo4j_password = neo4j_password or "neo4j"
         neo4j_configured = bool(neo4j_uri and neo4j_user and neo4j_password)
 
-        if persistent_backend == "neo4j" and neo4j_configured:
-            self.persistent = Neo4jMemoryStore(neo4j_uri, neo4j_user, neo4j_password)
-            self._logger.info("Using Neo4j persistent storage", uri=neo4j_uri)
-        elif atp_configured:
-            self.persistent = ATPMemoryStore(atp_connection)
-            self._logger.info("Using ATP persistent storage")
+        if disable_persistent:
+            self.persistent = None
+            self._logger.info("Persistent storage disabled via MEMORY_PERSISTENT_BACKEND")
         elif neo4j_configured:
             self.persistent = Neo4jMemoryStore(neo4j_uri, neo4j_user, neo4j_password)
             self._logger.info("Using Neo4j persistent storage", uri=neo4j_uri)
         else:
             self.persistent = None
-            self._logger.warning("No persistent storage configured")
+            self._logger.info("No persistent storage configured (cache-only mode)")
 
         # Default TTLs
         self.default_cache_ttl = timedelta(hours=1)
@@ -548,12 +347,34 @@ class SharedMemoryManager:
         if self.persistent:
             await self.persistent.close()
 
-    async def ensure_persistent_schema(self) -> bool:
-        """Ensure persistent storage schema exists (ATP only)."""
-        if isinstance(self.persistent, ATPMemoryStore):
-            from src.memory.atp_config import init_atp_schema
+    async def _disable_persistent(self, operation: str, error: Exception) -> None:
+        """Disable persistent storage after an error to prevent repeated failures."""
+        backend = type(self.persistent).__name__ if self.persistent else "none"
+        self._logger.warning(
+            "Disabling persistent storage after error",
+            operation=operation,
+            backend=backend,
+            error=str(error),
+        )
+        try:
+            if self.persistent:
+                await self.persistent.close()
+        except Exception as close_err:
+            self._logger.debug(
+                "Failed to close persistent storage cleanly",
+                backend=backend,
+                error=str(close_err),
+            )
+        self.persistent = None
 
-            return await init_atp_schema()
+    async def ensure_persistent_schema(self) -> bool:
+        """Ensure persistent storage schema exists.
+
+        Returns:
+            True if schema was initialized, False otherwise.
+        """
+        # No schema initialization needed for current backends
+        # (Redis is schemaless, Neo4j creates nodes dynamically)
         return False
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -622,7 +443,10 @@ class SharedMemoryManager:
 
         # Update persistent
         if self.persistent:
-            await self.persistent.set(f"conversation:{thread_id}", history)
+            try:
+                await self.persistent.set(f"conversation:{thread_id}", history)
+            except Exception as e:
+                await self._disable_persistent("append_conversation", e)
 
     async def get_recent_messages(
         self, thread_id: str, limit: int = 10
@@ -670,14 +494,20 @@ class SharedMemoryManager:
 
         # Update persistent
         if self.persistent:
-            await self.persistent.set(key, value)
+            try:
+                await self.persistent.set(key, value)
+            except Exception as e:
+                await self._disable_persistent("set_agent_memory", e)
 
     async def delete_agent_memory(self, agent_id: str, memory_type: str) -> None:
         """Delete agent-specific memory."""
         key = f"agent:{agent_id}:{memory_type}"
         await self.cache.delete(key)
         if self.persistent:
-            await self.persistent.delete(key)
+            try:
+                await self.persistent.delete(key)
+            except Exception as e:
+                await self._disable_persistent("delete_agent_memory", e)
 
     # ─────────────────────────────────────────────────────────────────────────
     # Tool Result Cache (Cache only - short TTL)
@@ -690,13 +520,18 @@ class SharedMemoryManager:
         return await self.cache.get(f"tool_result:{tool_name}:{args_hash}")
 
     async def set_tool_result(
-        self, tool_name: str, args_hash: str, result: Any
+        self,
+        tool_name: str,
+        args_hash: str,
+        result: Any,
+        ttl: timedelta | None = None,
     ) -> None:
-        """Cache tool result."""
+        """Cache tool result with optional TTL override."""
+        cache_ttl = ttl or self.tool_result_ttl
         await self.cache.set(
             f"tool_result:{tool_name}:{args_hash}",
             result,
-            self.tool_result_ttl,
+            cache_ttl,
         )
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -746,7 +581,10 @@ class SharedMemoryManager:
         key = f"feedback:{scope}"
         await self.cache.set(key, payload, self.default_cache_ttl)
         if self.persistent:
-            await self.persistent.set(key, payload)
+            try:
+                await self.persistent.set(key, payload)
+            except Exception as e:
+                await self._disable_persistent("set_feedback", e)
 
     async def append_feedback(
         self, scope: str, text: str, source: str = "operator"
@@ -758,7 +596,10 @@ class SharedMemoryManager:
         key = f"feedback:{scope}"
         await self.cache.set(key, payload, self.default_cache_ttl)
         if self.persistent:
-            await self.persistent.set(key, payload)
+            try:
+                await self.persistent.set(key, payload)
+            except Exception as e:
+                await self._disable_persistent("append_feedback", e)
 
     # ─────────────────────────────────────────────────────────────────────────
     # Audit Logging (Persistent only)
@@ -775,22 +616,13 @@ class SharedMemoryManager:
         error_message: str | None = None,
     ) -> None:
         """Log action to audit trail."""
-        if self.persistent and isinstance(self.persistent, ATPMemoryStore):
-            await self.persistent.append_audit_log(
-                agent_id=agent_id,
-                action=action,
-                request=request,
-                response=response,
-                duration_ms=duration_ms,
-                status=status,
-                error_message=error_message,
-            )
-        else:
-            # Log to structlog if no persistent storage
-            self._logger.info(
-                "Audit log",
-                agent_id=agent_id,
-                action=action,
-                status=status,
-                duration_ms=duration_ms,
-            )
+        # Log audit events via structlog
+        # (For persistent audit storage, integrate with OCI Logging or external system)
+        self._logger.info(
+            "Audit log",
+            agent_id=agent_id,
+            action=action,
+            status=status,
+            duration_ms=duration_ms,
+            error_message=error_message if status != "success" else None,
+        )

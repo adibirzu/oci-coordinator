@@ -170,15 +170,6 @@ class ErrorAnalysisAgent(BaseAgent, SelfHealingMixin):
     - LLM-powered error pattern analysis recovery
     """
 
-    # MCP tools for error analysis
-    MCP_TOOLS = [
-        "oci_logging_search_logs",
-        "oci_logan_execute_query",
-        "oci_logan_detect_anomalies",
-        "oci_logging_list_log_groups",
-        "oci_logging_get_log",
-    ]
-
     def __init__(
         self,
         memory_manager: "SharedMemoryManager | None" = None,
@@ -241,7 +232,6 @@ class ErrorAnalysisAgent(BaseAgent, SelfHealingMixin):
                 timeout_seconds=300,
             ),
             description="Analyzes OCI logs for errors, detects patterns, and creates admin todos",
-            mcp_tools=cls.MCP_TOOLS,
             mcp_servers=["oci-unified", "database-observatory"],
         )
 

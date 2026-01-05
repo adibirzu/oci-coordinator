@@ -1,5 +1,7 @@
 # Phase 4: Multi-Agent Enhancement Plan
 
+> **Note (2026-01):** ATP persistent memory references in this planning document are historical. ATP has been removed from the codebase; LangGraph now uses MemorySaver exclusively.
+
 **Based on Best Practices From:**
 - Anthropic Engineering: Multi-Agent Research System
 - OCI AI Agent Platform: First Principles

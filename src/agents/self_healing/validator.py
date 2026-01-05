@@ -6,6 +6,10 @@ Uses LLM to validate agent decisions before execution:
 2. Validate parameter completeness and correctness
 3. Detect potential logic errors in reasoning
 4. Suggest alternatives when current plan is flawed
+
+IMPORTANT: This validator uses the actual ToolCatalog to validate tool names
+and suggestions. It does NOT rely on hardcoded tool lists which can become
+stale and cause the LLM to suggest non-existent tools.
 """
 
 from __future__ import annotations
@@ -20,6 +24,7 @@ import structlog
 
 if TYPE_CHECKING:
     from langchain_core.language_models import BaseChatModel
+    from src.mcp.catalog import ToolCatalog
 
 logger = structlog.get_logger(__name__)
 
@@ -145,9 +150,15 @@ TOOL_CAPABILITIES = {
         "requires_auth": True,
     },
     # Security tools
-    "oci_security_list_problems": {
+    "oci_security_cloudguard_list_problems": {
         "capability": "list_security_problems",
-        "domains": ["security"],
+        "domains": ["security", "cloudguard"],
+        "returns": "cloud guard problems",
+        "requires_auth": True,
+    },
+    "oci_security_list_cloud_guard_problems": {
+        "capability": "list_security_problems",
+        "domains": ["security", "cloudguard"],
         "returns": "cloud guard problems",
         "requires_auth": True,
     },
@@ -160,7 +171,10 @@ INTENT_TOOL_MAPPING = {
     "list_instances": ["oci_compute_list_instances"],
     "search_logs": ["oci_logging_search_logs", "oci_logan_execute_query"],
     "cost_summary": ["oci_cost_get_summary"],
-    "security_problems": ["oci_security_list_problems"],
+    "security_problems": [
+        "oci_security_cloudguard_list_problems",
+        "oci_security_list_cloud_guard_problems",
+    ],
 }
 
 
@@ -174,18 +188,59 @@ class LogicValidator:
     - Logic flow validation
     - Alternative suggestion
     - LLM-powered reasoning validation
+
+    IMPORTANT: Uses actual ToolCatalog to validate tool names and prevent
+    the LLM from suggesting non-existent tools.
     """
 
-    def __init__(self, llm: "BaseChatModel | None" = None):
+    def __init__(
+        self,
+        llm: "BaseChatModel | None" = None,
+        tool_catalog: "ToolCatalog | None" = None,
+    ):
         """
         Initialize logic validator.
 
         Args:
             llm: LangChain LLM for complex validation
+            tool_catalog: MCP ToolCatalog for validating tool names
         """
         self.llm = llm
+        self._tool_catalog = tool_catalog
         self._validation_history: list[ValidationResult] = []
         self._logger = logger.bind(component="LogicValidator")
+        self._cached_tool_names: set[str] | None = None
+
+    def _get_available_tool_names(self) -> set[str]:
+        """Get set of actual available tool names from catalog."""
+        if self._cached_tool_names is not None:
+            return self._cached_tool_names
+
+        if self._tool_catalog is None:
+            # Fallback to hardcoded list if no catalog provided
+            self._cached_tool_names = set(TOOL_CAPABILITIES.keys())
+            return self._cached_tool_names
+
+        # Get actual tools from catalog
+        try:
+            tools = self._tool_catalog.list_tools()
+            self._cached_tool_names = {t.name for t in tools}
+            self._logger.debug(
+                "Loaded tool names from catalog",
+                tool_count=len(self._cached_tool_names),
+            )
+        except Exception as e:
+            self._logger.warning(
+                "Failed to load tools from catalog, using fallback",
+                error=str(e),
+            )
+            self._cached_tool_names = set(TOOL_CAPABILITIES.keys())
+
+        return self._cached_tool_names
+
+    def clear_tool_cache(self) -> None:
+        """Clear cached tool names to force refresh on next validation."""
+        self._cached_tool_names = None
 
     async def validate(
         self,
@@ -212,14 +267,32 @@ class LogicValidator:
         """
         issues: list[ValidationIssue] = []
 
-        # 1. Check if tool exists in capabilities
+        # Get actual available tool names from catalog
+        actual_tool_names = self._get_available_tool_names()
+
+        # Use provided available_tools or fall back to catalog
+        effective_available_tools = (
+            set(available_tools) if available_tools else actual_tool_names
+        )
+
+        # 1. Check if tool exists in actual catalog (not just hardcoded list)
+        tool_exists_in_catalog = tool_name in actual_tool_names
         tool_caps = TOOL_CAPABILITIES.get(tool_name)
-        if not tool_caps:
+
+        if not tool_exists_in_catalog and not tool_caps:
+            issues.append(
+                ValidationIssue(
+                    severity=ValidationSeverity.ERROR,
+                    message=f"Tool does not exist: {tool_name}",
+                    suggestion="Check ToolCatalog for available tools",
+                )
+            )
+        elif not tool_exists_in_catalog:
             issues.append(
                 ValidationIssue(
                     severity=ValidationSeverity.WARNING,
-                    message=f"Unknown tool: {tool_name}",
-                    suggestion="Verify tool name is correct",
+                    message=f"Tool {tool_name} not found in MCP catalog",
+                    suggestion="Tool may be unavailable or misspelled",
                 )
             )
 
@@ -233,15 +306,21 @@ class LogicValidator:
         issues.extend(param_issues)
 
         # 4. Check for better alternatives
-        if available_tools and tool_caps:
-            alt_issues = self._check_alternatives(tool_name, available_tools, tool_caps)
+        if effective_available_tools and tool_caps:
+            alt_issues = self._check_alternatives(
+                tool_name, list(effective_available_tools), tool_caps
+            )
             issues.extend(alt_issues)
 
-        # 5. Use LLM for complex validation
+        # 5. Use LLM for complex validation (with actual tool list)
         llm_result = None
         if use_llm and self.llm and user_intent:
             llm_result = await self._validate_with_llm(
-                tool_name, parameters, user_intent, context
+                tool_name,
+                parameters,
+                user_intent,
+                context,
+                effective_available_tools,
             )
             if llm_result:
                 issues.extend(llm_result.issues)
@@ -402,8 +481,32 @@ class LogicValidator:
         parameters: dict[str, Any],
         user_intent: str,
         context: dict[str, Any] | None,
+        available_tools: set[str] | None = None,
     ) -> ValidationResult | None:
-        """Use LLM for complex validation."""
+        """
+        Use LLM for complex validation.
+
+        Args:
+            tool_name: Proposed tool name
+            parameters: Proposed parameters
+            user_intent: Original user intent
+            context: Additional context
+            available_tools: Set of actually available tool names from catalog
+
+        Returns:
+            ValidationResult with LLM assessment, or None on failure
+        """
+        # Format available tools for prompt (limit to relevant ones for context)
+        tools_context = ""
+        if available_tools:
+            # Group by prefix for readability
+            tool_list = sorted(available_tools)
+            # Limit to first 100 tools to avoid overwhelming the prompt
+            if len(tool_list) > 100:
+                tools_context = f"AVAILABLE TOOLS (first 100 of {len(tool_list)}):\n" + "\n".join(f"- {t}" for t in tool_list[:100])
+            else:
+                tools_context = f"AVAILABLE TOOLS ({len(tool_list)} total):\n" + "\n".join(f"- {t}" for t in tool_list)
+
         prompt = f"""Validate this tool call decision for an OCI agent.
 
 USER INTENT: {user_intent}
@@ -416,7 +519,13 @@ PROPOSED PARAMETERS:
 CONTEXT:
 {json.dumps(context, indent=2, default=str) if context else "None"}
 
+{tools_context}
+
 Analyze if this is the right tool and parameters for the user's intent.
+
+CRITICAL: If you suggest an alternative tool (suggested_tool), it MUST be one from the AVAILABLE TOOLS list above.
+Do NOT suggest tools that are not in the list - they will not work.
+
 Respond in JSON format:
 {{
     "valid": true|false,
@@ -428,7 +537,7 @@ Respond in JSON format:
             "affected_param": "param name or null"
         }}
     ],
-    "suggested_tool": "better tool name" or null,
+    "suggested_tool": "tool name from AVAILABLE TOOLS list" or null,
     "suggested_params": {{"corrected params"}} or null,
     "reasoning": "why this decision is good/bad"
 }}
@@ -436,7 +545,7 @@ Respond in JSON format:
 Consider:
 - Does the tool match what the user is asking for?
 - Are the parameters correct and complete?
-- Is there a better tool for this task?
+- Is there a better tool for this task from the AVAILABLE TOOLS?
 - Will this likely succeed or fail?"""
 
         try:
@@ -459,11 +568,30 @@ Consider:
                         )
                     )
 
+                # Validate suggested_tool against actual available tools
+                suggested_tool = result.get("suggested_tool")
+                if suggested_tool and available_tools:
+                    if suggested_tool not in available_tools:
+                        self._logger.warning(
+                            "LLM suggested non-existent tool, ignoring",
+                            suggested=suggested_tool,
+                            available_count=len(available_tools),
+                        )
+                        # Add warning issue and clear the invalid suggestion
+                        issues.append(
+                            ValidationIssue(
+                                severity=ValidationSeverity.WARNING,
+                                message=f"LLM suggested unavailable tool: {suggested_tool}",
+                                suggestion="Using original tool instead",
+                            )
+                        )
+                        suggested_tool = None
+
                 return ValidationResult(
                     valid=result.get("valid", True),
                     confidence=0.8,
                     issues=issues,
-                    suggested_tool=result.get("suggested_tool"),
+                    suggested_tool=suggested_tool,
                     suggested_params=result.get("suggested_params"),
                     reasoning=result.get("reasoning", ""),
                     should_proceed=result.get("valid", True),

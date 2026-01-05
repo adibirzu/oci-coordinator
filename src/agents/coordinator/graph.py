@@ -10,7 +10,7 @@ Graph Structure:
     input → classifier → router → [workflow|parallel|agent] → (action →)* → output
 
 Phase 4 Enhancements:
-- ATP-persistent checkpointing for fault tolerance
+- In-memory checkpointing for fault tolerance
 - Parallel orchestrator for complex cross-domain queries
 - Context compression for long conversations
 - A2A protocol for structured agent communication
@@ -22,8 +22,6 @@ from __future__ import annotations
 import os
 from enum import Enum
 from typing import TYPE_CHECKING, Any
-
-import os
 
 import structlog
 from langchain_core.messages import HumanMessage
@@ -37,7 +35,11 @@ from src.agents.coordinator.nodes import (
     should_continue_after_router,
     should_loop_from_action,
 )
-from src.agents.coordinator.state import CoordinatorState
+from src.agents.coordinator.state import (
+    CoordinatorState,
+    reset_thinking_callback,
+    set_thinking_callback,
+)
 
 if TYPE_CHECKING:
     from langchain_core.language_models import BaseChatModel
@@ -112,7 +114,7 @@ class LangGraphCoordinator:
             memory: Shared memory manager
             workflow_registry: Map of workflow names to workflow functions
             max_iterations: Maximum tool calling iterations
-            checkpointer: Custom checkpointer (uses ATP if env configured, else MemorySaver)
+            checkpointer: Custom checkpointer (defaults to MemorySaver)
             enable_parallel: Enable parallel orchestrator for complex queries
             enable_context_compression: Enable context compression for long conversations
         """
@@ -125,9 +127,10 @@ class LangGraphCoordinator:
         self.enable_parallel = enable_parallel
         self.enable_context_compression = enable_context_compression
 
-        # Checkpointer: use provided, or ATP if configured, else MemorySaver
+        self.tool_catalog.set_memory_manager(memory)
+
+        # Checkpointer: use provided or default to MemorySaver
         self._checkpointer = checkpointer or MemorySaver()
-        self._use_atp_checkpointer = checkpointer is None and os.getenv("ATP_TNS_NAME")
 
         # Context manager for long conversations
         self._context_manager: ContextManager | None = None
@@ -245,13 +248,9 @@ class LangGraphCoordinator:
         Initialize the coordinator.
 
         Builds the graph and optionally binds tools to the LLM.
-        Sets up ATP checkpointer, context manager, and parallel orchestrator.
+        Sets up context manager and parallel orchestrator.
         Call this before using invoke().
         """
-        # Initialize ATP checkpointer if configured
-        if self._use_atp_checkpointer:
-            await self._init_atp_checkpointer()
-
         # Initialize context manager for long conversations
         if self.enable_context_compression:
             await self._init_context_manager()
@@ -282,28 +281,6 @@ class LangGraphCoordinator:
             parallel_enabled=self._orchestrator is not None,
             context_compression=self._context_manager is not None,
         )
-
-    async def _init_atp_checkpointer(self) -> None:
-        """Initialize ATP-backed checkpointer."""
-        # Allow disabling ATP checkpointer via environment variable
-        if os.getenv("DISABLE_ATP_CHECKPOINTER", "").lower() in ("true", "1", "yes"):
-            self._logger.info("ATP checkpointer disabled via DISABLE_ATP_CHECKPOINTER, using MemorySaver")
-            self._checkpointer = MemorySaver()
-            return
-
-        try:
-            from src.memory.checkpointer import ATPCheckpointer
-
-            redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
-            self._checkpointer = await ATPCheckpointer.create(redis_url=redis_url)
-            self._logger.info("ATP checkpointer initialized")
-
-        except Exception as e:
-            self._logger.warning(
-                "ATP checkpointer init failed, using MemorySaver",
-                error=str(e),
-            )
-            self._checkpointer = MemorySaver()
 
     async def _init_context_manager(self) -> None:
         """Initialize context manager for conversation compression."""
@@ -386,12 +363,13 @@ class LangGraphCoordinator:
 
         except ImportError:
             self._logger.warning("ToolConverter not available, skipping tool binding")
-        except AttributeError as e:
-            # LLM doesn't support tool binding
+        except (AttributeError, NotImplementedError) as e:
+            # LLM doesn't support native tool binding (common for OCA/custom LLMs)
+            # This is expected - tools are available via MCP instead
             self._logger.info(
-                "LLM does not support tool binding",
+                "LLM does not support native tool binding, tools available via MCP",
                 llm_type=type(self.llm).__name__,
-                error=str(e),
+                error_type=type(e).__name__,
             )
         except Exception as e:
             import traceback
@@ -408,6 +386,8 @@ class LangGraphCoordinator:
         session_id: str | None = None,
         user_id: str | None = None,
         force_parallel: bool = False,
+        on_thinking_update: Any | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """
         Process a query through the coordinator graph.
@@ -418,6 +398,9 @@ class LangGraphCoordinator:
             session_id: Optional session identifier
             user_id: Optional user identifier
             force_parallel: Force parallel execution for complex queries
+            on_thinking_update: Optional callback for real-time thinking updates.
+                Signature: async def callback(step: ThinkingStep) -> None
+            metadata: Optional metadata dict (e.g., oci_profile, profile_context)
 
         Returns:
             Result dictionary with:
@@ -426,13 +409,23 @@ class LangGraphCoordinator:
             - routing_type: str (workflow/agent/parallel/direct/escalate)
             - iterations: int
             - error: str or None
+            - thinking_trace: ThinkingTrace object
+            - thinking_summary: str (compact summary)
         """
+        import hashlib
         import uuid
 
         if not self._compiled_graph:
             await self.initialize()
 
-        effective_thread_id = thread_id or str(uuid.uuid4())
+        # Create unique thread_id per query to avoid stale checkpoints
+        # Include query hash so different queries in same thread get fresh state
+        query_hash = hashlib.md5(query.encode()).hexdigest()[:8]
+        if thread_id:
+            # Preserve thread_id for conversation tracking, add query hash for uniqueness
+            effective_thread_id = f"{thread_id}_{query_hash}"
+        else:
+            effective_thread_id = str(uuid.uuid4())
 
         # Check for context compression if enabled
         context_str = ""
@@ -458,11 +451,19 @@ class LangGraphCoordinator:
                 query, effective_thread_id, session_id, context_str
             )
 
-        # Create initial state with context
+        # Create initial state with context and thinking callback
         full_query = f"{context_str}\n\n{query}" if context_str else query
+
+        # Extract OCI profile from metadata for profile-aware operations
+        oci_profile = "DEFAULT"
+        if metadata:
+            oci_profile = metadata.get("oci_profile", "DEFAULT")
+            self._logger.debug("Using OCI profile", profile=oci_profile)
+
         initial_state = CoordinatorState(
             messages=[HumanMessage(content=full_query)],
             max_iterations=self.max_iterations,
+            metadata=metadata or {},
         )
 
         # Thread config for checkpointer
@@ -475,6 +476,9 @@ class LangGraphCoordinator:
             has_context=bool(context_str),
         )
 
+        # Set thinking callback in context variable (outside of serialized state)
+        # This avoids msgpack serialization issues with LangGraph's MemorySaver
+        callback_token = set_thinking_callback(on_thinking_update)
         try:
             result = await self._compiled_graph.ainvoke(initial_state, config)
 
@@ -505,6 +509,12 @@ class LangGraphCoordinator:
             selected_workflow = result.get("workflow_name") or (routing_target if routing_type == "workflow" else None)
             selected_agent = result.get("current_agent") or (routing_target if routing_type == "agent" else None)
 
+            # Get thinking trace for transparency
+            thinking_trace = result.get("thinking_trace")
+            thinking_summary = None
+            if thinking_trace and hasattr(thinking_trace, "to_compact_summary"):
+                thinking_summary = thinking_trace.to_compact_summary()
+
             return {
                 "success": bool(final_response),
                 "response": final_response or "No response generated",
@@ -515,6 +525,9 @@ class LangGraphCoordinator:
                 "intent": result.get("intent"),
                 "selected_agent": selected_agent,
                 "selected_workflow": selected_workflow,
+                "thinking_trace": thinking_trace,
+                "thinking_summary": thinking_summary,
+                "agent_candidates": result.get("agent_candidates", []),
             }
 
         except (TypeError, ValueError) as serde_error:
@@ -558,6 +571,12 @@ class LangGraphCoordinator:
                 selected_workflow = result.get("workflow_name") or (routing_target if routing_type == "workflow" else None)
                 selected_agent = result.get("current_agent") or (routing_target if routing_type == "agent" else None)
 
+                # Get thinking trace for transparency
+                thinking_trace = result.get("thinking_trace")
+                thinking_summary = None
+                if thinking_trace and hasattr(thinking_trace, "to_compact_summary"):
+                    thinking_summary = thinking_trace.to_compact_summary()
+
                 return {
                     "success": bool(final_response),
                     "response": final_response or "No response generated",
@@ -568,6 +587,9 @@ class LangGraphCoordinator:
                     "intent": result.get("intent"),
                     "selected_agent": selected_agent,
                     "selected_workflow": selected_workflow,
+                    "thinking_trace": thinking_trace,
+                    "thinking_summary": thinking_summary,
+                    "agent_candidates": result.get("agent_candidates", []),
                 }
 
             except Exception as retry_error:
@@ -591,6 +613,9 @@ class LangGraphCoordinator:
                 "error": str(e),
                 "thread_id": effective_thread_id,
             }
+        finally:
+            # Always reset the thinking callback context variable
+            reset_thinking_callback(callback_token)
 
     async def _invoke_parallel(
         self,
@@ -677,6 +702,7 @@ class LangGraphCoordinator:
         Yields:
             State updates from each node
         """
+        import hashlib
         import uuid
 
         if not self._compiled_graph:
@@ -687,7 +713,12 @@ class LangGraphCoordinator:
             max_iterations=self.max_iterations,
         )
 
-        effective_thread_id = thread_id or str(uuid.uuid4())
+        # Create unique thread_id per query to avoid stale checkpoints
+        query_hash = hashlib.md5(query.encode()).hexdigest()[:8]
+        if thread_id:
+            effective_thread_id = f"{thread_id}_{query_hash}"
+        else:
+            effective_thread_id = str(uuid.uuid4())
         config = {"configurable": {"thread_id": effective_thread_id}}
 
         async for event in self._compiled_graph.astream(initial_state, config):
@@ -738,7 +769,6 @@ class LangGraphCoordinator:
 async def create_coordinator(
     llm: BaseChatModel | None = None,
     redis_url: str = "redis://localhost:6379",
-    atp_connection: str | None = None,
     max_iterations: int = 15,
     include_workflows: bool = True,
 ) -> LangGraphCoordinator:
@@ -750,7 +780,6 @@ async def create_coordinator(
     Args:
         llm: LangChain chat model (creates default if not provided)
         redis_url: Redis URL for caching
-        atp_connection: ATP connection string for persistence
         max_iterations: Maximum tool iterations
         include_workflows: Include pre-built deterministic workflows
 
@@ -768,12 +797,9 @@ async def create_coordinator(
         llm = ChatAnthropic(model="claude-sonnet-4-20250514")
 
     # Create components
-    memory = SharedMemoryManager(
-        redis_url=redis_url,
-        atp_connection=atp_connection or os.getenv("ATP_CONNECTION_STRING"),
-    )
+    memory = SharedMemoryManager(redis_url=redis_url)
 
-    tool_catalog = ToolCatalog()
+    tool_catalog = ToolCatalog(memory_manager=memory)
     agent_catalog = AgentCatalog.get_instance()
 
     # Load pre-built workflows if enabled

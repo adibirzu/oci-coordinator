@@ -47,7 +47,9 @@ servers:
       - cost
       - security
       - observability
-    description: "Unified OCI MCP Server - compartments, compute, network, cost, security"
+      - database
+      - dbmgmt
+    description: "Unified OCI MCP Server - compartments, compute, network, cost, security, database"
     timeout_seconds: 60
 
   # Database Observatory - Primary database operations server
@@ -87,6 +89,7 @@ servers:
       OCI_CONFIG_FILE: "~/.oci/config"
       OCI_CLI_PROFILE: "DEFAULT"
       ALLOW_MUTATIONS: "false"  # Set to "true" to enable write operations
+      MCP_SERVER_ID: "oci-infrastructure"
     enabled: true
     domains:
       - compute
@@ -96,6 +99,33 @@ servers:
       - database
       - observability
     description: "OCI Infrastructure MCP server - compute, network, security, cost management"
+    timeout_seconds: 60
+
+  # OCI Security MCP Server - Comprehensive security services
+  oci-mcp-security:
+    transport: stdio
+    command: python
+    args:
+      - "-m"
+      - "oci_mcp_security.server"
+    working_dir: /Users/abirzu/dev/MCP/oci-mcp-security
+    env:
+      OCI_CONFIG_FILE: "~/.oci/config"
+      OCI_CLI_PROFILE: "DEFAULT"
+      PYTHONPATH: "/Users/abirzu/dev/MCP/oci-mcp-security/src"
+    enabled: false
+    domains:
+      - security
+      - cloudguard
+      - vss
+      - bastion
+      - audit
+      - kms
+      - waf
+      - datasafe
+      - accessgov
+      - zones
+    description: "OCI Security MCP server - Cloud Guard, VSS, Bastion, Audit, KMS, WAF, Data Safe"
     timeout_seconds: 60
 
   # OPSI MCP Server - Operations Insights (HTTP)
@@ -157,8 +187,8 @@ servers:
 # Agents can request servers by group name
 groups:
   database:
-    - database-observatory
-    - oci-unified  # Fallback for database operations
+    - oci-unified  # Primary for dbmgmt operations (fleet health, etc.)
+    - database-observatory  # External fallback for SQLcl, OPSI, Logan
   observability:
     - database-observatory
     - oci-unified
@@ -168,7 +198,8 @@ groups:
   identity:
     - oci-unified  # Compartments, tenancy, regions
   security:
-    - oci-unified  # IAM, Cloud Guard, policies
+    - oci-mcp-security  # Cloud Guard, VSS, Bastion, Audit, KMS
+    - oci-unified  # IAM, basic security
     - oci-infrastructure
   cost:
     - finopsai  # Primary for multicloud cost/FinOps
@@ -180,6 +211,7 @@ groups:
     - oci-unified
     - database-observatory
     - oci-infrastructure
+    - oci-mcp-security
     - finopsai
 
 # Default Settings
@@ -193,4 +225,6 @@ defaults:
     oci_network_list_vcns: 120
     oci_cost_get_summary: 180
     oci_observability_query_logs: 300  # Log queries can be slow
-    oci_security_list_problems: 180
+    oci_security_cloudguard_list_problems: 180
+    oci_security_list_cloud_guard_problems: 180
+    oci_dbmgmt_get_fleet_health: 60

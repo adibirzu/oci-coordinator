@@ -156,6 +156,14 @@ class OCIReActAgent:
         self.max_iterations = max_iterations
         self._tracer = get_tracer(agent_id)
         self._logger = logger.bind(agent=agent_id)
+        if self.memory:
+            try:
+                self.tool_catalog.set_memory_manager(self.memory)
+            except Exception as exc:
+                self._logger.debug(
+                    "Failed to attach memory manager to tool catalog",
+                    error=str(exc),
+                )
 
     async def _get_compartment_context(self) -> str:
         """Get compartment context from TenancyManager for the system prompt."""

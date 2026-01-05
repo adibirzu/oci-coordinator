@@ -317,6 +317,7 @@ class ParallelOrchestrator:
                     role=agent_def.role,
                     memory_manager=self.memory,
                     tool_catalog=self.tool_catalog,
+                    llm=self.llm,
                 )
 
                 if not agent_instance:

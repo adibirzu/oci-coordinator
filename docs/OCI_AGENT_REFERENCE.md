@@ -352,18 +352,18 @@ catalog = initialize_agents()
 │  │                   (src/memory/manager.py)                            │   │
 │  └──────────────────────────────────┬──────────────────────────────────┘   │
 │                                     │                                       │
-│           ┌─────────────────────────┼─────────────────────────┐            │
-│           │                         │                         │            │
-│           ▼                         ▼                         ▼            │
-│  ┌─────────────────┐      ┌─────────────────┐      ┌─────────────────┐    │
-│  │     REDIS       │      │    OCI ATP      │      │  LangGraph      │    │
-│  │   (Hot Cache)   │      │ (Persistent)    │      │  Checkpoints    │    │
-│  │                 │      │                 │      │                 │    │
-│  │ • Session state │      │ • Conversation  │      │ • Graph state   │    │
-│  │ • Tool results  │      │   history       │      │ • Iteration     │    │
-│  │ • Agent status  │      │ • Agent memory  │      │   tracking      │    │
-│  │ • TTL: 1hr      │      │ • Audit logs    │      │ • Checkpoints   │    │
-│  └─────────────────┘      └─────────────────┘      └─────────────────┘    │
+│                    ┌────────────────────────────────┐                      │
+│                    │                                │                      │
+│                    ▼                                ▼                      │
+│           ┌─────────────────┐             ┌─────────────────┐             │
+│           │     REDIS       │             │  LangGraph      │             │
+│           │   (Hot Cache)   │             │  MemorySaver    │             │
+│           │                 │             │                 │             │
+│           │ • Session state │             │ • Graph state   │             │
+│           │ • Tool results  │             │ • Iteration     │             │
+│           │ • Agent status  │             │   tracking      │             │
+│           │ • TTL: 1hr      │             │ • Checkpoints   │             │
+│           └─────────────────┘             └─────────────────┘             │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -412,56 +412,18 @@ class RedisMemoryStore(MemoryStore):
     async def delete(self, key: str) -> None:
         await self.client.delete(key)
 
-class ATPMemoryStore(MemoryStore):
-    """OCI ATP-based persistent storage for long-term memory."""
-
-    def __init__(self, connection_string: str):
-        import oracledb
-        self.pool = oracledb.create_pool_async(dsn=connection_string)
-
-    async def get(self, key: str) -> Optional[Any]:
-        async with self.pool.acquire() as conn:
-            async with conn.cursor() as cursor:
-                await cursor.execute(
-                    "SELECT value FROM agent_memory WHERE key = :key",
-                    {"key": key}
-                )
-                row = await cursor.fetchone()
-                return json.loads(row[0]) if row else None
-
-    async def set(self, key: str, value: Any, ttl: Optional[timedelta] = None) -> None:
-        async with self.pool.acquire() as conn:
-            async with conn.cursor() as cursor:
-                await cursor.execute("""
-                    MERGE INTO agent_memory t
-                    USING (SELECT :key as key FROM dual) s
-                    ON (t.key = s.key)
-                    WHEN MATCHED THEN UPDATE SET value = :value, updated_at = SYSTIMESTAMP
-                    WHEN NOT MATCHED THEN INSERT (key, value) VALUES (:key, :value)
-                """, {"key": key, "value": json.dumps(value, default=str)})
-                await conn.commit()
-
-    async def delete(self, key: str) -> None:
-        async with self.pool.acquire() as conn:
-            async with conn.cursor() as cursor:
-                await cursor.execute("DELETE FROM agent_memory WHERE key = :key", {"key": key})
-                await conn.commit()
-
 class SharedMemoryManager:
     """
-    Unified memory manager with tiered storage.
+    Unified memory manager with Redis cache.
 
-    Uses Redis for hot cache (session state, recent results)
-    Uses OCI ATP for persistent storage (history, audit, long-term memory)
+    Uses Redis for hot cache (session state, recent results).
     """
 
     def __init__(
         self,
-        redis_url: str = "redis://localhost:6379",
-        atp_connection: Optional[str] = None
+        redis_url: str = "redis://localhost:6379"
     ):
         self.cache = RedisMemoryStore(redis_url)
-        self.persistent = ATPMemoryStore(atp_connection) if atp_connection else None
         self.default_cache_ttl = timedelta(hours=1)
 
     async def get_session_state(self, session_id: str) -> Optional[Dict]:
@@ -506,61 +468,6 @@ class SharedMemoryManager:
         await self.cache.set(key, value, self.default_cache_ttl)
         if self.persistent:
             await self.persistent.set(key, value)
-```
-
-### ATP Database Schema
-
-```sql
--- Agent Memory Table
-CREATE TABLE agent_memory (
-    id RAW(16) DEFAULT SYS_GUID() PRIMARY KEY,
-    key VARCHAR2(512) NOT NULL UNIQUE,
-    value CLOB NOT NULL,
-    created_at TIMESTAMP DEFAULT SYSTIMESTAMP,
-    updated_at TIMESTAMP DEFAULT SYSTIMESTAMP,
-    ttl_seconds NUMBER,
-    CONSTRAINT agent_memory_json CHECK (value IS JSON)
-);
-
--- Conversation History Table
-CREATE TABLE conversation_history (
-    id RAW(16) DEFAULT SYS_GUID() PRIMARY KEY,
-    thread_id VARCHAR2(256) NOT NULL,
-    message_index NUMBER NOT NULL,
-    role VARCHAR2(50) NOT NULL,
-    content CLOB NOT NULL,
-    metadata CLOB,
-    created_at TIMESTAMP DEFAULT SYSTIMESTAMP,
-    CONSTRAINT conversation_metadata_json CHECK (metadata IS JSON)
-);
-
-CREATE INDEX idx_conversation_thread ON conversation_history(thread_id, message_index);
-
--- Agent Registry Table
-CREATE TABLE agent_registry (
-    agent_id VARCHAR2(256) PRIMARY KEY,
-    role VARCHAR2(128) NOT NULL,
-    definition CLOB NOT NULL,
-    status VARCHAR2(50) DEFAULT 'registered',
-    registered_at TIMESTAMP DEFAULT SYSTIMESTAMP,
-    last_heartbeat TIMESTAMP,
-    CONSTRAINT agent_definition_json CHECK (definition IS JSON)
-);
-
--- Audit Log Table
-CREATE TABLE agent_audit_log (
-    id RAW(16) DEFAULT SYS_GUID() PRIMARY KEY,
-    agent_id VARCHAR2(256),
-    action VARCHAR2(256) NOT NULL,
-    request CLOB,
-    response CLOB,
-    duration_ms NUMBER,
-    status VARCHAR2(50),
-    error_message CLOB,
-    created_at TIMESTAMP DEFAULT SYSTIMESTAMP
-);
-
-CREATE INDEX idx_audit_agent ON agent_audit_log(agent_id, created_at DESC);
 ```
 
 ---
@@ -1399,7 +1306,7 @@ This reference document establishes:
 1. **Standard Agent Schema** - Consistent structure for all agents
 2. **Naming Conventions** - Clear patterns for IDs, classes, and files
 3. **Auto-Registration** - Automatic discovery and catalog management
-4. **Shared Memory** - Tiered storage with Redis (hot) and ATP (persistent)
+4. **Shared Memory** - Redis cache for session state and tool results
 5. **MCP Integration** - Reference servers and configuration patterns
 6. **Base Implementation** - Reusable base class for agent development
 7. **Best Practices** - Agentic loop design, error handling, observability

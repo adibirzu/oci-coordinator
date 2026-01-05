@@ -4,8 +4,8 @@
 
 This document provides a comprehensive mapping of all features, MCP servers, tools, agents, and their interconnections in the OCI AI Agent Coordinator system.
 
-**Last Updated**: 2026-01-02
-**Test Status**: 21/21 tools tested successfully
+**Last Updated**: 2026-01-03
+**Test Status**: 21/41 tools tested (new DB Mgmt/OPSI tools pending)
 
 ---
 
@@ -15,12 +15,17 @@ This document provides a comprehensive mapping of all features, MCP servers, too
 
 | Server | Tools | Status | Transport | Primary Use |
 |--------|-------|--------|-----------|-------------|
-| **oci-unified** | 31 | Enabled | stdio | Core OCI operations |
-| **database-observatory** | 50+ | Enabled | stdio | Database/OPSI/Logan |
+| **oci-unified** | 51 | Enabled | stdio | Core OCI operations + DB Mgmt + OPSI |
+| **database-observatory** | 50+ | Enabled | stdio | Database/SQLcl/Logan |
 | **oci-infrastructure** | 44 | Enabled | stdio | Full OCI SDK wrapper |
 | **finopsai-mcp** | 33 | Enabled | stdio | Multicloud FinOps |
 
-**Total Available Tools**: 158+
+**Total Available Tools**: 178+
+
+### New in v1.3 (2026-01-03)
+- **DB Management Tools (10)**: AWR reports, Top SQL, Wait Events, SQL Plan Baselines, Fleet Health
+- **OPSI Tools (10)**: Database Insights, ADDM, Capacity Planning, SQL Statistics
+- **Workflows (20+)**: Pre-built workflows for all new capabilities
 
 ---
 
@@ -72,6 +77,36 @@ This document provides a comprehensive mapping of all features, MCP servers, too
 |------|------------|-------|----------|-------------|
 | `oci_security_list_users` | oci-unified | Security | - | ✅ Passed |
 
+### DB Management Domain
+
+| Tool | MCP Server | Agent | Workflow | Test Status |
+|------|------------|-------|----------|-------------|
+| `oci_dbmgmt_list_databases` | oci-unified | DB Troubleshoot | `managed_databases` | - |
+| `oci_dbmgmt_search_databases` | oci-unified | DB Troubleshoot | - | - |
+| `oci_dbmgmt_get_database` | oci-unified | DB Troubleshoot | - | - |
+| `oci_dbmgmt_get_awr_report` | oci-unified | DB Troubleshoot | `awr_report` | - |
+| `oci_dbmgmt_get_metrics` | oci-unified | DB Troubleshoot | - | - |
+| `oci_dbmgmt_get_top_sql` | oci-unified | DB Troubleshoot | `top_sql` | - |
+| `oci_dbmgmt_get_wait_events` | oci-unified | DB Troubleshoot | `wait_events` | - |
+| `oci_dbmgmt_list_sql_plan_baselines` | oci-unified | DB Troubleshoot | `sql_plan_baselines` | - |
+| `oci_dbmgmt_get_fleet_health` | oci-unified | DB Troubleshoot | `db_fleet_health` | - |
+| `oci_dbmgmt_get_sql_report` | oci-unified | DB Troubleshoot | - | - |
+
+### Operations Insights (OPSI) Domain
+
+| Tool | MCP Server | Agent | Workflow | Test Status |
+|------|------------|-------|----------|-------------|
+| `oci_opsi_list_database_insights` | oci-unified | DB Troubleshoot | `database_insights` | - |
+| `oci_opsi_get_database_insight` | oci-unified | DB Troubleshoot | - | - |
+| `oci_opsi_summarize_resource_stats` | oci-unified | DB Troubleshoot | `opsi_utilization` | - |
+| `oci_opsi_summarize_sql_insights` | oci-unified | DB Troubleshoot | `sql_insights` | - |
+| `oci_opsi_summarize_sql_statistics` | oci-unified | DB Troubleshoot | `sql_statistics` | - |
+| `oci_opsi_get_addm_findings` | oci-unified | DB Troubleshoot | `addm_findings` | - |
+| `oci_opsi_get_addm_recommendations` | oci-unified | DB Troubleshoot | `addm_recommendations` | - |
+| `oci_opsi_get_capacity_trend` | oci-unified | DB Troubleshoot | `capacity_trend` | - |
+| `oci_opsi_get_capacity_forecast` | oci-unified | DB Troubleshoot | `capacity_forecast` | - |
+| `oci_opsi_list_awr_hubs` | oci-unified | DB Troubleshoot | - | - |
+
 ### Discovery Domain
 
 | Tool | MCP Server | Agent | Workflow | Test Status |
@@ -104,26 +139,61 @@ This document provides a comprehensive mapping of all features, MCP servers, too
 - `search_capabilities`
 - `oci_discovery_*`
 
-**Workflows Owned**: 16 pre-built workflows
+**Workflows Owned**: 35+ pre-built workflows (100+ intent aliases)
 
 ### Database Troubleshoot Agent
 **Role**: Multi-database observability and troubleshooting
 
-**Primary Tools**:
+**Primary Tools (DB Management)**:
+| Tool | MCP Server | Tier |
+|------|------------|------|
+| `oci_dbmgmt_list_databases` | oci-unified | 1 |
+| `oci_dbmgmt_search_databases` | oci-unified | 1 |
+| `oci_dbmgmt_get_database` | oci-unified | 1 |
+| `oci_dbmgmt_get_awr_report` | oci-unified | 2 |
+| `oci_dbmgmt_get_top_sql` | oci-unified | 2 |
+| `oci_dbmgmt_get_wait_events` | oci-unified | 2 |
+| `oci_dbmgmt_list_sql_plan_baselines` | oci-unified | 2 |
+| `oci_dbmgmt_get_fleet_health` | oci-unified | 2 |
+| `oci_dbmgmt_get_sql_report` | oci-unified | 2 |
+
+**Primary Tools (Operations Insights)**:
+| Tool | MCP Server | Tier |
+|------|------------|------|
+| `oci_opsi_list_database_insights` | oci-unified | 1 |
+| `oci_opsi_get_database_insight` | oci-unified | 1 |
+| `oci_opsi_summarize_resource_stats` | oci-unified | 2 |
+| `oci_opsi_summarize_sql_insights` | oci-unified | 2 |
+| `oci_opsi_summarize_sql_statistics` | oci-unified | 2 |
+| `oci_opsi_get_addm_findings` | oci-unified | 2 |
+| `oci_opsi_get_addm_recommendations` | oci-unified | 2 |
+| `oci_opsi_get_capacity_trend` | oci-unified | 2 |
+| `oci_opsi_get_capacity_forecast` | oci-unified | 2 |
+
+**Legacy Tools (database-observatory)**:
 | Tool | MCP Server | Tier |
 |------|------------|------|
 | `oci_opsi_get_fleet_summary` | database-observatory | 1 |
 | `oci_opsi_analyze_cpu` | database-observatory | 2 |
 | `oci_opsi_analyze_memory` | database-observatory | 2 |
-| `oci_opsi_analyze_wait_events` | database-observatory | 2 |
-| `oci_opsi_get_blocking_sessions` | database-observatory | 2 |
 | `oci_database_execute_sql` | database-observatory | 3 |
-| `oci_database_list_autonomous` | database-observatory | 2 |
 
 **Skills**:
 - `db_rca_workflow` (7 steps)
 - `db_health_check_workflow` (3 steps)
 - `db_sql_analysis_workflow` (5 steps)
+
+**Workflows**:
+- `db_fleet_health` - Fleet-wide health summary
+- `top_sql` - Top SQL by CPU
+- `wait_events` - AWR wait events
+- `awr_report` - Generate AWR/ASH report
+- `sql_plan_baselines` - SQL Plan Baselines
+- `database_insights` - OPSI database list
+- `addm_findings` - ADDM diagnostic findings
+- `addm_recommendations` - Optimization suggestions
+- `capacity_forecast` - Usage projection
+- `db_performance_overview` - Comprehensive health check
 
 ### Log Analytics Agent
 **Role**: Log search, pattern detection, cross-service correlation

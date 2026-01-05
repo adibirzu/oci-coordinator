@@ -223,21 +223,72 @@ class ServerRegistry:
             )
             raise
 
-    async def connect_all(self) -> dict[str, bool]:
+    async def _connect_single(self, server_id: str) -> tuple[str, bool]:
+        """
+        Connect to a single server, returning success status.
+
+        Used internally by connect_all for parallel connection.
+
+        Returns:
+            Tuple of (server_id, success_status)
+        """
+        try:
+            await self.connect(server_id)
+            return (server_id, True)
+        except Exception:
+            return (server_id, False)
+
+    async def connect_all(self, parallel: bool = True) -> dict[str, bool]:
         """
         Connect to all registered servers.
+
+        Args:
+            parallel: If True (default), connect to all servers concurrently.
+                     If False, connect sequentially (legacy behavior).
 
         Returns:
             Dictionary of server_id -> success status
         """
-        results = {}
+        if not parallel:
+            # Legacy sequential behavior
+            results = {}
+            for server_id in self._servers:
+                try:
+                    await self.connect(server_id)
+                    results[server_id] = True
+                except Exception:
+                    results[server_id] = False
+            return results
 
-        for server_id in self._servers:
-            try:
-                await self.connect(server_id)
-                results[server_id] = True
-            except Exception:
-                results[server_id] = False
+        # Parallel connection - much faster with multiple servers
+        import time
+        start_time = time.time()
+
+        tasks = [
+            self._connect_single(server_id) for server_id in self._servers
+        ]
+
+        # Run all connections concurrently
+        connection_results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        results = {}
+        for result in connection_results:
+            if isinstance(result, Exception):
+                # Shouldn't happen with _connect_single, but handle gracefully
+                self._logger.error("Unexpected connection error", error=str(result))
+                continue
+            server_id, success = result
+            results[server_id] = success
+
+        duration_ms = int((time.time() - start_time) * 1000)
+        connected = sum(1 for s in results.values() if s)
+        self._logger.info(
+            "Parallel server connection complete",
+            total=len(results),
+            connected=connected,
+            failed=len(results) - connected,
+            duration_ms=duration_ms,
+        )
 
         return results
 

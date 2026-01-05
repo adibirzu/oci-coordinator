@@ -22,8 +22,8 @@ from typing import Any, Callable
 
 import structlog
 
-from src.agents.catalog import AgentCatalog, MCP_DOMAIN_TOOLS, DOMAIN_CAPABILITIES
-from src.mcp.catalog import ToolCatalog, DOMAIN_PREFIXES
+from src.agents.catalog import AgentCatalog
+from src.mcp.catalog import ToolCatalog
 from src.mcp.registry import (
     ServerRegistry,
     EVENT_SERVER_CONNECTED,
@@ -103,7 +103,9 @@ class DynamicToolManager:
     ):
         self._server_registry = server_registry or ServerRegistry.get_instance()
         self._tool_catalog = tool_catalog or ToolCatalog.get_instance()
-        self._agent_catalog = agent_catalog or AgentCatalog.get_instance()
+        self._agent_catalog = agent_catalog or AgentCatalog.get_instance(
+            tool_catalog=self._tool_catalog
+        )
 
         self._logger = logger.bind(component="DynamicToolManager")
         self._callbacks: dict[UpdateEvent, list[Callable]] = {}
@@ -334,17 +336,8 @@ class DynamicToolManager:
             tool_count=len(server_tools),
         )
 
-        # Update domain tools mapping
-        for tool_name in server_tools:
-            domain = self._detect_tool_domain(tool_name)
-            if domain and domain in MCP_DOMAIN_TOOLS:
-                if tool_name not in MCP_DOMAIN_TOOLS[domain]:
-                    MCP_DOMAIN_TOOLS[domain].append(tool_name)
-                    self._logger.debug(
-                        "Added tool to domain",
-                        tool=tool_name,
-                        domain=domain,
-                    )
+        await self._tool_catalog.ensure_fresh(force=True)
+        await self._update_agent_tools()
 
         return len(server_tools)
 
@@ -410,47 +403,10 @@ class DynamicToolManager:
 
     async def _update_agent_tools(self) -> int:
         """Update agent catalog with new tool information."""
-        updated_count = 0
-
-        # Get current tools by domain
-        all_tools = self._tool_catalog.list_tools()
-
-        # Update domain tool mappings
-        for tool in all_tools:
-            domain = self._detect_tool_domain(tool.name)
-            if domain and domain in MCP_DOMAIN_TOOLS:
-                if tool.name not in MCP_DOMAIN_TOOLS[domain]:
-                    MCP_DOMAIN_TOOLS[domain].append(tool.name)
-                    updated_count += 1
-
-        # Trigger agent re-indexing if tools changed
+        updated_count = self._agent_catalog.sync_mcp_tools(self._tool_catalog)
         if updated_count > 0:
-            self._logger.info("Updated domain tools", count=updated_count)
-
+            self._logger.info("Updated agent tool lists", count=updated_count)
         return updated_count
-
-    def _detect_tool_domain(self, tool_name: str) -> str | None:
-        """Detect the domain for a tool based on naming conventions."""
-        tool_lower = tool_name.lower()
-
-        for domain, prefixes in DOMAIN_PREFIXES.items():
-            for prefix in prefixes:
-                if tool_lower.startswith(prefix.lower()) or prefix.lower() in tool_lower:
-                    return domain
-
-        # Fallback mappings
-        if "database" in tool_lower or "db_" in tool_lower or "opsi" in tool_lower:
-            return "database"
-        if "compute" in tool_lower or "instance" in tool_lower:
-            return "infrastructure"
-        if "cost" in tool_lower or "finops" in tool_lower or "budget" in tool_lower:
-            return "finops"
-        if "security" in tool_lower or "guard" in tool_lower:
-            return "security"
-        if "logan" in tool_lower or "log_" in tool_lower or "alarm" in tool_lower:
-            return "observability"
-
-        return None
 
     def _detect_skill_domains(self, skill_name: str) -> list[str]:
         """Detect domains for a skill."""
@@ -547,12 +503,6 @@ class DynamicToolManager:
                 risk_level="low",
             )
 
-        # Update domain tool mappings
-        for domain in domains:
-            if domain in MCP_DOMAIN_TOOLS:
-                if skill_name not in MCP_DOMAIN_TOOLS[domain]:
-                    MCP_DOMAIN_TOOLS[domain].append(skill_name)
-
         self._logger.info(
             "Runbook skill registered",
             skill=skill_name,
@@ -622,12 +572,6 @@ class DynamicToolManager:
             tier=tier,
         )
 
-        # Update domain mappings
-        for domain in domains:
-            if domain in MCP_DOMAIN_TOOLS:
-                if name not in MCP_DOMAIN_TOOLS[domain]:
-                    MCP_DOMAIN_TOOLS[domain].append(name)
-
         self._logger.info(
             "Custom tool registered",
             name=name,
@@ -645,11 +589,6 @@ class DynamicToolManager:
 
         # Remove from tool catalog
         self._tool_catalog.unregister_tool(name)
-
-        # Remove from domain mappings
-        for domain in reg.domains:
-            if domain in MCP_DOMAIN_TOOLS and name in MCP_DOMAIN_TOOLS[domain]:
-                MCP_DOMAIN_TOOLS[domain].remove(name)
 
         self._logger.info("Tool unregistered", name=name)
         return True

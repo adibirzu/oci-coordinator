@@ -37,6 +37,33 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger(__name__)
 
+# Minimal tool baseline for catalog registration and self-healing fallback.
+MCP_TOOLS = [
+    "oci_list_compartments",
+    "oci_get_compartment",
+    "oci_search_compartments",
+    "oci_compute_list_instances",
+    "oci_compute_get_instance",
+    "oci_compute_start_instance",
+    "oci_compute_stop_instance",
+    "oci_compute_restart_instance",
+    "oci_network_list_vcns",
+    "oci_network_get_vcn",
+    "oci_network_list_subnets",
+    "oci_network_list_security_lists",
+    "oci_network_analyze_security",
+    "oci_security_list_cloud_guard_problems",
+    "oci_security_cloudguard_list_problems",
+    "oci_security_cloudguard_get_security_score",
+    "oci_security_list_users",
+    "oci_security_list_groups",
+    "oci_security_list_policies",
+    "oci_security_audit_list_events",
+    "oci_security_audit_get_configuration",
+    "oci_security_kms_list_vaults",
+    "oci_security_kms_list_keys",
+]
+
 
 class ActionType(str, Enum):
     """Types of infrastructure actions."""
@@ -168,43 +195,6 @@ class InfrastructureAgent(BaseAgent, SelfHealingMixin):
     4. Format and return results
     """
 
-    # MCP tools from oci-infrastructure server
-    # Tool naming convention: oci_{domain}_{action}_{resource}
-    MCP_TOOLS = [
-        # Discovery (Tier 1 - Instant)
-        "oci_ping",
-        "oci_list_domains",
-        "oci_search_tools",
-        "oci_get_capabilities",
-        "search_capabilities",
-        # Identity (Tier 2 - API)
-        "oci_list_compartments",
-        "oci_search_compartments",
-        "oci_get_compartment",
-        "oci_get_tenancy",
-        "oci_list_regions",
-        # Compute (Tier 2-4)
-        "oci_compute_list_instances",
-        "oci_compute_get_instance",
-        "oci_compute_start_instance",
-        "oci_compute_stop_instance",
-        "oci_compute_restart_instance",
-        "oci_observability_get_instance_metrics",
-        # Network (Tier 2)
-        "oci_network_list_vcns",
-        "oci_network_get_vcn",
-        "oci_network_list_subnets",
-        "oci_network_list_security_lists",
-        "oci_network_analyze_security",
-        # Security (Tier 2-3)
-        "oci_security_list_users",
-        "oci_security_get_user",
-        "oci_security_list_groups",
-        "oci_security_list_policies",
-        "oci_security_list_cloud_guard_problems",
-        "oci_security_audit",
-    ]
-
     @classmethod
     def get_definition(cls) -> AgentDefinition:
         """Return agent definition for catalog registration."""
@@ -239,7 +229,7 @@ class InfrastructureAgent(BaseAgent, SelfHealingMixin):
                 "Infrastructure Expert Agent for OCI compute, network, "
                 "and security management using the mcp-oci MCP server."
             ),
-            mcp_tools=cls.MCP_TOOLS,
+            mcp_tools=list(MCP_TOOLS),
             mcp_servers=["oci-unified", "oci-infrastructure"],
         )
 

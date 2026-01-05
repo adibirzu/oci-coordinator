@@ -37,7 +37,24 @@ if TYPE_CHECKING:
     from src.mcp.catalog import ToolCatalog
     from src.memory.manager import SharedMemoryManager
 
+from src.skills.troubleshoot_database import DBTroubleshootSkill
+
+
 logger = structlog.get_logger(__name__)
+
+# Minimal tool baseline for catalog registration and self-healing fallback.
+MCP_TOOLS = [
+    "oci_opsi_get_fleet_summary",
+    "oci_opsi_search_databases",
+    "oci_opsi_get_database",
+    "oci_opsi_get_performance_summary",
+    "oci_opsi_analyze_cpu",
+    "oci_opsi_analyze_memory",
+    "oci_opsi_analyze_io",
+    "oci_database_execute_sql",
+    "oci_dbmgmt_get_metrics",
+    "oci_dbmgmt_get_awr_report",
+]
 
 
 class AnalysisSeverity(str, Enum):
@@ -281,45 +298,6 @@ class DbTroubleshootAgent(BaseAgent, SelfHealingMixin):
     5. Generate recommendations
     """
 
-    # MCP tools from Database Observatory server (unified naming convention)
-    MCP_TOOLS = [
-        # Tier 1: Cache-based (OPSI)
-        "oci_opsi_get_fleet_summary",
-        "oci_opsi_search_databases",
-        "oci_opsi_get_database",
-        "oci_opsi_get_statistics",
-        "oci_opsi_refresh_cache",
-        "oci_opsi_build_cache",
-        # Tier 2: OPSI API (Analysis)
-        "oci_opsi_analyze_cpu",
-        "oci_opsi_analyze_memory",
-        "oci_opsi_analyze_io",
-        "oci_opsi_get_performance_summary",
-        "oci_opsi_find_cost_opportunities",
-        "oci_opsi_get_savings_summary",
-        "oci_opsi_list_insights",
-        "oci_opsi_list_skills",
-        "oci_opsi_get_skill_recommendations",
-        # Tier 3: SQLcl (Direct SQL)
-        "oci_database_execute_sql",
-        "oci_database_get_schema",
-        "oci_database_list_connections",
-        "oci_database_get_status",
-        "oci_database_disconnect",
-        "oci_database_check_network",
-        "oci_database_get_ip",
-        # Tier 4: Tenancy/Infrastructure
-        "oci_tenancy_list_profiles",
-        "oci_tenancy_get_profile",
-        "oci_tenancy_set_profile",
-        "oci_tenancy_list_compartments",
-        # Health/Cache Management
-        "oci_database_ping",
-        "oci_database_health_check",
-        "oci_database_cache_status",
-        "oci_database_clear_cache",
-    ]
-
     @classmethod
     def get_definition(cls) -> AgentDefinition:
         """Return agent definition for catalog registration."""
@@ -338,7 +316,10 @@ class DbTroubleshootAgent(BaseAgent, SelfHealingMixin):
                 "db_rca_workflow",
                 "db_health_check_workflow",
                 "db_sql_analysis_workflow",
-                "db_awr_report_workflow",  # AWR report generation
+                "db_awr_report_workflow",
+                "db_fleet_health_workflow",
+                "db_addm_analysis_workflow",
+                "db_capacity_planning_workflow",
                 "rca_workflow",  # Legacy
             ],
             kafka_topics=KafkaTopics(
@@ -347,18 +328,18 @@ class DbTroubleshootAgent(BaseAgent, SelfHealingMixin):
             ),
             health_endpoint="http://localhost:8010/health",
             metadata=AgentMetadata(
-                version="2.0.0",  # Updated for MCP integration
+                version="3.0.0",  # Updated for oci-unified integration
                 namespace="oci-coordinator",
                 max_iterations=15,
-                timeout_seconds=120,
+                timeout_seconds=180,  # DB operations via MCP can be slow
             ),
             description=(
                 "Database Expert Agent for Oracle performance analysis using "
-                "Database Observatory MCP server. Provides RCA using OPSI metrics, "
-                "SQLcl queries, and Logan log analysis."
+                "OCI DB Management and Operations Insights (OPSI) via oci-unified MCP server. "
+                "Provides fleet health, AWR reports, ADDM findings, capacity planning, and SQL tuning."
             ),
-            mcp_tools=cls.MCP_TOOLS,
-            mcp_servers=["database-observatory"],
+            mcp_tools=list(MCP_TOOLS),
+            mcp_servers=["oci-unified"],
         )
 
     def __init__(
@@ -405,6 +386,7 @@ class DbTroubleshootAgent(BaseAgent, SelfHealingMixin):
         graph.add_node("performance_overview", self._performance_overview_node)
         graph.add_node("analyze_metrics", self._analyze_metrics_node)
         graph.add_node("sql_analysis", self._sql_analysis_node)
+        graph.add_node("enhanced_rca", self._enhanced_rca_node) # New Node
         graph.add_node("generate_recommendations", self._generate_recommendations_node)
         graph.add_node("output", self._output_node)
 
@@ -414,13 +396,54 @@ class DbTroubleshootAgent(BaseAgent, SelfHealingMixin):
         # Add edges
         graph.add_edge("discover", "performance_overview")
         graph.add_edge("performance_overview", "analyze_metrics")
-        graph.add_edge("analyze_metrics", "sql_analysis")
+        
+        # Branching: If RCA requested, go to enhanced_rca
+        graph.add_conditional_edges(
+            "analyze_metrics",
+            self._route_analysis,
+            {
+                "standard": "sql_analysis",
+                "advanced_rca": "enhanced_rca"
+            }
+        )
+        
         graph.add_edge("sql_analysis", "generate_recommendations")
+        graph.add_edge("enhanced_rca", "output") # RCA generates its own report for now
         graph.add_edge("generate_recommendations", "output")
         graph.add_edge("output", END)
 
         self._graph = graph.compile()
         return self._graph
+
+    def _route_analysis(self, state: TroubleshootState) -> str:
+        """Route to standard or advanced analysis."""
+        if "advanced" in state.query.lower() or "rca" in state.query.lower():
+            return "advanced_rca"
+        return "standard"
+
+    async def _enhanced_rca_node(self, state: TroubleshootState) -> dict[str, Any]:
+        """Execute the Enhanced Database Troubleshooting Skill."""
+        skill = DBTroubleshootSkill(self)
+        workflow = skill.build_graph()
+        
+        # Map agent state to skill state
+        skill_input = {
+            "query": state.query,
+            "database_id": state.database_id,
+            "compartment_id": state.compartment_id
+        }
+        
+        result = await workflow.ainvoke(skill_input)
+        
+        # Map skill output back to agent result
+        return {
+            "result": DbAnalysisResult(
+                summary=result.get("final_report", "No report generated."),
+                health_score=50, # Placeholder
+                severity=AnalysisSeverity.HIGH if "Critical" in result.get("final_report", "") else AnalysisSeverity.MEDIUM
+            ),
+            "phase": "output"
+        }
 
     async def _call_mcp_tool(
         self,
@@ -1426,7 +1449,7 @@ class DbTroubleshootAgent(BaseAgent, SelfHealingMixin):
 
         # Use the auto-detect tool that finds snapshots automatically
         result = await self._call_mcp_tool(
-            "get_awr_db_report_auto",
+            "oci_dbmgmt_get_awr_report_auto",
             {
                 "managed_database_id": managed_database_id,
                 "hours_back": hours_back,

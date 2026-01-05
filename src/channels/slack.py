@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -28,21 +29,235 @@ import structlog
 from opentelemetry import trace
 
 from src.channels.async_runtime import run_async
-from src.channels.conversation import ConversationManager, get_conversation_manager
+from src.channels.conversation import get_conversation_manager
 from src.channels.slack_catalog import (
     Category,
-    QUICK_ACTIONS,
     build_catalog_blocks,
     build_error_recovery_blocks,
     build_follow_up_blocks,
     build_runbook_blocks,
     get_follow_up_suggestions,
 )
+from src.formatting.parser import ResponseParser
 from src.formatting.slack import SlackFormatter
+from src.formatting.thinking import format_thinking_for_slack
 from src.observability import get_trace_id, init_observability
 from src.observability.tracing import get_tracer
+from src.oci.profile_manager import ProfileManager
 
 logger = structlog.get_logger(__name__)
+
+# Pending authentication context storage
+# Stores user/channel/query info when auth is requested so we can notify them when auth succeeds
+_pending_auth_contexts: dict[str, dict] = {}
+
+
+def store_pending_auth_context(user_id: str, channel_id: str, thread_ts: str | None, query: str) -> None:
+    """Store pending auth context for a user.
+
+    Called when showing auth URL to user. Context is retrieved when auth succeeds
+    to send a follow-up notification.
+
+    Args:
+        user_id: Slack user ID
+        channel_id: Channel where auth was requested
+        thread_ts: Thread timestamp (if in thread)
+        query: Original query that triggered auth requirement
+    """
+    _pending_auth_contexts[user_id] = {
+        "channel_id": channel_id,
+        "thread_ts": thread_ts,
+        "query": query,
+        "timestamp": __import__("time").time(),
+    }
+    logger.debug("Stored pending auth context", user_id=user_id, channel=channel_id)
+
+
+def get_pending_auth_context(user_id: str) -> dict | None:
+    """Get and remove pending auth context for a user.
+
+    Args:
+        user_id: Slack user ID
+
+    Returns:
+        Context dict or None if no pending context
+    """
+    return _pending_auth_contexts.pop(user_id, None)
+
+
+def get_all_pending_auth_contexts() -> dict[str, dict]:
+    """Get all pending auth contexts (for broadcast notification).
+
+    Returns:
+        Dict of user_id -> context
+    """
+    return _pending_auth_contexts.copy()
+
+
+def notify_auth_success(bot_token: str | None = None) -> None:
+    """Send Slack notification to all users with pending auth contexts.
+
+    Called by the OCA callback server when authentication succeeds.
+    Notifies users they're authenticated and can continue with their request.
+
+    Args:
+        bot_token: Slack bot token (uses env var if not provided)
+    """
+    import time
+
+    token = bot_token or os.getenv("SLACK_BOT_TOKEN")
+    if not token:
+        logger.warning("Cannot notify auth success: no bot token")
+        return
+
+    contexts = get_all_pending_auth_contexts()
+    if not contexts:
+        logger.debug("No pending auth contexts to notify")
+        return
+
+    try:
+        from slack_sdk import WebClient
+        client = WebClient(token=token)
+
+        for user_id, context in contexts.items():
+            channel_id = context.get("channel_id")
+            thread_ts = context.get("thread_ts")
+            query = context.get("query", "")
+            timestamp = context.get("timestamp", 0)
+
+            # Skip if context is too old (> 30 minutes)
+            if time.time() - timestamp > 1800:
+                logger.debug("Skipping stale auth context", user_id=user_id)
+                continue
+
+            try:
+                # Build auth success message
+                blocks = [
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": ":white_check_mark: *Authentication successful!*\n\nYou're now logged in. I'll continue with your request.",
+                        }
+                    },
+                ]
+
+                # Add original query context if available
+                if query:
+                    blocks.append({
+                        "type": "context",
+                        "elements": [{
+                            "type": "mrkdwn",
+                            "text": f":speech_balloon: _Your request:_ \"{query[:100]}{'...' if len(query) > 100 else ''}\""
+                        }]
+                    })
+
+                # Send to channel/thread
+                client.chat_postMessage(
+                    channel=channel_id,
+                    thread_ts=thread_ts,
+                    text="Authentication successful! You can now continue with your request.",
+                    blocks=blocks,
+                )
+                logger.info("Sent auth success notification", user_id=user_id, channel=channel_id)
+
+            except Exception as e:
+                logger.warning("Failed to notify user of auth success", user_id=user_id, error=str(e))
+
+    except ImportError:
+        logger.error("slack_sdk not available for auth notification")
+    except Exception as e:
+        logger.error("Failed to send auth success notifications", error=str(e))
+
+
+def build_profile_selection_blocks(profiles: list, current_profile: str | None = None) -> list[dict]:
+    """Build Slack blocks for OCI profile selection.
+
+    Args:
+        profiles: List of ProfileInfo objects
+        current_profile: Currently active profile name
+
+    Returns:
+        Slack Block Kit blocks for profile selection
+    """
+    blocks = [
+        {
+            "type": "header",
+            "text": {
+                "type": "plain_text",
+                "text": ":gear: Select OCI Profile",
+                "emoji": True,
+            }
+        },
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": "Multiple OCI profiles are available. Please select which tenancy you want to work with:",
+            }
+        },
+    ]
+
+    # Build profile buttons (max 5 per actions block)
+    profile_buttons = []
+    for profile in profiles:
+        label = profile.display_name or profile.name
+        style = "primary" if profile.name == current_profile else None
+
+        button = {
+            "type": "button",
+            "text": {
+                "type": "plain_text",
+                "text": f":cloud: {label}" if profile.name != current_profile else f":white_check_mark: {label}",
+                "emoji": True,
+            },
+            "action_id": f"select_profile_{profile.name}",
+            "value": profile.name,
+        }
+        if style:
+            button["style"] = style
+        profile_buttons.append(button)
+
+    if profile_buttons:
+        blocks.append({
+            "type": "actions",
+            "elements": profile_buttons[:5],
+        })
+
+    # Add profile details
+    blocks.append({"type": "divider"})
+    for profile in profiles:
+        emoji = ":white_check_mark:" if profile.name == current_profile else ":cloud:"
+        region_display = profile.region.replace("-", " ").title() if profile.region else "Unknown"
+        blocks.append({
+            "type": "context",
+            "elements": [{
+                "type": "mrkdwn",
+                "text": f"{emoji} *{profile.display_name or profile.name}*: `{region_display}` | `{profile.tenancy_ocid[:35]}...`",
+            }]
+        })
+
+    return blocks
+
+
+def build_profile_indicator_block(profile_name: str, profile_region: str) -> dict:
+    """Build a compact profile indicator context block.
+
+    Args:
+        profile_name: Active profile name
+        profile_region: Profile region
+
+    Returns:
+        Slack context block showing current profile
+    """
+    region_display = profile_region.replace("-", " ").title() if profile_region else "Unknown"
+    return {
+        "type": "context",
+        "elements": [{
+            "type": "mrkdwn",
+            "text": f":cloud: *Profile:* {profile_name} ({region_display}) | Type `profile` to change",
+        }]
+    }
 
 
 def get_oca_auth_url() -> str:
@@ -67,11 +282,21 @@ def get_oca_auth_url() -> str:
         hashlib.sha256(verifier.encode()).digest()
     ).decode().rstrip("=")
 
-    # Save verifier for later use
+    # Generate state and nonce for CSRF protection and OpenID Connect
+    # IDCS requires these for proper OAuth/OIDC flows
+    state = secrets.token_urlsafe(32)
+    nonce = secrets.token_urlsafe(32)
+
+    # Save verifier and state for later use
     CACHE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
     verifier_path = CACHE_DIR / "verifier.txt"
     verifier_path.write_text(verifier)
     verifier_path.chmod(0o600)
+
+    # Save state for CSRF verification on callback
+    state_path = CACHE_DIR / "state.txt"
+    state_path.write_text(state)
+    state_path.chmod(0o600)
 
     params = {
         "response_type": "code",
@@ -80,12 +305,15 @@ def get_oca_auth_url() -> str:
         "scope": "openid offline_access",
         "code_challenge": challenge,
         "code_challenge_method": "S256",
+        "state": state,
+        "nonce": nonce,
     }
 
     return f"{IDCS_OAUTH_URL}/oauth2/v1/authorize?{urlencode(params)}"
 
 # Slack formatter for response conversion
 _slack_formatter = SlackFormatter()
+_response_parser = ResponseParser()
 
 
 def build_welcome_blocks() -> list[dict]:
@@ -389,6 +617,9 @@ class SlackHandler:
         self._async_app = None  # Async app (lazy init)
         self._coordinator = None
         self._conversation_manager = get_conversation_manager()
+        self._bot_user_id: str | None = None
+        self._recent_event_ids: dict[str, float] = {}
+        self._event_dedupe_ttl = float(os.getenv("SLACK_EVENT_DEDUP_TTL_SECONDS", "120"))
 
         # Initialize observability FIRST - sets up tracer provider with OCI APM export
         # This MUST happen before getting the tracer to ensure spans are exported
@@ -396,6 +627,27 @@ class SlackHandler:
 
         # Now get tracer from the properly configured provider
         self._tracer = trace.get_tracer("oci-slack-handler")
+
+    def _is_duplicate_event(self, event: dict) -> bool:
+        """Return True if the event was recently processed."""
+        event_key = event.get("client_msg_id") or event.get("event_ts") or event.get("ts")
+        if not event_key:
+            return False
+        now = time.time()
+        cutoff = now - self._event_dedupe_ttl
+        for key, ts in list(self._recent_event_ids.items()):
+            if ts < cutoff:
+                self._recent_event_ids.pop(key, None)
+        if event_key in self._recent_event_ids:
+            return True
+        self._recent_event_ids[event_key] = now
+        return False
+
+    def _is_bot_mention(self, text: str) -> bool:
+        """Check if the message explicitly mentions this bot."""
+        if not text or not self._bot_user_id:
+            return False
+        return f"<@{self._bot_user_id}>" in text
 
     @property
     def app(self):
@@ -411,49 +663,210 @@ class SlackHandler:
             self._async_app = self._create_async_app()
         return self._async_app
 
-    async def _safe_client_call(self, method, **kwargs):
-        """Safely call a Slack client method that may be sync or async.
+    async def _safe_client_call(self, method, max_retries: int = 3, **kwargs):
+        """Safely call a Slack client method with retry logic.
 
         When running in sync mode through run_async(), the client is still
         the sync WebClient which returns SlackResponse directly (not a coroutine).
-        This helper handles both cases properly.
+        This helper handles both cases properly with exponential backoff retry.
 
         Args:
             method: The client method to call (e.g., client.chat_postMessage)
+            max_retries: Maximum retry attempts (default: 3)
             **kwargs: Arguments to pass to the method
 
         Returns:
             The result (SlackResponse) from the client method
         """
+        import asyncio
         import inspect
-        result = method(**kwargs)
-        # If the result is a coroutine (async client), await it
-        if inspect.iscoroutine(result):
-            return await result
-        # Otherwise (sync client), return directly
-        return result
+        from slack_sdk.errors import SlackApiError
 
-    async def _safe_say(self, say, **kwargs):
-        """Safely call the Slack say function that may be sync or async.
+        last_error = None
+        for attempt in range(max_retries):
+            try:
+                result = method(**kwargs)
+                # If the result is a coroutine (async client), await it
+                if inspect.iscoroutine(result):
+                    return await result
+                # Otherwise (sync client), return directly
+                return result
+            except SlackApiError as e:
+                last_error = e
+                if e.response.get("error") == "ratelimited":
+                    # Get retry-after header, default to exponential backoff
+                    retry_after = int(e.response.headers.get("Retry-After", 2 ** attempt))
+                    logger.warning(
+                        "Slack rate limited, waiting",
+                        retry_after=retry_after,
+                        attempt=attempt + 1,
+                    )
+                    await asyncio.sleep(retry_after)
+                else:
+                    raise
+            except (asyncio.TimeoutError, TimeoutError) as e:
+                last_error = e
+                if attempt < max_retries - 1:
+                    wait_time = 2 ** attempt
+                    logger.warning(
+                        "Slack API timeout, retrying",
+                        wait_time=wait_time,
+                        attempt=attempt + 1,
+                    )
+                    await asyncio.sleep(wait_time)
+                else:
+                    raise
+
+        if last_error:
+            raise last_error
+
+    def _build_thinking_blocks(self, steps: list) -> list[dict]:
+        """Build Slack blocks for thinking progress display.
+
+        Args:
+            steps: List of ThinkingStep objects
+
+        Returns:
+            Slack Block Kit blocks for the thinking progress
+        """
+        from src.agents.coordinator.transparency import ThinkingPhase, PHASE_EMOJIS
+
+        if not steps:
+            return [{
+                "type": "context",
+                "elements": [{
+                    "type": "mrkdwn",
+                    "text": ":hourglass_flowing_sand: *Processing your request...*",
+                }]
+            }]
+
+        # Build step text with phase emojis
+        step_texts = []
+        for step in steps[-5:]:  # Show last 5 steps
+            emoji = PHASE_EMOJIS.get(step.phase, ":gear:")
+            step_texts.append(f"{emoji} {step.message}")
+
+        blocks = [{
+            "type": "context",
+            "elements": [{
+                "type": "mrkdwn",
+                "text": ":brain: *Thinking Process*",
+            }]
+        }]
+
+        if step_texts:
+            blocks.append({
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": "\n".join(step_texts),
+                }
+            })
+
+        return blocks
+
+    async def _safe_say(self, say, max_retries: int = 3, **kwargs):
+        """Safely call the Slack say function with retry logic.
 
         When running in sync mode through run_async(), the say function
         returns SlackResponse directly. In async mode, it returns a coroutine.
-        This helper handles both cases properly.
+        This helper handles both cases with exponential backoff retry.
 
         Args:
             say: The say function from Slack Bolt
+            max_retries: Maximum retry attempts (default: 3)
             **kwargs: Arguments to pass to say (text, blocks, thread_ts, etc.)
 
         Returns:
             The result from say
         """
+        import asyncio
         import inspect
-        result = say(**kwargs)
-        # If the result is a coroutine (async mode), await it
-        if inspect.iscoroutine(result):
-            return await result
-        # Otherwise (sync mode), return directly
-        return result
+        from slack_sdk.errors import SlackApiError
+
+        last_error = None
+        for attempt in range(max_retries):
+            try:
+                result = say(**kwargs)
+                # If the result is a coroutine (async mode), await it
+                if inspect.iscoroutine(result):
+                    result = await result
+                return result
+            except SlackApiError as e:
+                last_error = e
+                if e.response.get("error") == "ratelimited":
+                    retry_after = int(e.response.headers.get("Retry-After", 2 ** attempt))
+                    logger.warning(
+                        "Slack say rate limited, waiting",
+                        retry_after=retry_after,
+                        attempt=attempt + 1,
+                    )
+                    await asyncio.sleep(retry_after)
+                else:
+                    raise
+            except (asyncio.TimeoutError, TimeoutError) as e:
+                last_error = e
+                if attempt < max_retries - 1:
+                    wait_time = 2 ** attempt
+                    logger.warning(
+                        "Slack say timeout, retrying",
+                        wait_time=wait_time,
+                        attempt=attempt + 1,
+                    )
+                    await asyncio.sleep(wait_time)
+                else:
+                    raise
+            except Exception as e:
+                # Catch-all for unexpected errors
+                logger.error("Unexpected error in _safe_say", error=str(e), error_type=type(e).__name__)
+                raise
+
+        if last_error:
+            raise last_error
+
+    async def _send_plain_text_fallback(
+        self,
+        client: Any,
+        channel: str,
+        thread_ts: str | None,
+        text: str,
+    ) -> None:
+        """Send a minimal plain-text response if Block Kit send fails."""
+        try:
+            await self._safe_client_call(
+                client.chat_postMessage,
+                channel=channel,
+                thread_ts=thread_ts,
+                text=text[:2900],
+            )
+        except Exception as e:
+            logger.error("Slack fallback send failed", error=str(e))
+
+    async def _safe_say_with_fallback(
+        self,
+        say: Callable,
+        client: Any,
+        channel: str,
+        thread_ts: str | None,
+        text: str,
+        blocks: list[dict] | None = None,
+    ) -> None:
+        """Send response with Block Kit, fallback to plain text on failure."""
+        try:
+            await self._safe_say(
+                say,
+                text=text,
+                blocks=blocks,
+                thread_ts=thread_ts,
+            )
+        except Exception as e:
+            logger.error("Slack say failed, falling back", error=str(e))
+            await self._send_plain_text_fallback(
+                client=client,
+                channel=channel,
+                thread_ts=thread_ts,
+                text=text,
+            )
 
     def _create_app(self):
         """Create and configure the sync Slack Bolt app."""
@@ -530,7 +943,8 @@ class SlackHandler:
         @app.event("app_mention")
         def handle_mention(event: dict, say: Callable, client: Any) -> None:
             """Handle @mentions of the bot."""
-            print(f"[SLACK] Received mention from {event.get('user')}: {event.get('text', '')[:50]}", flush=True)
+            if self._is_duplicate_event(event):
+                return
             # Use shared async runtime instead of asyncio.run()
             run_async(self._process_message(event, say, client))
 
@@ -540,24 +954,23 @@ class SlackHandler:
             text = event.get("text", "")
             channel_type = event.get("channel_type")
             thread_ts = event.get("thread_ts")
-            print(f"[SLACK] Received message type={channel_type}, thread={thread_ts is not None}: {text[:50]}", flush=True)
-
             # Skip bot's own messages and message_changed events
             if event.get("bot_id") or event.get("subtype"):
-                print("[SLACK] Skipping bot/subtype message", flush=True)
+                return
+            if self._is_duplicate_event(event):
                 return
 
             # Handle DMs
             if channel_type == "im":
-                print("[SLACK] Processing DM...", flush=True)
                 run_async(self._process_message(event, say, client))
             # Handle thread replies (user continuing conversation without @mention)
             elif thread_ts:
-                print("[SLACK] Processing thread reply...", flush=True)
+                run_async(self._process_message(event, say, client))
+            elif self._is_bot_mention(text):
                 run_async(self._process_message(event, say, client))
             else:
                 # Skip non-threaded channel messages - app_mention handles @mentions
-                print("[SLACK] Skipping channel message (need @mention or thread reply)", flush=True)
+                pass
 
         @app.action(re.compile(r"^agent_action_.*"))
         def handle_action(ack: Callable, body: dict, client: Any) -> None:
@@ -633,6 +1046,20 @@ class SlackHandler:
             query = action.get("value", "")
             run_async(self._handle_quick_action(body, client, query))
 
+        @app.action(re.compile(r"^select_profile_.*"))
+        def handle_profile_selection(ack: Callable, body: dict, client: Any) -> None:
+            """Handle OCI profile selection button."""
+            ack()
+            action = body.get("actions", [{}])[0]
+            profile = action.get("value", "")
+            run_async(self._handle_profile_selection(body, client, profile))
+
+        @app.action("show_profile_selector")
+        def handle_show_profiles(ack: Callable, body: dict, client: Any) -> None:
+            """Handle show profile selector button."""
+            ack()
+            run_async(self._handle_show_profile_selector(body, client))
+
         @app.command("/oci")
         def handle_command(ack: Callable, body: dict, respond: Callable) -> None:
             """Handle /oci slash command."""
@@ -650,7 +1077,8 @@ class SlackHandler:
         @app.event("app_mention")
         async def handle_mention(event: dict, say, client) -> None:
             """Handle @mentions of the bot."""
-            print(f"[SLACK-ASYNC] Received mention from {event.get('user')}: {event.get('text', '')[:50]}", flush=True)
+            if self._is_duplicate_event(event):
+                return
             await self._process_message(event, say, client)
 
         @app.event("message")
@@ -659,24 +1087,27 @@ class SlackHandler:
             text = event.get("text", "")
             channel_type = event.get("channel_type")
             thread_ts = event.get("thread_ts")
-            print(f"[SLACK-ASYNC] Received message type={channel_type}, thread={thread_ts is not None}: {text[:50]}", flush=True)
+            subtype = event.get("subtype")
+            bot_id = event.get("bot_id")
+            user = event.get("user")
 
             # Skip bot's own messages and message_changed events
-            if event.get("bot_id") or event.get("subtype"):
-                print("[SLACK-ASYNC] Skipping bot/subtype message", flush=True)
+            if bot_id or subtype:
+                return
+            if self._is_duplicate_event(event):
                 return
 
             # Handle DMs
             if channel_type == "im":
-                print("[SLACK-ASYNC] Processing DM...", flush=True)
                 await self._process_message(event, say, client)
             # Handle thread replies (user continuing conversation without @mention)
             elif thread_ts:
-                print("[SLACK-ASYNC] Processing thread reply...", flush=True)
+                await self._process_message(event, say, client)
+            elif self._is_bot_mention(text):
                 await self._process_message(event, say, client)
             else:
                 # Skip non-threaded channel messages - app_mention handles @mentions
-                print("[SLACK-ASYNC] Skipping channel message (need @mention or thread reply)", flush=True)
+                pass
 
         @app.action(re.compile(r"^agent_action_.*"))
         async def handle_action(ack, body: dict, client) -> None:
@@ -752,6 +1183,20 @@ class SlackHandler:
             query = action.get("value", "")
             await self._handle_quick_action(body, client, query)
 
+        @app.action(re.compile(r"^select_profile_.*"))
+        async def handle_profile_selection(ack, body: dict, client) -> None:
+            """Handle OCI profile selection button."""
+            await ack()
+            action = body.get("actions", [{}])[0]
+            profile = action.get("value", "")
+            await self._handle_profile_selection(body, client, profile)
+
+        @app.action("show_profile_selector")
+        async def handle_show_profiles(ack, body: dict, client) -> None:
+            """Handle show profile selector button."""
+            await ack()
+            await self._handle_show_profile_selector(body, client)
+
         @app.command("/oci")
         async def handle_command(ack, body: dict, respond) -> None:
             """Handle /oci slash command."""
@@ -773,7 +1218,6 @@ class SlackHandler:
             say: Function to send a response
             client: Slack client
         """
-        print("[SLACK] Processing message...", flush=True)
         with self._tracer.start_as_current_span("slack_message") as span:
             user = event.get("user", "unknown")
             channel = event.get("channel")
@@ -783,8 +1227,6 @@ class SlackHandler:
             # Remove bot mention from text
             text = self._clean_message(text)
             text_lower = text.lower().strip()
-            print(f"[SLACK] Cleaned text: {text[:100]}", flush=True)
-
             span.set_attribute("slack.user", user)
             span.set_attribute("slack.channel", channel)
             span.set_attribute("message.length", len(text))
@@ -800,37 +1242,61 @@ class SlackHandler:
             try:
                 # Handle special commands first
                 if text_lower in ("help", "?", "commands"):
-                    print("[SLACK] Sending help message", flush=True)
                     await self._safe_say(
                         say,
                         text="OCI Coordinator Help",
                         blocks=build_help_blocks(),
                         thread_ts=thread_ts,
                     )
-                    print("[SLACK] Help message sent", flush=True)
                     return
 
                 if text_lower in ("hello", "hi", "hey", "start", "welcome"):
-                    print("[SLACK] Sending welcome message", flush=True)
                     await self._safe_say(
                         say,
                         text="Welcome to OCI Coordinator!",
                         blocks=build_welcome_blocks(),
                         thread_ts=thread_ts,
                     )
-                    print("[SLACK] Welcome message sent", flush=True)
                     return
 
                 # Handle catalog command
                 if text_lower in ("catalog", "menu", "runbook", "runbooks", "troubleshoot"):
-                    print("[SLACK] Sending catalog", flush=True)
                     await self._safe_say(
                         say,
                         text="OCI Troubleshooting Catalog",
                         blocks=build_catalog_blocks(),
                         thread_ts=thread_ts,
                     )
-                    print("[SLACK] Catalog sent", flush=True)
+                    return
+
+                # Handle profile command - show profile selector
+                if text_lower in ("profile", "profiles", "switch profile", "change profile", "tenancy"):
+                    profile_manager = ProfileManager.get_instance()
+                    await profile_manager.initialize()
+                    profiles = profile_manager.list_profiles()
+                    current_profile = await profile_manager.get_active_profile(user)
+
+                    if len(profiles) <= 1:
+                        # Only one profile, no need for selection
+                        await self._safe_say(
+                            say,
+                            text=f"Using OCI profile: {current_profile}",
+                            blocks=[{
+                                "type": "section",
+                                "text": {
+                                    "type": "mrkdwn",
+                                    "text": f":cloud: Only one OCI profile is configured: *{current_profile}*",
+                                }
+                            }],
+                            thread_ts=thread_ts,
+                        )
+                    else:
+                        await self._safe_say(
+                            say,
+                            text="Select OCI Profile",
+                            blocks=build_profile_selection_blocks(profiles, current_profile),
+                            thread_ts=thread_ts,
+                        )
                     return
 
                 # Initialize conversation context for this thread
@@ -840,23 +1306,23 @@ class SlackHandler:
                 from src.llm.oca import is_oca_authenticated
 
                 auth_status = is_oca_authenticated()
-                print(f"[SLACK] OCA auth status: {auth_status}", flush=True)
-
                 if not auth_status:
                     auth_url = get_oca_auth_url()
-                    print("[SLACK] Sending auth required message", flush=True)
+                    # Store pending auth context so we can notify user when auth succeeds
+                    store_pending_auth_context(user, channel, thread_ts, text)
                     await self._safe_say(
                         say,
                         text="Authentication required. Please log in with Oracle SSO.",
                         blocks=build_auth_required_blocks(auth_url),
                         thread_ts=thread_ts,
                     )
-                    print("[SLACK] Auth message sent", flush=True)
                     return
 
                 # 3-second ack pattern: Send immediate "thinking" message
                 # This ensures Slack doesn't timeout while we process
                 thinking_ts = None
+                thinking_steps = []  # Collect thinking steps for live updates
+
                 try:
                     # Use _safe_client_call to handle both sync and async clients
                     thinking_response = await self._safe_client_call(
@@ -877,22 +1343,55 @@ class SlackHandler:
                         ],
                     )
                     thinking_ts = thinking_response.get("ts")
-                    print(f"[SLACK] Sent thinking message: {thinking_ts}", flush=True)
                 except Exception as e:
                     logger.warning("Failed to send thinking message", error=str(e))
+
+                # Create thinking update callback for real-time progress
+                async def on_thinking_update(step):
+                    """Update the thinking message with new step."""
+                    nonlocal thinking_steps
+                    thinking_steps.append(step)
+
+                    if thinking_ts:
+                        try:
+                            blocks = self._build_thinking_blocks(thinking_steps)
+                            await self._safe_client_call(
+                                client.chat_update,
+                                channel=channel,
+                                ts=thinking_ts,
+                                text=f":brain: {step.message}",
+                                blocks=blocks,
+                            )
+                        except Exception as e:
+                            # Don't fail processing if update fails
+                            logger.debug("Failed to update thinking message", error=str(e))
 
                 # Process with coordinator (may take time)
                 response = None
                 error_msg = None
                 try:
-                    response = await self._invoke_coordinator(
-                        text=text,
-                        user_id=user,
-                        channel_id=channel,
-                        thread_ts=thread_ts,
+                    # Default 300s to accommodate high-latency LLM providers (US-EMEA OCA ~15-20s/call)
+                    coordinator_timeout_s = float(os.getenv("SLACK_COORDINATOR_TIMEOUT_SECONDS", "300"))
+                    response = await asyncio.wait_for(
+                        self._invoke_coordinator(
+                            text=text,
+                            user_id=user,
+                            channel_id=channel,
+                            thread_ts=thread_ts,
+                            on_thinking_update=on_thinking_update,
+                        ),
+                        timeout=coordinator_timeout_s,
                     )
+                except asyncio.TimeoutError:
+                    error_msg = (
+                        "Coordinator timed out after "
+                        f"{os.getenv('SLACK_COORDINATOR_TIMEOUT_SECONDS', '300')}s"
+                    )
+                    logger.error("Coordinator timed out", timeout_s=coordinator_timeout_s)
                 except Exception as e:
                     error_msg = str(e)
+                    import traceback
+                    traceback.print_exc()
                     logger.error("Coordinator failed", error=error_msg)
 
                 # Delete the thinking message now that we have a response
@@ -904,20 +1403,22 @@ class SlackHandler:
 
                 # Handle coordinator error
                 if error_msg:
-                    await self._safe_say(
-                        say,
+                    await self._safe_say_with_fallback(
+                        say=say,
+                        client=client,
+                        channel=channel,
+                        thread_ts=thread_ts,
                         text=f"Error processing request: {error_msg[:100]}",
                         blocks=build_error_blocks(f"Request failed: {error_msg}"),
-                        thread_ts=thread_ts,
                     )
                     return
 
                 # Format and send response
-                print(f"[SLACK] Got response: {response}", flush=True)
                 if response:
                     # Check if it's an auth error
                     if response.get("type") == "auth_required":
                         auth_url = get_oca_auth_url()
+                        store_pending_auth_context(user, channel, thread_ts, text)
                         await self._safe_say(
                             say,
                             text="Authentication required",
@@ -928,6 +1429,7 @@ class SlackHandler:
                         error_msg = response.get("message", "Unknown error")
                         if "authentication" in error_msg.lower():
                             auth_url = get_oca_auth_url()
+                            store_pending_auth_context(user, channel, thread_ts, text)
                             await self._safe_say(
                                 say,
                                 text="Authentication required",
@@ -952,27 +1454,42 @@ class SlackHandler:
                                 "I processed your request but the response was empty. "
                                 "Please try rephrasing your question."
                             )
-                            print(f"[SLACK] Warning: Empty response received", flush=True)
-
                         # Get follow-up suggestions based on query type
                         routing_type = response.get("agent_id", text)
                         suggestions = get_follow_up_suggestions(routing_type)
                         follow_up_blocks = build_follow_up_blocks(suggestions)
 
-                        # Combine response blocks with follow-up suggestions
-                        all_blocks = formatted.get("blocks", []) or []
-                        if follow_up_blocks and all_blocks:
+                        # Build all blocks with thinking summary (if available)
+                        all_blocks = []
+
+                        # Add thinking summary as context (collapsed)
+                        thinking_summary = response.get("thinking_summary")
+                        if thinking_summary:
+                            all_blocks.append({
+                                "type": "context",
+                                "elements": [{
+                                    "type": "mrkdwn",
+                                    "text": f":brain: {thinking_summary}",
+                                }]
+                            })
+
+                        # Add main response blocks
+                        response_blocks = formatted.get("blocks", []) or []
+                        if response_blocks:
+                            all_blocks.extend(response_blocks)
+
+                        # Add follow-up suggestions
+                        if follow_up_blocks:
                             all_blocks.extend(follow_up_blocks)
 
-                        print(f"[SLACK] Sending formatted response (length={len(msg_text)})", flush=True)
-                        await self._safe_say(
-                            say,
+                        await self._safe_say_with_fallback(
+                            say=say,
+                            client=client,
+                            channel=channel,
+                            thread_ts=thread_ts,
                             text=msg_text[:200] if isinstance(msg_text, str) else "Response",
                             blocks=all_blocks if all_blocks else None,
-                            thread_ts=thread_ts,
                         )
-                        print("[SLACK] Response sent", flush=True)
-
                         # Update conversation memory
                         try:
                             await self._conversation_manager.add_message(thread_ts, "user", text)
@@ -987,7 +1504,6 @@ class SlackHandler:
                         # Send file attachments if present
                         attachments = response.get("attachments", [])
                         if attachments:
-                            print(f"[SLACK] Sending {len(attachments)} file attachment(s)", flush=True)
                             for attachment in attachments:
                                 if isinstance(attachment, dict):
                                     self._send_file_attachment(
@@ -1027,18 +1543,19 @@ class SlackHandler:
                     recovery_blocks = build_error_recovery_blocks("default", text)
                     error_blocks.extend(recovery_blocks)
 
-                    await self._safe_say(
-                        say,
+                    await self._safe_say_with_fallback(
+                        say=say,
+                        client=client,
+                        channel=channel,
+                        thread_ts=thread_ts,
                         text="I couldn't process that request.",
                         blocks=error_blocks,
-                        thread_ts=thread_ts,
                     )
 
                 span.set_attribute("response.success", True)
 
             except ValueError as e:
                 error_msg = str(e)
-                print(f"[SLACK] ValueError: {error_msg}", flush=True)
                 logger.error(
                     "Error processing message",
                     error=error_msg,
@@ -1050,6 +1567,7 @@ class SlackHandler:
                 # Check if it's an auth error
                 if "authentication" in error_msg.lower() or "requires authentication" in error_msg.lower():
                     auth_url = get_oca_auth_url()
+                    store_pending_auth_context(user, channel, thread_ts, text)
                     await self._safe_say(
                         say,
                         text="Authentication required",
@@ -1057,11 +1575,13 @@ class SlackHandler:
                         thread_ts=thread_ts,
                     )
                 else:
-                    await self._safe_say(
-                        say,
+                    await self._safe_say_with_fallback(
+                        say=say,
+                        client=client,
+                        channel=channel,
+                        thread_ts=thread_ts,
                         text=f"Error: {error_msg[:100]}",
                         blocks=build_error_blocks(error_msg[:200]),
-                        thread_ts=thread_ts,
                     )
 
                 # Add error reaction
@@ -1085,7 +1605,6 @@ class SlackHandler:
                     pass
 
             except Exception as e:
-                print(f"[SLACK] Exception: {e!s}", flush=True)
                 import traceback
                 traceback.print_exc()
                 logger.error(
@@ -1097,11 +1616,13 @@ class SlackHandler:
                 span.set_attribute("error.message", str(e))
 
                 # Send error response
-                await self._safe_say(
-                    say,
+                await self._safe_say_with_fallback(
+                    say=say,
+                    client=client,
+                    channel=channel,
+                    thread_ts=thread_ts,
                     text=f"Error: {str(e)[:100]}",
                     blocks=build_error_blocks(str(e)[:200]),
-                    thread_ts=thread_ts,
                 )
 
                 # Add error reaction
@@ -1159,8 +1680,10 @@ class SlackHandler:
                 # Check OCA authentication status
                 from src.llm.oca import is_oca_authenticated
 
+                channel_id = body.get("channel_id")
                 if not is_oca_authenticated():
                     auth_url = get_oca_auth_url()
+                    store_pending_auth_context(user, channel_id, None, text)
                     respond(blocks=build_auth_required_blocks(auth_url))
                     return
 
@@ -1168,18 +1691,20 @@ class SlackHandler:
                 response = await self._invoke_coordinator(
                     text=text,
                     user_id=user,
-                    channel_id=body.get("channel_id"),
+                    channel_id=channel_id,
                 )
 
                 if response:
                     # Check for auth errors
                     if response.get("type") == "auth_required":
                         auth_url = get_oca_auth_url()
+                        store_pending_auth_context(user, channel_id, None, text)
                         respond(blocks=build_auth_required_blocks(auth_url))
                     elif response.get("type") == "error":
                         error_msg = response.get("message", "Unknown error")
                         if "authentication" in error_msg.lower():
                             auth_url = get_oca_auth_url()
+                            store_pending_auth_context(user, channel_id, None, text)
                             respond(blocks=build_auth_required_blocks(auth_url))
                         else:
                             respond(blocks=build_error_blocks(error_msg))
@@ -1197,6 +1722,7 @@ class SlackHandler:
                 logger.error("Error processing command", error=error_msg)
                 if "authentication" in error_msg.lower():
                     auth_url = get_oca_auth_url()
+                    store_pending_auth_context(user, channel_id, None, text)
                     respond(blocks=build_auth_required_blocks(auth_url))
                 else:
                     respond(blocks=build_error_blocks(error_msg[:200]))
@@ -1414,12 +1940,130 @@ class SlackHandler:
                 blocks=error_blocks,
             )
 
+    async def _handle_profile_selection(
+        self,
+        body: dict,
+        client: Any,
+        profile: str,
+    ) -> None:
+        """Handle OCI profile selection.
+
+        Updates the user's active profile and confirms the change.
+
+        Args:
+            body: Slack action body
+            client: Slack client
+            profile: Selected profile name
+        """
+        channel = body.get("channel", {}).get("id")
+        thread_ts = body.get("message", {}).get("thread_ts") or body.get("message", {}).get("ts")
+        user_id = body.get("user", {}).get("id", "unknown")
+
+        logger.info("Profile selection", profile=profile, user=user_id)
+
+        try:
+            # Update user's active profile
+            profile_manager = ProfileManager.get_instance()
+            await profile_manager.initialize()
+
+            success = await profile_manager.set_active_profile(user_id, profile)
+
+            if success:
+                profile_info = profile_manager.get_profile(profile)
+                region_display = profile_info.region.replace("-", " ").title() if profile_info and profile_info.region else "Unknown"
+
+                # Send confirmation
+                await self._safe_client_call(
+                    client.chat_postMessage,
+                    channel=channel,
+                    thread_ts=thread_ts,
+                    text=f"Profile switched to {profile}",
+                    blocks=[
+                        {
+                            "type": "section",
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": f":white_check_mark: *Profile switched to {profile}*\n\nRegion: `{region_display}`\n\nAll subsequent queries will use this profile.",
+                            }
+                        },
+                        {
+                            "type": "context",
+                            "elements": [{
+                                "type": "mrkdwn",
+                                "text": ":bulb: Type `profile` to change profiles later.",
+                            }]
+                        }
+                    ],
+                )
+            else:
+                await self._safe_client_call(
+                    client.chat_postMessage,
+                    channel=channel,
+                    thread_ts=thread_ts,
+                    text="Failed to switch profile",
+                    blocks=build_error_blocks(
+                        f"Could not switch to profile '{profile}'",
+                        "Please try again or contact support."
+                    ),
+                )
+
+        except Exception as e:
+            logger.error("Profile selection failed", profile=profile, error=str(e))
+            await self._safe_client_call(
+                client.chat_postMessage,
+                channel=channel,
+                thread_ts=thread_ts,
+                text=f"Error: {str(e)[:100]}",
+                blocks=build_error_blocks(str(e)[:200]),
+            )
+
+    async def _handle_show_profile_selector(
+        self,
+        body: dict,
+        client: Any,
+    ) -> None:
+        """Show the profile selector UI.
+
+        Args:
+            body: Slack action body
+            client: Slack client
+        """
+        channel = body.get("channel", {}).get("id")
+        thread_ts = body.get("message", {}).get("thread_ts") or body.get("message", {}).get("ts")
+        user_id = body.get("user", {}).get("id", "unknown")
+
+        try:
+            profile_manager = ProfileManager.get_instance()
+            await profile_manager.initialize()
+
+            profiles = profile_manager.list_profiles()
+            current_profile = await profile_manager.get_active_profile(user_id)
+
+            await self._safe_client_call(
+                client.chat_postMessage,
+                channel=channel,
+                thread_ts=thread_ts,
+                text="Select OCI Profile",
+                blocks=build_profile_selection_blocks(profiles, current_profile),
+            )
+
+        except Exception as e:
+            logger.error("Show profile selector failed", error=str(e))
+            await self._safe_client_call(
+                client.chat_postMessage,
+                channel=channel,
+                thread_ts=thread_ts,
+                text=f"Error: {str(e)[:100]}",
+                blocks=build_error_blocks(str(e)[:200]),
+            )
+
     async def _invoke_coordinator(
         self,
         text: str,
         user_id: str,
         channel_id: str | None = None,
         thread_ts: str | None = None,
+        on_thinking_update: Any | None = None,
     ) -> dict | None:
         """Invoke the coordinator to process a request.
 
@@ -1432,6 +2076,7 @@ class SlackHandler:
             user_id: Slack user ID
             channel_id: Slack channel ID
             thread_ts: Thread timestamp for threading
+            on_thinking_update: Optional callback for real-time thinking updates
 
         Returns:
             Agent response or None
@@ -1441,6 +2086,17 @@ class SlackHandler:
         with self._tracer.start_as_current_span("invoke_coordinator") as span:
             span.set_attribute("input.text", text[:100])
             span.set_attribute("user.id", user_id)
+
+            # Get user's active OCI profile
+            profile_context = None
+            try:
+                profile_manager = ProfileManager.get_instance()
+                await profile_manager.initialize()
+                profile_context = await profile_manager.get_profile_context(user_id)
+                span.set_attribute("oci.profile", profile_context.get("profile", "DEFAULT"))
+            except Exception as e:
+                logger.warning("Failed to get profile context", error=str(e))
+                profile_context = {"profile": "DEFAULT", "needs_selection": False}
 
             try:
                 # Try LangGraph coordinator first (if enabled)
@@ -1452,6 +2108,8 @@ class SlackHandler:
                             text=text,
                             user_id=user_id,
                             thread_id=thread_ts,
+                            on_thinking_update=on_thinking_update,
+                            profile_context=profile_context,
                         )
                         if result and result.get("success"):
                             span.set_attribute("routing.type", result.get("routing_type", "langgraph"))
@@ -1469,17 +2127,32 @@ class SlackHandler:
                                 "query": text,
                                 "message": result.get("response", ""),
                                 "sections": [],
+                                "thinking_trace": result.get("thinking_trace"),
+                                "thinking_summary": result.get("thinking_summary"),
+                                "agent_candidates": result.get("agent_candidates", []),
                             }
                         elif result and result.get("error"):
+                            # Check if it's an auth error - propagate immediately
+                            error_msg = result.get("error", "")
+                            if "authentication" in error_msg.lower() or "requires authentication" in error_msg.lower():
+                                logger.info("OCA authentication required, returning auth_required response")
+                                return {"type": "auth_required"}
+
                             # LangGraph returned error, fall through to keyword routing
                             logger.warning(
                                 "LangGraph coordinator returned error, falling back to keyword routing",
                                 error=result.get("error"),
                             )
                     except Exception as e:
+                        # Check if it's an auth error - propagate immediately
+                        error_str = str(e)
+                        if "authentication" in error_str.lower() or "requires authentication" in error_str.lower():
+                            logger.info("OCA authentication required (exception)", error=error_str)
+                            return {"type": "auth_required"}
+
                         logger.warning(
                             "LangGraph coordinator failed, falling back to keyword routing",
-                            error=str(e),
+                            error=error_str,
                         )
 
                 # Fall back to keyword-based routing
@@ -1497,7 +2170,13 @@ class SlackHandler:
                 return agent_response
 
             except Exception as e:
-                logger.error("Coordinator invocation failed", error=str(e))
+                # Check if it's an auth error - propagate immediately
+                error_str = str(e)
+                if "authentication" in error_str.lower() or "requires authentication" in error_str.lower():
+                    logger.info("OCA authentication required (outer exception)", error=error_str)
+                    return {"type": "auth_required"}
+
+                logger.error("Coordinator invocation failed", error=error_str)
                 span.set_attribute("error", True)
                 return None
 
@@ -1506,6 +2185,8 @@ class SlackHandler:
         text: str,
         user_id: str,
         thread_id: str | None = None,
+        on_thinking_update: Any | None = None,
+        profile_context: dict | None = None,
     ) -> dict | None:
         """Invoke the LangGraph coordinator for workflow-first routing.
 
@@ -1514,11 +2195,15 @@ class SlackHandler:
         - Workflow-first routing (70%+ requests go to deterministic workflows)
         - Agent delegation for complex queries
         - Parallel orchestration for cross-domain queries
+        - Thinking trace for transparency
+        - Profile-aware OCI operations (uses user's selected profile)
 
         Args:
             text: User message text
             user_id: User ID
             thread_id: Thread ID for conversation continuity
+            on_thinking_update: Optional callback for real-time thinking updates
+            profile_context: OCI profile context (profile name, region, etc.)
 
         Returns:
             Coordinator result dict or None
@@ -1536,69 +2221,84 @@ class SlackHandler:
             try:
                 # Get or create coordinator instance
                 if not hasattr(self, "_langgraph_coordinator") or self._langgraph_coordinator is None:
-                    # Initialize coordinator components
-                    llm = get_llm()
+                    # Try to use pre-warmed coordinator from main.py (fastest path)
+                    from src.main import get_coordinator
+                    prewarm_coordinator = get_coordinator()
 
-                    # Use MCPConnectionManager for persistent tool catalog connections
-                    # This ensures we reuse the initialized MCP connections from main.py
-                    from src.mcp.connection_manager import MCPConnectionManager
-                    try:
-                        mcp_manager = await MCPConnectionManager.get_instance()
-                        tool_catalog = await mcp_manager.get_tool_catalog()
-                        if tool_catalog:
-                            logger.debug(
-                                "Using persistent MCP connections for LangGraph",
-                                tool_count=len(tool_catalog.list_tools()),
+                    if prewarm_coordinator is not None:
+                        self._langgraph_coordinator = prewarm_coordinator
+                        logger.info("Using pre-warmed LangGraph coordinator")
+                    else:
+                        # Fallback: lazy initialization (should rarely happen)
+                        logger.warning("Pre-warmed coordinator not available, initializing lazily")
+
+                        # Initialize coordinator components
+                        llm = get_llm()
+
+                        # Use MCPConnectionManager for persistent tool catalog connections
+                        # This ensures we reuse the initialized MCP connections from main.py
+                        from src.mcp.connection_manager import MCPConnectionManager
+                        try:
+                            mcp_manager = await MCPConnectionManager.get_instance()
+                            tool_catalog = await mcp_manager.get_tool_catalog()
+                            if tool_catalog:
+                                logger.debug(
+                                    "Using persistent MCP connections for LangGraph",
+                                    tool_count=len(tool_catalog.list_tools()),
+                                )
+                        except Exception as e:
+                            logger.warning(
+                                "MCPConnectionManager failed, falling back to direct catalog",
+                                error=str(e),
                             )
-                    except Exception as e:
-                        logger.warning(
-                            "MCPConnectionManager failed, falling back to direct catalog",
-                            error=str(e),
+                            tool_catalog = ToolCatalog.get_instance()
+
+                        agent_catalog = AgentCatalog.get_instance()
+
+                        # Warn if no tools available (likely MCP connection issue)
+                        if tool_catalog is None:
+                            logger.warning(
+                                "No tool catalog available for LangGraph coordinator",
+                            )
+                        elif len(tool_catalog.list_tools()) == 0:
+                            logger.warning(
+                                "Tool catalog is empty - MCP servers may not be connected",
+                            )
+
+                        # Initialize memory manager with Redis cache
+                        redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
+                        memory = SharedMemoryManager(redis_url=redis_url)
+
+                        # Load pre-built workflows for fast deterministic routing
+                        from src.agents.coordinator.workflows import get_workflow_registry
+                        workflow_registry = get_workflow_registry()
+
+                        # Create coordinator with workflows
+                        self._langgraph_coordinator = LangGraphCoordinator(
+                            llm=llm,
+                            tool_catalog=tool_catalog,
+                            agent_catalog=agent_catalog,
+                            memory=memory,
+                            workflow_registry=workflow_registry,
+                            max_iterations=10,
                         )
-                        tool_catalog = ToolCatalog.get_instance()
 
-                    agent_catalog = AgentCatalog.get_instance()
-
-                    # Warn if no tools available (likely MCP connection issue)
-                    if tool_catalog is None:
-                        logger.warning(
-                            "No tool catalog available for LangGraph coordinator",
-                        )
-                    elif len(tool_catalog.list_tools()) == 0:
-                        logger.warning(
-                            "Tool catalog is empty - MCP servers may not be connected",
+                        # Initialize the graph
+                        await self._langgraph_coordinator.initialize()
+                        logger.info(
+                            "LangGraph coordinator initialized for Slack",
+                            workflow_count=len(workflow_registry),
                         )
 
-                    # Initialize memory manager
-                    redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
-                    memory = SharedMemoryManager(redis_url=redis_url)
-
-                    # Load pre-built workflows for fast deterministic routing
-                    from src.agents.coordinator.workflows import get_workflow_registry
-                    workflow_registry = get_workflow_registry()
-
-                    # Create coordinator with workflows
-                    self._langgraph_coordinator = LangGraphCoordinator(
-                        llm=llm,
-                        tool_catalog=tool_catalog,
-                        agent_catalog=agent_catalog,
-                        memory=memory,
-                        workflow_registry=workflow_registry,
-                        max_iterations=10,
-                    )
-
-                    # Initialize the graph
-                    await self._langgraph_coordinator.initialize()
-                    logger.info(
-                        "LangGraph coordinator initialized for Slack",
-                        workflow_count=len(workflow_registry),
-                    )
-
-                # Invoke coordinator
+                # Invoke coordinator with thinking callback for real-time updates
+                # Pass profile context for profile-aware OCI operations
+                oci_profile = profile_context.get("profile", "DEFAULT") if profile_context else "DEFAULT"
                 result = await self._langgraph_coordinator.invoke(
                     query=text,
                     thread_id=thread_id,
                     user_id=user_id,
+                    on_thinking_update=on_thinking_update,
+                    metadata={"oci_profile": oci_profile, "profile_context": profile_context},
                 )
 
                 span.set_attribute("response.success", result.get("success", False))
@@ -1639,7 +2339,7 @@ class SlackHandler:
             "load balancer", "security list", "route table", "storage"
         ]):
             capability = "compute-management"
-        elif any(kw in text_lower for kw in ["database", "db", "awr", "sql", "performance", "slow", "query", "autonomous"]):
+        elif any(kw in text_lower for kw in ["database", "db", "awr", "sql", "performance", "slow", "query", "autonomous", "fleet", "addm", "opsi", "capacity"]):
             capability = "database-analysis"
         elif any(kw in text_lower for kw in ["log", "error", "exception", "audit trail"]):
             capability = "log-search"
@@ -1839,13 +2539,11 @@ class SlackHandler:
     def _format_response(self, response: dict) -> dict:
         """Format agent response for Slack.
 
-        Handles:
-        - Raw JSON responses from React agents
-        - List/table data from tool calls
-        - Plain text responses
+        Uses ResponseParser to extract structured content from raw agent
+        responses, then SlackFormatter to convert to Block Kit format.
 
         Args:
-            response: Agent response
+            response: Agent response with 'message' and optional 'agent_id'
 
         Returns:
             Slack Block Kit formatted response
@@ -1853,248 +2551,34 @@ class SlackHandler:
         if response.get("type") == "error":
             return _slack_formatter.format_error(response.get("message", "Unknown error"))
 
-        # Build blocks directly for simpler, more reliable formatting
-        blocks = []
-
-        # Header with agent name
+        # Extract agent info
         agent_id = response.get("agent_id", "Agent Response")
-        agent_display = agent_id.replace("-", " ").replace("agent", "Agent").title()
-        blocks.append({
-            "type": "header",
-            "text": {
-                "type": "plain_text",
-                "text": f"✅ {agent_display}",
-                "emoji": True,
-            }
-        })
-
-        # Get the message content
         message = response.get("message", "")
 
-        # Clean and parse the message if it contains React agent JSON
-        cleaned_message, table_data = self._extract_content_from_response(message)
+        # Use ResponseParser to convert raw message to StructuredResponse
+        parse_result = _response_parser.parse(message, agent_name=agent_id)
 
-        # If we detected table data (list of items), format as table block
-        if table_data and isinstance(table_data, list) and len(table_data) > 0:
-            # Detect data type and configure table accordingly
-            first_item = table_data[0] if table_data else {}
-            keys = list(first_item.keys()) if first_item else []
+        # Use SlackFormatter to convert StructuredResponse to Block Kit
+        formatted = _slack_formatter.format_response(parse_result.response)
 
-            # Cost data: explicit columns for consistent ordering
-            if "service" in keys and ("cost" in keys or "percent" in keys):
-                columns = ["service", "cost", "percent"]
-                title = ":bar_chart: *Top Services by Spend*"
-                footer = f"Showing top {len(table_data)} services"
-            else:
-                columns = None  # Auto-detect
-                title = self._infer_table_title(table_data)
-                footer = f"Found {len(table_data)} items"
-
-            # Use native Slack table block
-            table_payload = _slack_formatter.format_table_from_list(
-                items=table_data,
-                columns=columns,
-                title=title,
-                footer=footer,
-            )
-            blocks.extend(table_payload.get("blocks", []))
-
-            # Add any additional text that wasn't table data (e.g., summary header)
-            if cleaned_message and not cleaned_message.startswith("["):
-                text_part = cleaned_message.split("[")[0].strip()
-                if text_part:
-                    blocks.insert(1, {  # After header
-                        "type": "section",
-                        "text": {"type": "mrkdwn", "text": text_part[:2900]},
-                    })
-        elif cleaned_message:
-            # Regular text response - split if too long
-            chunks = [cleaned_message[i:i+2900] for i in range(0, len(cleaned_message), 2900)]
-            for chunk in chunks[:5]:  # Max 5 sections
-                blocks.append({
-                    "type": "section",
-                    "text": {
-                        "type": "mrkdwn",
-                        "text": chunk,
-                    }
-                })
-
-        # Add sections if any
+        # Add any extra sections from the original response (backwards compat)
+        blocks = formatted.get("blocks", [])
         for sec in response.get("sections", []):
             if sec.get("title"):
                 blocks.append({
                     "type": "section",
-                    "text": {
-                        "type": "mrkdwn",
-                        "text": f"*{sec['title']}*",
-                    }
+                    "text": {"type": "mrkdwn", "text": f"*{sec['title']}*"},
                 })
             if sec.get("content"):
                 blocks.append({
                     "type": "section",
-                    "text": {
-                        "type": "mrkdwn",
-                        "text": sec["content"][:2900],
-                    }
+                    "text": {"type": "mrkdwn", "text": sec["content"][:2900]},
                 })
 
         return {"blocks": blocks}
 
-    def _extract_content_from_response(self, message: str) -> tuple[str, list | None]:
-        """
-        Extract clean content from agent response.
-
-        Handles:
-        - React agent JSON format: {"thought": "...", "final_answer": "..."}
-        - Multiple concatenated JSON objects from iterations
-        - Tool output JSON arrays: [{"name": "...", ...}, ...]
-        - Plain text with embedded JSON
-
-        Returns:
-            Tuple of (cleaned_message, table_data_if_found)
-        """
-        import json as json_module
-        import re
-
-        if not message:
-            return "", None
-
-        table_data = None
-        extracted_answer = None
-
-        # Handle multiple concatenated JSON objects (React agent iterations)
-        # Find ALL final_answer values and use the last one
-        if '"thought"' in message or '"final_answer"' in message:
-            # Try regex to find all final_answer values
-            final_answers = re.findall(
-                r'"final_answer"\s*:\s*"((?:[^"\\]|\\.)*)"|"final_answer"\s*:\s*"([^"]*)"',
-                message,
-                re.DOTALL
-            )
-            if final_answers:
-                # Get the last final_answer (most complete)
-                for match in final_answers:
-                    answer = match[0] or match[1]
-                    if answer:
-                        extracted_answer = answer.replace('\\"', '"').replace('\\n', '\n').replace('\\t', '\t')
-
-            # If no final_answer found, try to extract any meaningful text
-            if not extracted_answer:
-                # Try to find response field
-                response_matches = re.findall(r'"response"\s*:\s*"((?:[^"\\]|\\.)*)"', message, re.DOTALL)
-                if response_matches:
-                    extracted_answer = response_matches[-1].replace('\\"', '"').replace('\\n', '\n')
-
-            # If still nothing, try parsing each JSON object
-            if not extracted_answer:
-                # Find all JSON objects
-                json_objects = re.findall(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', message)
-                for json_str in reversed(json_objects):  # Start from last (most recent)
-                    try:
-                        parsed = json_module.loads(json_str)
-                        if isinstance(parsed, dict):
-                            if "final_answer" in parsed:
-                                extracted_answer = parsed["final_answer"]
-                                break
-                            elif "response" in parsed:
-                                extracted_answer = parsed["response"]
-                                break
-                    except json_module.JSONDecodeError:
-                        continue
-
-            if extracted_answer:
-                message = extracted_answer
-
-        # Check for structured JSON responses FIRST (cost_summary, etc.)
-        # These have a "type" field and should be parsed specially
-        if "{" in message and '"type"' in message:
-            try:
-                # Find JSON object in message
-                start = message.find("{")
-                end = message.rfind("}") + 1
-                json_part = message[start:end]
-                parsed = json_module.loads(json_part)
-
-                if isinstance(parsed, dict) and "type" in parsed:
-                    # Handle cost_summary type
-                    if parsed.get("type") == "cost_summary":
-                        if "error" in parsed:
-                            message = f"⚠️ {parsed['error']}"
-                        else:
-                            summary = parsed.get("summary", {})
-                            services = parsed.get("services", [])
-                            days = summary.get("days", 30)
-                            total = summary.get("total", "N/A")
-                            period = summary.get("period", "N/A")
-
-                            # Build formatted header
-                            message = (
-                                f":moneybag: *Tenancy Cost Summary*\n"
-                                f":calendar: *Period:* {period} ({days} days)\n"
-                                f":chart_with_upwards_trend: *Total Spend:* `{total}`"
-                            )
-                            if services:
-                                table_data = services
-                        return message.strip(), table_data
-            except (json_module.JSONDecodeError, IndexError, KeyError):
-                pass
-
-        # Remove all raw JSON objects from the message (React agent artifacts)
-        if '"thought"' in message or message.strip().startswith("{"):
-            # Remove JSON blocks but keep any non-JSON text
-            message = re.sub(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', '', message)
-
-        # Check for JSON array (list data from tools)
-        if "[" in message and "]" in message:
-            try:
-                # Find JSON array in message
-                start = message.find("[")
-                end = message.rfind("]") + 1
-                json_part = message[start:end]
-                parsed = json_module.loads(json_part)
-
-                if isinstance(parsed, list) and len(parsed) > 0 and isinstance(parsed[0], dict):
-                    table_data = parsed
-                    # Remove the JSON array from message
-                    message = message[:start] + message[end:]
-            except (json_module.JSONDecodeError, IndexError):
-                pass
-
-        # Clean up any remaining artifacts
-        message = message.replace('```json', '').replace('```', '')
-        message = re.sub(r'\s+', ' ', message)  # Normalize whitespace
-
-        return message.strip(), table_data
-
-    def _infer_table_title(self, data: list[dict]) -> str:
-        """Infer a table title from the data structure."""
-        if not data:
-            return "Results"
-
-        first_item = data[0]
-        keys = list(first_item.keys())
-
-        # Detect cost data (from cost_summary)
-        if "service" in keys and ("cost" in keys or "percent" in keys):
-            return "Cost by Service"
-
-        # Detect common OCI resource types
-        if "compartment_id" in keys or "compartment_ocid" in keys:
-            return "OCI Resources"
-        if "display_name" in keys and "lifecycle_state" in keys:
-            if "cidr_block" in keys:
-                return "VCNs"
-            if "shape" in keys:
-                return "Compute Instances"
-            if "db_name" in keys:
-                return "Databases"
-            return "Resources"
-        if "name" in keys and "id" in keys:
-            if "tenancy" in str(first_item.get("id", "")):
-                return "Compartments"
-            return "Items"
-
-        return "Results"
+    # NOTE: _extract_content_from_response and _infer_table_title removed
+    # Parsing logic consolidated into src/formatting/parser.py (ResponseParser)
 
     async def _invoke_agent_with_llm(self, llm, agent_def, query: str) -> str:
         """Use OCA LLM for intelligent agent responses.
@@ -2365,12 +2849,10 @@ Always format your response with:
         if socket_mode and self.app_token:
             from slack_bolt.adapter.socket_mode import SocketModeHandler
 
-            print("[SLACK] Starting Socket Mode handler (sync/blocking)...", flush=True)
             handler = SocketModeHandler(self.app, self.app_token)
             logger.info("Starting Slack handler in Socket Mode (blocking)")
             handler.start()
         else:
-            print(f"[SLACK] Starting HTTP mode on port {port}...", flush=True)
             logger.info("Starting Slack handler in HTTP mode", port=port)
             self.app.start(port=port)
 
@@ -2395,8 +2877,6 @@ Always format your response with:
             raise ValueError("SLACK_BOT_TOKEN must start with 'xoxb-'")
 
         from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
-
-        print("[SLACK] Starting Async Socket Mode handler with AsyncApp...", flush=True)
         logger.info("Starting Slack handler in Async Socket Mode")
 
         # Create async handler with AsyncApp (not sync App!)
@@ -2404,8 +2884,15 @@ Always format your response with:
         handler = AsyncSocketModeHandler(self.async_app, self.app_token)
 
         # Log when connected
-        print("[SLACK] Connecting to Slack via WebSocket...", flush=True)
-
+        # Test the connection and log bot info
+        try:
+            from slack_sdk.web.async_client import AsyncWebClient
+            test_client = AsyncWebClient(token=self.bot_token)
+            auth_result = await test_client.auth_test()
+            self._bot_user_id = auth_result.get("user_id")
+            logger.info("Slack bot connected", user=auth_result.get("user"), team=auth_result.get("team"))
+        except Exception as auth_err:
+            logger.warning("Could not test Slack auth", error=str(auth_err))
         try:
             # Start and keep running - this will handle reconnections automatically
             # The start_async() method blocks until the connection is closed

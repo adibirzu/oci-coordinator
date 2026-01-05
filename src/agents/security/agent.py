@@ -8,6 +8,8 @@ and compliance monitoring in OCI.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import json
+import os
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -20,6 +22,7 @@ from src.agents.base import (
     KafkaTopics,
 )
 from src.agents.self_healing import SelfHealingMixin
+from src.mcp.client import ToolCallResult
 
 if TYPE_CHECKING:
     from src.mcp.catalog import ToolCatalog
@@ -42,6 +45,7 @@ class SecurityState:
     security_findings: list[dict] = field(default_factory=list)
     compliance_issues: list[dict] = field(default_factory=list)
     threat_indicators: list[dict] = field(default_factory=list)  # MITRE ATT&CK mapped threats
+    remediation_actions: list[dict] = field(default_factory=list)
 
     # State
     phase: str = "analyze_request"
@@ -66,18 +70,6 @@ class SecurityThreatAgent(BaseAgent, SelfHealingMixin):
     - Parameter correction for security tool calls
     - LLM-powered threat analysis recovery
     """
-
-    # MCP tools for security analysis
-    MCP_TOOLS = [
-        "oci_security_list_problems",
-        "oci_security_get_problem",
-        "oci_security_list_users",
-        "oci_security_list_groups",
-        "oci_security_list_policies",
-        "oci_security_get_security_assessment",
-        "oci_security_list_cloud_guard_problems",
-        "oci_security_audit",
-    ]
 
     def __init__(
         self,
@@ -125,7 +117,21 @@ class SecurityThreatAgent(BaseAgent, SelfHealingMixin):
                 "threat_hunting_workflow",
                 "compliance_check",
                 "security_assessment",
+                "security_assessment_workflow",
                 "incident_analysis",
+                "security_posture_workflow",
+                "security_cloudguard_investigation_workflow",
+                "security_cloudguard_remediation_workflow",
+                "security_vulnerability_workflow",
+                "security_zone_compliance_workflow",
+                "security_bastion_audit_workflow",
+                "security_bastion_session_cleanup_workflow",
+                "security_datasafe_assessment_workflow",
+                "security_waf_policy_workflow",
+                "security_audit_activity_workflow",
+                "security_access_governance_workflow",
+                "security_kms_inventory_workflow",
+                "security_iam_review_workflow",
             ],
             kafka_topics=KafkaTopics(
                 consume=["commands.security-threat-agent"],
@@ -142,7 +148,6 @@ class SecurityThreatAgent(BaseAgent, SelfHealingMixin):
                 "Security Expert Agent for threat detection, compliance monitoring, "
                 "and MITRE ATT&CK analysis in OCI environments."
             ),
-            mcp_tools=cls.MCP_TOOLS,
             mcp_servers=["oci-unified", "oci-mcp-security"],
         )
 
@@ -189,29 +194,48 @@ class SecurityThreatAgent(BaseAgent, SelfHealingMixin):
         """Check Cloud Guard for security problems with self-healing."""
         self._logger.info("Checking Cloud Guard")
 
-        problems = []
-        if self.tools:
-            try:
-                # Use self-healing for automatic retry on Cloud Guard API issues
-                if self._self_healing_enabled:
-                    result = await self.healing_call_tool(
-                        "oci_security_list_problems",
-                        {"compartment_id": state.compartment_id or "default"},
-                        user_intent=state.query,
-                        validate=True,
-                        correct_on_failure=True,
-                    )
-                else:
-                    result = await self.call_tool(
-                        "oci_security_list_problems",
-                        {"compartment_id": state.compartment_id or "default"},
-                    )
-                if isinstance(result, list):
-                    problems = result
-            except Exception as e:
-                self._logger.warning("Cloud Guard check failed", error=str(e))
+        problems: list[dict[str, Any]] = []
+        remediation_actions: list[dict[str, Any]] = []
 
-        return {"cloud_guard_problems": problems, "phase": "assess_compliance"}
+        if not self.tools:
+            return {"cloud_guard_problems": problems, "phase": "assess_compliance"}
+
+        tool_name, tool_args = self._resolve_cloud_guard_tool_args(state)
+        if not tool_name:
+            self._logger.warning("Cloud Guard tool not available in catalog")
+            return {"cloud_guard_problems": problems, "phase": "assess_compliance"}
+
+        try:
+            # Use self-healing for automatic retry on Cloud Guard API issues
+            if self._self_healing_enabled:
+                result = await self.healing_call_tool(
+                    tool_name,
+                    tool_args,
+                    user_intent=state.query,
+                    validate=True,
+                    correct_on_failure=True,
+                )
+            else:
+                result = await self.call_tool(tool_name, tool_args)
+
+            ok, payload, error = self._extract_tool_payload(result)
+            if not ok:
+                self._logger.warning("Cloud Guard check failed", error=error or "unknown")
+            else:
+                problems = self._normalize_cloud_guard_problems(payload)
+
+            remediation_actions = await self._auto_remediate_cloud_guard(
+                problems,
+                user_intent=state.query,
+            )
+        except Exception as exc:
+            self._logger.warning("Cloud Guard check failed", error=str(exc))
+
+        return {
+            "cloud_guard_problems": problems,
+            "remediation_actions": remediation_actions,
+            "phase": "assess_compliance",
+        }
 
     async def _assess_compliance_node(self, state: SecurityState) -> dict[str, Any]:
         """Assess compliance status."""
@@ -401,6 +425,22 @@ class SecurityThreatAgent(BaseAgent, SelfHealingMixin):
                 divider_after=True,
             )
 
+        # Add auto-remediation actions (if any)
+        if state.remediation_actions:
+            remediation_items = [
+                ListItem(
+                    text=f"{a.get('action', 'REMEDIATE')} {a.get('problem_id', 'unknown')}",
+                    details=a.get("detail", a.get("error", "Auto-remediation attempted")),
+                    severity=Severity.SUCCESS if a.get("success") else Severity.HIGH,
+                )
+                for a in state.remediation_actions[:5]
+            ]
+            response.add_section(
+                title="Auto-Remediation",
+                list_items=remediation_items,
+                divider_after=True,
+            )
+
         # Add compliance issues
         if state.compliance_issues:
             compliance_items = [
@@ -441,3 +481,209 @@ class SecurityThreatAgent(BaseAgent, SelfHealingMixin):
 
         result = await graph.ainvoke(initial_state)
         return result.get("result", "No security issues found.")
+
+    def _resolve_cloud_guard_tool_args(
+        self, state: SecurityState
+    ) -> tuple[str | None, dict[str, Any]]:
+        """Pick the best Cloud Guard list tool and argument shape."""
+        tool_name = self._select_tool(
+            [
+                "oci_security_cloudguard_list_problems",
+                "oci_security_list_cloud_guard_problems",
+                "oci_security_list_problems",
+            ]
+        )
+        if not tool_name:
+            return None, {}
+
+        compartment_id = self._resolve_compartment_id(state)
+        if tool_name == "oci_security_cloudguard_list_problems":
+            if not compartment_id:
+                self._logger.warning("Missing compartment_id for Cloud Guard list")
+                return None, {}
+            return tool_name, {
+                "compartment_id": compartment_id,
+                "status": "ACTIVE",
+                "limit": 50,
+                "response_format": "json",
+            }
+
+        if tool_name == "oci_security_list_cloud_guard_problems":
+            args = {
+                "limit": 50,
+                "response_format": "json",
+                "lifecycle_state": "ACTIVE",
+            }
+            if compartment_id:
+                args["compartment_id"] = compartment_id
+            return tool_name, args
+
+        args = {"limit": 50}
+        if compartment_id:
+            args["compartment_id"] = compartment_id
+        return tool_name, args
+
+    def _resolve_compartment_id(self, state: SecurityState) -> str | None:
+        """Resolve compartment id from state or environment."""
+        if state.compartment_id:
+            return state.compartment_id
+        for key in ("OCI_COMPARTMENT_OCID", "OCI_TENANCY_OCID", "OCI_TENANCY_ID"):
+            value = os.getenv(key)
+            if value:
+                return value
+        return None
+
+    def _select_tool(self, candidates: list[str]) -> str | None:
+        """Select the first available tool from the catalog."""
+        if not self.tools:
+            return None
+        for name in candidates:
+            if self.tools.get_tool(name):
+                return name
+        return None
+
+    def _extract_tool_payload(
+        self, result: ToolCallResult | Any
+    ) -> tuple[bool, Any, str | None]:
+        """Normalize ToolCallResult payload into a usable structure."""
+        if isinstance(result, ToolCallResult):
+            if not result.success:
+                return False, None, result.error or "Tool execution failed"
+            payload = result.result
+        else:
+            payload = result
+
+        if isinstance(payload, dict) and payload.get("error"):
+            return False, payload, str(payload.get("error"))
+
+        if isinstance(payload, str):
+            cleaned = payload.strip()
+            if cleaned:
+                try:
+                    payload = json.loads(cleaned)
+                except json.JSONDecodeError:
+                    pass
+
+        return True, payload, None
+
+    def _normalize_cloud_guard_problems(self, payload: Any) -> list[dict[str, Any]]:
+        """Normalize Cloud Guard problem payloads to a common shape."""
+        raw_problems: list[Any] = []
+        if isinstance(payload, dict):
+            if isinstance(payload.get("problems"), list):
+                raw_problems = payload.get("problems", [])
+            elif isinstance(payload.get("items"), list):
+                raw_problems = payload.get("items", [])
+        elif isinstance(payload, list):
+            raw_problems = payload
+
+        normalized: list[dict[str, Any]] = []
+        for raw in raw_problems:
+            if not isinstance(raw, dict):
+                continue
+            risk_level = raw.get("risk_level") or raw.get("severity") or raw.get("risk")
+            name = raw.get("name") or raw.get("problem_name") or raw.get("detector_rule_id")
+            detector_id = raw.get("detector_id") or raw.get("problem_name") or raw.get("detector_rule_id")
+            status = raw.get("status") or raw.get("lifecycle_state")
+            normalized.append(
+                {
+                    "id": raw.get("id") or raw.get("problem_id"),
+                    "name": name or "Cloud Guard Problem",
+                    "risk_level": str(risk_level).upper() if risk_level else "UNKNOWN",
+                    "status": status,
+                    "detector_id": detector_id or "",
+                    "recommendation": raw.get("recommendation"),
+                    "resource_name": raw.get("resource_name"),
+                    "resource_type": raw.get("resource_type"),
+                }
+            )
+        return normalized
+
+    async def _auto_remediate_cloud_guard(
+        self, problems: list[dict[str, Any]], user_intent: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Attempt auto-remediation for Cloud Guard problems when enabled."""
+        enabled, reason = self._auto_remediation_enabled()
+        if not enabled:
+            if reason:
+                self._logger.debug("Auto-remediation disabled", reason=reason)
+            return []
+
+        tool_name = self._select_tool(["oci_security_cloudguard_remediate_problem"])
+        if not tool_name:
+            self._logger.info("Remediation tool unavailable in catalog")
+            return []
+
+        actions: list[dict[str, Any]] = []
+        for problem in problems:
+            problem_id = problem.get("id")
+            if not problem_id:
+                continue
+            risk_level = str(problem.get("risk_level", "")).upper()
+            status_value = problem.get("status")
+            status = str(status_value).upper() if status_value else ""
+            if risk_level not in {"CRITICAL", "HIGH"}:
+                continue
+            if status and status not in {"ACTIVE", "OPEN"}:
+                continue
+
+            try:
+                if self._self_healing_enabled:
+                    result = await self.healing_call_tool(
+                        tool_name,
+                        {
+                            "problem_id": problem_id,
+                            "action": "RESOLVE",
+                            "comment": "Auto-remediation triggered by coordinator",
+                        },
+                        user_intent=user_intent,
+                        validate=True,
+                        correct_on_failure=False,
+                    )
+                else:
+                    result = await self.call_tool(
+                        tool_name,
+                        {
+                            "problem_id": problem_id,
+                            "action": "RESOLVE",
+                            "comment": "Auto-remediation triggered by coordinator",
+                        },
+                    )
+
+                ok, payload, error = self._extract_tool_payload(result)
+                actions.append(
+                    {
+                        "problem_id": problem_id,
+                        "action": "RESOLVE",
+                        "success": ok and not error,
+                        "detail": payload if ok else None,
+                        "error": error,
+                    }
+                )
+            except Exception as exc:
+                actions.append(
+                    {
+                        "problem_id": problem_id,
+                        "action": "RESOLVE",
+                        "success": False,
+                        "error": str(exc),
+                    }
+                )
+
+        return actions
+
+    def _auto_remediation_enabled(self) -> tuple[bool, str | None]:
+        """Check if auto-remediation is explicitly enabled."""
+        config_flag = False
+        if self.config:
+            config_flag = bool(self.config.get("auto_remediate"))
+        env_flag = os.getenv("SECURITY_AUTO_REMEDIATE", "").lower() in {"1", "true", "yes"}
+
+        if not (config_flag or env_flag):
+            return False, "flag_not_set"
+
+        allow_mutations = os.getenv("ALLOW_MUTATIONS", "").lower() in {"1", "true", "yes"}
+        if not allow_mutations:
+            return False, "allow_mutations_disabled"
+
+        return True, None

@@ -19,6 +19,8 @@ async def _get_cost_summary_logic(
     compartment_id: str | None = None,
     days: int = 30,
     service_filter: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
 ) -> str:
     """Internal logic for cost summary.
 
@@ -26,8 +28,10 @@ async def _get_cost_summary_logic(
 
     Args:
         compartment_id: OCID of the compartment (defaults to tenancy root)
-        days: Number of days to look back
+        days: Number of days to look back (ignored if start_date/end_date provided)
         service_filter: Optional service name filter (e.g., "Database", "Autonomous")
+        start_date: Optional start date in YYYY-MM-DD format (for historical queries)
+        end_date: Optional end date in YYYY-MM-DD format (for historical queries)
     """
     with _tracer.start_as_current_span("mcp.cost.get_summary") as span:
         # Get tenancy ID from config if not provided
@@ -47,8 +51,27 @@ async def _get_cost_summary_logic(
 
         try:
             # OCI Usage API requires dates with hours/minutes/seconds set to 0
-            end_time = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-            start_time = (end_time - timedelta(days=days)).replace(hour=0, minute=0, second=0, microsecond=0)
+            # If explicit dates provided, use them; otherwise calculate from days
+            if start_date and end_date:
+                try:
+                    start_time = datetime.strptime(start_date, "%Y-%m-%d").replace(
+                        hour=0, minute=0, second=0, microsecond=0
+                    )
+                    end_time = datetime.strptime(end_date, "%Y-%m-%d").replace(
+                        hour=23, minute=59, second=59, microsecond=0
+                    )
+                    # Recalculate days for display
+                    days = (end_time - start_time).days + 1
+                    span.set_attribute("start_date", start_date)
+                    span.set_attribute("end_date", end_date)
+                except ValueError as e:
+                    return json.dumps({
+                        "type": "cost_summary",
+                        "error": f"Invalid date format. Use YYYY-MM-DD. Error: {e}"
+                    })
+            else:
+                end_time = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+                start_time = (end_time - timedelta(days=days)).replace(hour=0, minute=0, second=0, microsecond=0)
 
             request = oci.usage_api.models.RequestSummarizedUsagesDetails(
                 tenant_id=tenant_id,
@@ -172,16 +195,22 @@ def register_cost_tools(mcp):
         compartment_id: str | None = None,
         days: int = 30,
         service_filter: str | None = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
     ) -> str:
         """Get summarized cost for a compartment or the entire tenancy.
 
         Args:
             compartment_id: OCID of the compartment (defaults to tenancy root for full account costs)
-            days: Number of days to look back (default 30)
+            days: Number of days to look back (default 30, ignored if start_date/end_date provided)
             service_filter: Filter by service type (e.g., "database", "compute", "storage", "network")
+            start_date: Start date in YYYY-MM-DD format (for historical queries like "November")
+            end_date: End date in YYYY-MM-DD format (for historical queries like "November")
 
         Returns:
             JSON with cost summary including total spend and per-service breakdown.
-            Note: This API has a 30s timeout. For slow responses, check the OCI console directly.
+            Note: This API has a 60s timeout. For slow responses, check the OCI console directly.
         """
-        return await _get_cost_summary_logic(compartment_id, days, service_filter)
+        return await _get_cost_summary_logic(
+            compartment_id, days, service_filter, start_date, end_date
+        )

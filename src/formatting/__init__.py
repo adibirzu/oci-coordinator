@@ -57,6 +57,9 @@ from src.formatting.base import (
 from src.formatting.markdown import MarkdownFormatter
 from src.formatting.slack import SlackFormatter
 
+# Import parser
+from src.formatting.parser import ParseResult, ResponseParser
+
 __all__ = [
     # Core types
     "OutputFormat",
@@ -80,4 +83,7 @@ __all__ = [
     "FormatterRegistry",
     "MarkdownFormatter",
     "SlackFormatter",
+    # Parser
+    "ResponseParser",
+    "ParseResult",
 ]

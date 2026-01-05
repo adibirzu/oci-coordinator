@@ -63,7 +63,6 @@ class MCPCacheIntegrationTests:
             self.test_oci_resource_cache,
             self.test_discovery_to_cache_flow,
             self.test_agent_to_mcp_pattern,
-            self.test_atp_shared_memory,
             self.test_mcp_oci_shared_memory,
         ]
 
@@ -430,75 +429,11 @@ class MCPCacheIntegrationTests:
             return {"passed": False, "error": str(e)}
 
 
-    async def test_atp_shared_memory(self) -> dict[str, Any]:
-        """Test ATP shared memory for inter-agent communication."""
-        try:
-            # Check if ATP is configured
-            atp_connection = os.environ.get("ATP_CONNECTION_STRING") or os.environ.get("ATP_TNS_NAME")
-
-            if not atp_connection:
-                return {
-                    "passed": True,
-                    "skipped": True,
-                    "reason": "ATP not configured (set ATP_CONNECTION_STRING or ATP_TNS_NAME)",
-                    "required_env_vars": [
-                        "ATP_CONNECTION_STRING or ATP_TNS_NAME",
-                        "ATP_USER",
-                        "ATP_PASSWORD",
-                        "ATP_WALLET_DIR (for wallet auth)",
-                    ],
-                }
-
-            # Test ATP connectivity via SharedMemoryManager
-            from src.memory.manager import SharedMemoryManager
-
-            memory = SharedMemoryManager(
-                redis_url=os.environ.get("REDIS_URL", "redis://localhost:6379"),
-                atp_connection=atp_connection,
-            )
-
-            # Test basic operations
-            test_key = "test:integration:atp"
-            test_value = {"test": True, "timestamp": datetime.utcnow().isoformat()}
-
-            # Set value
-            await memory.set_agent_memory(
-                agent_id="test-agent",
-                memory_type="integration-test",
-                value=test_value,
-            )
-
-            # Get value
-            retrieved = await memory.get_agent_memory(
-                agent_id="test-agent",
-                memory_type="integration-test",
-            )
-
-            # Cleanup
-            await memory.close()
-
-            return {
-                "passed": retrieved is not None,
-                "atp_configured": True,
-                "write_success": True,
-                "read_success": retrieved is not None,
-                "value_match": retrieved == test_value if retrieved else False,
-            }
-        except ImportError as e:
-            return {
-                "passed": True,
-                "skipped": True,
-                "reason": f"Required module not available: {e}",
-            }
-        except Exception as e:
-            return {"passed": False, "error": str(e)}
-
     async def test_mcp_oci_shared_memory(self) -> dict[str, Any]:
         """Test MCP-OCI's shared memory module."""
         try:
             # Import from mcp-oci's shared memory
             from mcp_server_oci.core.shared_memory import (
-                ATPSharedStore,
                 InMemorySharedStore,
                 SharedContext,
                 SharedEvent,
@@ -507,7 +442,7 @@ class MCPCacheIntegrationTests:
                 share_finding,
             )
 
-            # Get shared store (will be InMemory if ATP not configured)
+            # Get shared store (uses InMemory store)
             store = get_shared_store()
             store_type = type(store).__name__
 
@@ -545,7 +480,6 @@ class MCPCacheIntegrationTests:
             return {
                 "passed": True,
                 "store_type": store_type,
-                "atp_available": isinstance(store, ATPSharedStore) and store._atp_available,
                 "agent_registered": agent_info is not None,
                 "context_saved": saved_context.context_id == context.context_id,
                 "event_published": published_event.event_id == event.event_id,

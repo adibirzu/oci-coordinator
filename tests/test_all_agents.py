@@ -68,9 +68,9 @@ def mock_catalog():
             input_schema={},
             server_id="oci-unified",
         ),
-        "oci_security_list_problems": ToolDefinition(
-            name="oci_security_list_problems",
-            description="List security problems",
+        "oci_security_cloudguard_list_problems": ToolDefinition(
+            name="oci_security_cloudguard_list_problems",
+            description="List Cloud Guard problems",
             input_schema={},
             server_id="oci-unified",
         ),
