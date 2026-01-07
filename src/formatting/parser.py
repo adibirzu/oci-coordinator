@@ -12,22 +12,17 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from typing import Any
 
 import structlog
 
 from src.formatting.base import (
-    FileAttachment,
-    ListItem,
     MetricValue,
-    ResponseFooter,
     ResponseHeader,
     Section,
     Severity,
     StructuredResponse,
     TableData,
     TableRow,
-    TrendDirection,
 )
 
 logger = structlog.get_logger(__name__)
@@ -180,53 +175,157 @@ class ResponseParser:
 
     def _parse_typed_response(self, message: str, agent_name: str | None) -> ParseResult | None:
         """
-        Parse a typed JSON response (with "type" field).
+        Parse typed JSON response(s) (with "type" field).
+
+        Handles both single and multiple JSON objects in the message.
+        Multiple JSON objects are combined into a single StructuredResponse.
 
         Returns None if not a typed response.
         """
         if "{" not in message or '"type"' not in message:
             return None
 
+        # Try parsing as single JSON first
         try:
             start = message.find("{")
             end = message.rfind("}") + 1
             json_part = message[start:end]
             parsed = json.loads(json_part)
 
-            if not isinstance(parsed, dict) or "type" not in parsed:
-                return None
+            if isinstance(parsed, dict) and "type" in parsed:
+                return self._handle_single_typed_response(parsed, agent_name)
 
-            data_type = parsed.get("type")
+        except json.JSONDecodeError:
+            # Multiple JSON objects - try parsing each separately
+            pass
 
-            # Handle error responses
-            if parsed.get("error"):
-                return self._error_response(
-                    parsed["error"],
-                    parsed.get("suggestion"),
-                    agent_name,
-                )
+        # Try parsing multiple JSON objects (separated by whitespace/newlines)
+        json_objects = self._extract_multiple_json_objects(message)
+        if json_objects:
+            return self._combine_typed_responses(json_objects, agent_name)
 
-            # Route to type-specific handler
-            handler = getattr(self, f"_parse_{data_type}", None)
-            if handler:
-                return handler(parsed, agent_name)
+        return None
 
-            # Unknown type - return as raw JSON
-            return ParseResult(
-                response=StructuredResponse(
-                    header=ResponseHeader(
-                        title=data_type.replace("_", " ").title(),
-                        agent_name=agent_name,
-                        severity=Severity.INFO,
-                    ),
-                    raw_data=parsed,
-                ),
-                raw_text=json.dumps(parsed, indent=2),
+    def _extract_multiple_json_objects(self, message: str) -> list[dict]:
+        """Extract multiple JSON objects from a message."""
+        objects = []
+        # Find all balanced JSON objects
+        i = 0
+        while i < len(message):
+            if message[i] == '{':
+                # Find matching closing brace
+                depth = 0
+                start = i
+                for j in range(i, len(message)):
+                    if message[j] == '{':
+                        depth += 1
+                    elif message[j] == '}':
+                        depth -= 1
+                        if depth == 0:
+                            try:
+                                obj = json.loads(message[start:j+1])
+                                if isinstance(obj, dict) and "type" in obj:
+                                    objects.append(obj)
+                            except json.JSONDecodeError:
+                                pass
+                            i = j + 1
+                            break
+                else:
+                    break
+            else:
+                i += 1
+        return objects
+
+    def _handle_single_typed_response(
+        self, parsed: dict, agent_name: str | None
+    ) -> ParseResult | None:
+        """Handle a single typed JSON response."""
+        if not isinstance(parsed, dict) or "type" not in parsed:
+            return None
+
+        data_type = parsed.get("type")
+
+        # Handle error responses
+        if parsed.get("error"):
+            return self._error_response(
+                parsed["error"],
+                parsed.get("suggestion"),
+                agent_name,
             )
 
-        except (json.JSONDecodeError, IndexError, KeyError) as e:
-            self._logger.debug("Failed to parse typed response", error=str(e))
+        # Route to type-specific handler
+        handler = getattr(self, f"_parse_{data_type}", None)
+        if handler:
+            return handler(parsed, agent_name)
+
+        # Unknown type - return as raw JSON
+        return ParseResult(
+            response=StructuredResponse(
+                header=ResponseHeader(
+                    title=data_type.replace("_", " ").title(),
+                    agent_name=agent_name,
+                    severity=Severity.INFO,
+                ),
+                raw_data=parsed,
+            ),
+            raw_text=json.dumps(parsed, indent=2),
+        )
+
+    def _combine_typed_responses(
+        self, json_objects: list[dict], agent_name: str | None
+    ) -> ParseResult | None:
+        """Combine multiple typed JSON responses into a single StructuredResponse."""
+        if not json_objects:
             return None
+
+        # Parse each object individually
+        parsed_results = []
+        for obj in json_objects:
+            result = self._handle_single_typed_response(obj, agent_name)
+            if result:
+                parsed_results.append(result)
+
+        if not parsed_results:
+            return None
+
+        if len(parsed_results) == 1:
+            return parsed_results[0]
+
+        # Combine multiple results into a single response
+        combined = StructuredResponse(
+            header=ResponseHeader(
+                title="Results",
+                agent_name=agent_name,
+                severity=Severity.INFO,
+            ),
+        )
+
+        # Add sections from each result
+        for result in parsed_results:
+            resp = result.response
+            # Add header as a section title (using add_section properly)
+            if resp.header.title and resp.header.title != "Results":
+                icon = resp.header.icon or ""
+                title = f"{icon} {resp.header.title}".strip()
+                combined.add_section(title=title)
+
+            # Copy sections (sections may contain tables)
+            for section in resp.sections:
+                combined.add_section(
+                    title=section.title,
+                    content=section.content,
+                    fields=section.fields,
+                    list_items=section.list_items,
+                    table=section.table,
+                    code_block=section.code_block,
+                    actions=section.actions,
+                    divider_after=section.divider_after,
+                )
+
+        return ParseResult(
+            response=combined,
+            raw_text="\n\n".join(json.dumps(obj, indent=2) for obj in json_objects),
+        )
 
     def _error_response(
         self, error: str, suggestion: str | None, agent_name: str | None

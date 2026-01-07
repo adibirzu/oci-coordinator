@@ -9,6 +9,7 @@ Reference: https://api.slack.com/block-kit
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from src.formatting.base import (
@@ -52,6 +53,10 @@ class SlackFormatter(BaseFormatter):
         TrendDirection.STABLE: ":arrow_right:",
     }
 
+    _DEFAULT_TABLE_MAX_ROWS = 40
+    _DEFAULT_TABLE_CELL_CHARS = 80
+    _DEFAULT_TABLE_CHAR_LIMIT = 3500
+
     @property
     def format_type(self) -> OutputFormat:
         return OutputFormat.SLACK
@@ -68,8 +73,8 @@ class SlackFormatter(BaseFormatter):
         """
         blocks: list[dict[str, Any]] = []
 
-        # Header
-        blocks.append(self._format_header(response))
+        # Header (always returns list)
+        blocks.extend(self._format_header(response))
 
         # Error handling
         if response.error:
@@ -77,8 +82,14 @@ class SlackFormatter(BaseFormatter):
             return {"blocks": blocks}
 
         # Sections
+        table_used = False
         for section in response.sections:
-            section_blocks = self._format_section(section)
+            section_blocks, used_table = self._format_section(
+                section,
+                allow_table=not table_used,
+            )
+            if used_table:
+                table_used = True
             blocks.extend(section_blocks)
 
         # Footer
@@ -111,20 +122,25 @@ class SlackFormatter(BaseFormatter):
             ]
         }
 
-    def _format_header(self, response: StructuredResponse) -> dict[str, Any]:
-        """Format response header as Slack block."""
+    def _format_header(self, response: StructuredResponse) -> list[dict[str, Any]]:
+        """Format response header as Slack blocks.
+
+        Always returns a list for consistent handling in format_response().
+        """
         header = response.header
         icon = self._get_icon(header.icon, header.severity)
         title_text = f"{icon} {header.title}" if icon else header.title
 
-        block: dict[str, Any] = {
-            "type": "header",
-            "text": {
-                "type": "plain_text",
-                "text": title_text[:150],  # Slack header limit
-                "emoji": True,
-            },
-        }
+        blocks: list[dict[str, Any]] = [
+            {
+                "type": "header",
+                "text": {
+                    "type": "plain_text",
+                    "text": title_text[:150],  # Slack header limit
+                    "emoji": True,
+                },
+            }
+        ]
 
         # Add context with subtitle if present
         if header.subtitle or header.agent_name or header.timestamp:
@@ -145,19 +161,17 @@ class SlackFormatter(BaseFormatter):
                     "text": f"_Generated: {header.timestamp}_",
                 })
 
-            return [
-                block,
-                {
-                    "type": "context",
-                    "elements": context_elements[:10],  # Slack limit
-                },
-            ]
+            blocks.append({
+                "type": "context",
+                "elements": context_elements[:10],  # Slack limit
+            })
 
-        return block
+        return blocks
 
-    def _format_section(self, section: Section) -> list[dict[str, Any]]:
+    def _format_section(self, section: Section, allow_table: bool = True) -> tuple[list[dict[str, Any]], bool]:
         """Format a section as Slack blocks."""
         blocks: list[dict[str, Any]] = []
+        used_table = False
 
         # Section title
         if section.title:
@@ -191,8 +205,12 @@ class SlackFormatter(BaseFormatter):
 
         # Table
         if section.table:
-            table_blocks = self._format_table(section.table)
-            blocks.extend(table_blocks)
+            if allow_table:
+                table_blocks = self._format_table(section.table)
+                blocks.extend(table_blocks)
+                used_table = True
+            else:
+                blocks.append(self._format_table_as_text(section.table))
 
         # Code block
         if section.code_block:
@@ -208,7 +226,7 @@ class SlackFormatter(BaseFormatter):
         if section.divider_after:
             blocks.append({"type": "divider"})
 
-        return blocks
+        return blocks, used_table
 
     def _format_fields(
         self, fields: list[StatusIndicator | MetricValue]
@@ -301,18 +319,25 @@ class SlackFormatter(BaseFormatter):
         # Build native table block rows
         # First row is the header row
         table_rows = []
+        table_chars = 0
+        max_rows = int(os.getenv("SLACK_TABLE_MAX_ROWS", self._DEFAULT_TABLE_MAX_ROWS))
+        max_cell_chars = int(os.getenv("SLACK_TABLE_CELL_CHARS", self._DEFAULT_TABLE_CELL_CHARS))
+        max_table_chars = int(os.getenv("SLACK_TABLE_CHAR_LIMIT", self._DEFAULT_TABLE_CHAR_LIMIT))
+        truncated = False
 
         # Header row with column names
         header_cells = []
         for h in table.headers[:20]:  # Max 20 columns
             header_cells.append({
                 "type": "raw_text",
-                "text": str(h)[:100],  # Limit cell text length
+                "text": str(h)[:max_cell_chars],
             })
+            table_chars += len(str(h))
         table_rows.append(header_cells)
 
         # Data rows (max 100 rows including header)
-        for row in table.rows[:99]:  # Leave room for header
+        data_row_limit = min(max_rows, 99)  # Leave room for header
+        for row in table.rows[:data_row_limit]:
             row_cells = []
             for i, cell in enumerate(row.cells[:20]):  # Max 20 columns
                 cell_text = str(cell) if cell is not None else ""
@@ -323,14 +348,21 @@ class SlackFormatter(BaseFormatter):
                         cell_text = f"{emoji} {cell_text}"
                 row_cells.append({
                     "type": "raw_text",
-                    "text": cell_text[:100],  # Limit cell text length
+                    "text": cell_text[:max_cell_chars],
                 })
+                table_chars += len(cell_text)
+
+            if table_chars > max_table_chars:
+                truncated = True
+                break
 
             # Pad row if fewer cells than headers
             while len(row_cells) < len(header_cells):
                 row_cells.append({"type": "raw_text", "text": ""})
 
             table_rows.append(row_cells)
+        if len(table.rows) > data_row_limit:
+            truncated = True
 
         # Build column settings (alignment)
         column_settings = []
@@ -358,16 +390,43 @@ class SlackFormatter(BaseFormatter):
         blocks.append(table_block)
 
         # Add footer context
-        if table.footer:
+        footer_text = table.footer
+        if truncated:
+            trunc_note = "Table truncated to fit Slack limits. Use JSON output for full data."
+            footer_text = f"{footer_text} | {trunc_note}" if footer_text else trunc_note
+        if footer_text:
             blocks.append({
                 "type": "context",
                 "elements": [{
                     "type": "mrkdwn",
-                    "text": f"_{table.footer}_",
+                    "text": f"_{footer_text}_",
                 }],
             })
 
         return blocks
+
+    def _format_table_as_text(self, table: TableData) -> dict[str, Any]:
+        """Fallback table rendering when multiple tables are present."""
+        max_rows = int(os.getenv("SLACK_TABLE_FALLBACK_ROWS", "8"))
+        max_cols = 6
+        header = table.headers[:max_cols]
+        lines = [" | ".join(str(h) for h in header)]
+        lines.append("-" * min(60, len(lines[0])))
+        for row in table.rows[:max_rows]:
+            cells = [str(c)[:30] if c is not None else "" for c in row.cells[:max_cols]]
+            lines.append(" | ".join(cells))
+        if len(table.rows) > max_rows:
+            lines.append("... (truncated)")
+        text = "```\n" + "\n".join(lines) + "\n```"
+        if table.title:
+            text = f"*{table.title}*\n{text}"
+        return {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": text[:3000],
+            },
+        }
 
     def format_table_from_list(
         self,
@@ -421,23 +480,36 @@ class SlackFormatter(BaseFormatter):
 
         # Build table rows
         table_rows = []
+        table_chars = 0
+        max_rows = int(os.getenv("SLACK_TABLE_MAX_ROWS", self._DEFAULT_TABLE_MAX_ROWS))
+        max_cell_chars = int(os.getenv("SLACK_TABLE_CELL_CHARS", self._DEFAULT_TABLE_CELL_CHARS))
+        max_table_chars = int(os.getenv("SLACK_TABLE_CHAR_LIMIT", self._DEFAULT_TABLE_CHAR_LIMIT))
+        truncated = False
 
         # Header row
-        header_cells = [
-            {"type": "raw_text", "text": self._format_column_header(col)}
-            for col in columns[:20]
-        ]
+        header_cells = []
+        for col in columns[:20]:
+            text = self._format_column_header(col)[:max_cell_chars]
+            header_cells.append({"type": "raw_text", "text": text})
+            table_chars += len(text)
         table_rows.append(header_cells)
 
         # Data rows
-        for item in items[:99]:
+        data_row_limit = min(max_rows, 99)
+        for item in items[:data_row_limit]:
             row_cells = []
             for col in columns[:20]:
                 value = item.get(col, "")
                 # Format special values
-                cell_text = self._format_cell_value(value)
-                row_cells.append({"type": "raw_text", "text": cell_text[:100]})
+                cell_text = self._format_cell_value(value)[:max_cell_chars]
+                row_cells.append({"type": "raw_text", "text": cell_text})
+                table_chars += len(cell_text)
+            if table_chars > max_table_chars:
+                truncated = True
+                break
             table_rows.append(row_cells)
+        if len(items) > data_row_limit:
+            truncated = True
 
         # Column settings
         column_settings = [
@@ -453,10 +525,14 @@ class SlackFormatter(BaseFormatter):
         })
 
         # Footer
-        if footer:
+        footer_text = footer
+        if truncated:
+            trunc_note = "Table truncated to fit Slack limits. Use JSON output for full data."
+            footer_text = f"{footer_text} | {trunc_note}" if footer_text else trunc_note
+        if footer_text:
             blocks.append({
                 "type": "context",
-                "elements": [{"type": "mrkdwn", "text": f"_{footer}_"}],
+                "elements": [{"type": "mrkdwn", "text": f"_{footer_text}_"}],
             })
 
         return {"blocks": blocks}

@@ -100,11 +100,12 @@ class MarkdownFormatter(BaseFormatter):
         elif header.severity:
             icon = f"{self.SEVERITY_ICONS.get(header.severity, '')} "
 
-        lines.append(f"## {icon}{header.title}")
+        # Slack doesn't support headers (#), use Bold
+        lines.append(f"*{icon}{header.title}*")
 
         if header.subtitle:
             lines.append("")
-            lines.append(f"*{header.subtitle}*")
+            lines.append(f"_{header.subtitle}_")
 
         # Context line
         context_parts = []
@@ -123,9 +124,9 @@ class MarkdownFormatter(BaseFormatter):
         """Format a section."""
         lines: list[str] = []
 
-        # Section title
+        # Section title - Slack doesn't support ###, use Bold
         if section.title:
-            lines.append(f"### {section.title}")
+            lines.append(f"*{section.title}*")
             lines.append("")
 
         # Content text
@@ -258,7 +259,8 @@ class MarkdownFormatter(BaseFormatter):
             lines.append("")
             lines.append(f"_{table.footer}_")
 
-        return lines
+        # Wrap in code block to ensure alignment in Slack/Text interfaces
+        return ["```text"] + lines + ["```"]
 
     def _format_code_block(self, code_block: CodeBlock) -> list[str]:
         """Format code block."""

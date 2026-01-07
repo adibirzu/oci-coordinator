@@ -155,6 +155,16 @@ class Section:
     actions: list[ActionButton] | None = None
     divider_after: bool = False
 
+    @property
+    def metrics(self) -> list[StatusIndicator | MetricValue] | None:
+        """Alias for fields for backward compatibility."""
+        return self.fields
+
+    @metrics.setter
+    def metrics(self, value: list[StatusIndicator | MetricValue] | None):
+        """Alias for fields for backward compatibility."""
+        self.fields = value
+
 
 @dataclass
 class ResponseHeader:

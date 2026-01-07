@@ -35,12 +35,10 @@ from src.channels.slack_catalog import (
     build_catalog_blocks,
     build_error_recovery_blocks,
     build_follow_up_blocks,
-    build_runbook_blocks,
     get_follow_up_suggestions,
 )
 from src.formatting.parser import ResponseParser
 from src.formatting.slack import SlackFormatter
-from src.formatting.thinking import format_thinking_for_slack
 from src.observability import get_trace_id, init_observability
 from src.observability.tracing import get_tracer
 from src.oci.profile_manager import ProfileManager
@@ -50,6 +48,40 @@ logger = structlog.get_logger(__name__)
 # Pending authentication context storage
 # Stores user/channel/query info when auth is requested so we can notify them when auth succeeds
 _pending_auth_contexts: dict[str, dict] = {}
+
+# Module-level reference to SlackHandler instance for auth callback resumption
+_slack_handler_instance: SlackHandler | None = None
+
+
+def set_slack_handler_instance(handler: SlackHandler) -> None:
+    """Store global reference to SlackHandler for auth callback resumption.
+
+    Called during SlackHandler initialization to enable `notify_auth_success()`
+    to resume pending requests after authentication completes.
+    """
+    global _slack_handler_instance
+    _slack_handler_instance = handler
+    logger.info("SlackHandler instance registered for auth callback", handler_id=id(handler))
+
+
+def _has_llm_channel_overrides(channel_type: str) -> bool:
+    """Return True if channel-specific LLM overrides are set in the environment."""
+    suffix = channel_type.upper()
+    keys = [
+        f"LLM_PROVIDER_{suffix}",
+        f"LLM_MODEL_{suffix}",
+        f"LLM_TEMPERATURE_{suffix}",
+        f"LLM_MAX_TOKENS_{suffix}",
+        f"LLM_BASE_URL_{suffix}",
+        f"OCA_MODEL_{suffix}",
+        f"ANTHROPIC_MODEL_{suffix}",
+        f"OPENAI_MODEL_{suffix}",
+        f"OPENAI_BASE_URL_{suffix}",
+        f"LLM_API_KEY_{suffix}",
+        f"OPENAI_API_KEY_{suffix}",
+        f"ANTHROPIC_API_KEY_{suffix}",
+    ]
+    return any(os.getenv(key) for key in keys)
 
 
 def store_pending_auth_context(user_id: str, channel_id: str, thread_ts: str | None, query: str) -> None:
@@ -94,16 +126,190 @@ def get_all_pending_auth_contexts() -> dict[str, dict]:
     return _pending_auth_contexts.copy()
 
 
+def clear_pending_auth_context(user_id: str) -> None:
+    """Clear a pending auth context after processing.
+
+    Args:
+        user_id: Slack user ID
+    """
+    _pending_auth_contexts.pop(user_id, None)
+
+
+async def _resume_pending_request_async(
+    user_id: str,
+    channel_id: str,
+    thread_ts: str | None,
+    query: str,
+    bot_token: str,
+) -> None:
+    """Resume a pending request after authentication succeeds.
+
+    Invokes the coordinator to process the original query and sends
+    the response back to the channel/thread.
+
+    Args:
+        user_id: Slack user ID
+        channel_id: Channel where request originated
+        thread_ts: Thread timestamp
+        query: Original query text
+        bot_token: Slack bot token
+    """
+    from slack_sdk.web.async_client import AsyncWebClient
+
+    from src.formatting.parser import ResponseParser
+    from src.formatting.slack import SlackFormatter
+
+    client = AsyncWebClient(token=bot_token)
+
+    try:
+        # Send "processing" indicator
+        thinking_response = await client.chat_postMessage(
+            channel=channel_id,
+            thread_ts=thread_ts,
+            text=":hourglass_flowing_sand: Processing your request...",
+            blocks=[
+                {
+                    "type": "context",
+                    "elements": [
+                        {
+                            "type": "mrkdwn",
+                            "text": ":hourglass_flowing_sand: *Processing your request...* | Resuming after authentication",
+                        }
+                    ],
+                }
+            ],
+        )
+        thinking_ts = thinking_response.get("ts")
+
+        # Check if we have a SlackHandler instance with coordinator
+        if _slack_handler_instance is None:
+            logger.warning("No SlackHandler instance available for resuming request")
+            await client.chat_update(
+                channel=channel_id,
+                ts=thinking_ts,
+                text="Unable to process request - please try again.",
+                blocks=[
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": ":warning: Unable to process request automatically. Please send your request again.",
+                        }
+                    }
+                ],
+            )
+            return
+
+        # Invoke the coordinator through SlackHandler
+        response = await _slack_handler_instance._invoke_coordinator(
+            text=query,
+            user_id=user_id,
+            channel_id=channel_id,
+            thread_ts=thread_ts,
+        )
+
+        # Delete the thinking message
+        try:
+            await client.chat_delete(channel=channel_id, ts=thinking_ts)
+        except Exception:
+            pass  # Ignore if deletion fails
+
+        if response and response.get("type") == "agent_response":
+            msg_text = response.get("message", "")
+
+            # Format response for Slack
+            parser = ResponseParser()
+            formatter = SlackFormatter()
+            parse_result = parser.parse(msg_text)
+            formatted = formatter.format_response(parse_result.response)
+            blocks = formatted.get("blocks", [])
+            fallback_text = msg_text[:300] if msg_text else "Response processed"
+
+            # Add thinking summary if available
+            all_blocks = []
+            thinking_summary = response.get("thinking_summary")
+            if thinking_summary:
+                all_blocks.append({
+                    "type": "context",
+                    "elements": [{
+                        "type": "mrkdwn",
+                        "text": f":brain: {thinking_summary}",
+                    }]
+                })
+
+            if blocks:
+                all_blocks.extend(blocks)
+
+            await client.chat_postMessage(
+                channel=channel_id,
+                thread_ts=thread_ts,
+                text=fallback_text,
+                blocks=all_blocks if all_blocks else None,
+            )
+
+            logger.info(
+                "Successfully resumed pending request",
+                user_id=user_id,
+                channel=channel_id,
+                agent_id=response.get("agent_id"),
+            )
+        else:
+            # No valid response
+            await client.chat_postMessage(
+                channel=channel_id,
+                thread_ts=thread_ts,
+                text="I couldn't process that request. Please try again.",
+                blocks=[
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": ":x: I couldn't process your request. Please try sending it again.",
+                        }
+                    }
+                ],
+            )
+
+    except Exception as e:
+        logger.error(
+            "Failed to resume pending request",
+            user_id=user_id,
+            channel=channel_id,
+            error=str(e),
+        )
+        # Try to notify user of failure
+        try:
+            await client.chat_postMessage(
+                channel=channel_id,
+                thread_ts=thread_ts,
+                text=f"Error processing request: {str(e)[:100]}",
+                blocks=[
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": f":x: Error processing your request. Please try again.\n`{str(e)[:100]}`",
+                        }
+                    }
+                ],
+            )
+        except Exception:
+            pass
+
+
 def notify_auth_success(bot_token: str | None = None) -> None:
-    """Send Slack notification to all users with pending auth contexts.
+    """Send Slack notification to all users with pending auth contexts and resume their requests.
 
     Called by the OCA callback server when authentication succeeds.
-    Notifies users they're authenticated and can continue with their request.
+    Notifies users they're authenticated and automatically continues processing
+    their original request.
 
     Args:
         bot_token: Slack bot token (uses env var if not provided)
     """
     import time
+
+    from src.channels.async_runtime import run_async
 
     token = bot_token or os.getenv("SLACK_BOT_TOKEN")
     if not token:
@@ -128,6 +334,7 @@ def notify_auth_success(bot_token: str | None = None) -> None:
             # Skip if context is too old (> 30 minutes)
             if time.time() - timestamp > 1800:
                 logger.debug("Skipping stale auth context", user_id=user_id)
+                clear_pending_auth_context(user_id)
                 continue
 
             try:
@@ -137,7 +344,7 @@ def notify_auth_success(bot_token: str | None = None) -> None:
                         "type": "section",
                         "text": {
                             "type": "mrkdwn",
-                            "text": ":white_check_mark: *Authentication successful!*\n\nYou're now logged in. I'll continue with your request.",
+                            "text": ":white_check_mark: *Authentication successful!*\n\nYou're now logged in. Processing your request...",
                         }
                     },
                 ]
@@ -152,17 +359,69 @@ def notify_auth_success(bot_token: str | None = None) -> None:
                         }]
                     })
 
-                # Send to channel/thread
+                # Send notification to channel/thread
                 client.chat_postMessage(
                     channel=channel_id,
                     thread_ts=thread_ts,
-                    text="Authentication successful! You can now continue with your request.",
+                    text="Authentication successful! Processing your request...",
                     blocks=blocks,
                 )
                 logger.info("Sent auth success notification", user_id=user_id, channel=channel_id)
 
+                # Clear context BEFORE resuming to prevent double-processing
+                clear_pending_auth_context(user_id)
+
+                # Actually resume the pending request
+                logger.info(
+                    "Attempting to resume pending request",
+                    user_id=user_id,
+                    has_query=bool(query),
+                    query_preview=query[:50] if query else None,
+                    has_handler=_slack_handler_instance is not None,
+                )
+                if query and _slack_handler_instance is not None:
+                    try:
+                        run_async(
+                            _resume_pending_request_async(
+                                user_id=user_id,
+                                channel_id=channel_id,
+                                thread_ts=thread_ts,
+                                query=query,
+                                bot_token=token,
+                            ),
+                            timeout=300,  # 5 minute timeout
+                        )
+                        logger.info("Resumed pending request after auth", user_id=user_id)
+                    except Exception as resume_error:
+                        logger.error(
+                            "Failed to resume pending request",
+                            user_id=user_id,
+                            error=str(resume_error),
+                        )
+                        # Notify user of failure to resume
+                        try:
+                            client.chat_postMessage(
+                                channel=channel_id,
+                                thread_ts=thread_ts,
+                                text="Failed to continue with your request automatically. Please send it again.",
+                                blocks=[{
+                                    "type": "section",
+                                    "text": {
+                                        "type": "mrkdwn",
+                                        "text": ":warning: I couldn't automatically continue with your request. Please send it again.",
+                                    }
+                                }],
+                            )
+                        except Exception:
+                            pass
+                elif not query:
+                    logger.debug("No query to resume for user", user_id=user_id)
+                elif _slack_handler_instance is None:
+                    logger.warning("No SlackHandler instance - cannot resume request", user_id=user_id)
+
             except Exception as e:
                 logger.warning("Failed to notify user of auth success", user_id=user_id, error=str(e))
+                clear_pending_auth_context(user_id)
 
     except ImportError:
         logger.error("slack_sdk not available for auth notification")
@@ -538,8 +797,10 @@ def build_response_blocks(
         })
 
     # Add main content - split into sections if long
-    content_chunks = [content[i:i+2900] for i in range(0, len(content), 2900)]
-    for chunk in content_chunks[:10]:  # Max 10 sections
+    content_chunks = _split_text_safely(content, 2800)
+
+    # We can send up to 50 blocks in a message
+    for chunk in content_chunks[:40]:
         blocks.append({
             "type": "section",
             "text": {
@@ -547,6 +808,96 @@ def build_response_blocks(
                 "text": chunk
             }
         })
+
+    if len(content_chunks) > 40:
+        blocks.append({
+            "type": "context",
+            "elements": [{
+                "type": "mrkdwn",
+                "text": ":warning: _Response truncated due to extreme length._"
+            }]
+        })
+
+    return blocks
+
+def _split_text_safely(text: str, limit: int) -> list[str]:
+    """
+    Split text into chunks that respect newlines and word boundaries.
+    
+    Args:
+        text: absolute text content
+        limit: max chars per chunk
+        
+    Returns:
+        List of text chunks
+    """
+    chunks = []
+    current_chunk = []
+    current_length = 0
+
+    # Pre-split by existing newlines to preserve paragraph structure
+    # filtering empty lines might change format, so be careful.
+    # splitlines(keepends=True) keeps the \n which is useful.
+    lines = text.splitlines(keepends=True)
+
+    for line in lines:
+        line_len = len(line)
+
+        # If adding this line exceeds limit
+        if current_length + line_len > limit:
+            # If the current chunk has content, save it
+            if current_chunk:
+                chunks.append("".join(current_chunk))
+                current_chunk = []
+                current_length = 0
+
+            # If the line itself is bigger than limit, we must force split it
+            if line_len > limit:
+                # Split by space
+                words = line.split(' ')
+                temp_line = []
+                temp_len = 0
+                for word in words:
+                    # restore space that split removed (except last one?)
+                    # simpler: just strictly slice if word is huge, or build up.
+                    # let's try strict slice for massive lines if normal word split fails
+                    w_len = len(word) + 1 # +1 for space
+
+                    if temp_len + w_len > limit:
+                        if temp_line:
+                            chunks.append(" ".join(temp_line))
+                            temp_line = []
+                            temp_len = 0
+
+                        # If single word is huge
+                        if len(word) > limit:
+                            # Force slice
+                            for i in range(0, len(word), limit):
+                                chunks.append(word[i:i+limit])
+                        else:
+                            temp_line.append(word)
+                            temp_len += w_len
+                    else:
+                        temp_line.append(word)
+                        temp_len += w_len
+
+                if temp_line:
+                    # Add remainder of the split line to start of next chunk
+                    current_chunk = [" ".join(temp_line)]
+                    current_length = len(current_chunk[0])
+            else:
+                # Line fits in a new chunk
+                current_chunk.append(line)
+                current_length += line_len
+        else:
+            # Line fits in current chunk
+            current_chunk.append(line)
+            current_length += line_len
+
+    if current_chunk:
+        chunks.append("".join(current_chunk))
+
+    return chunks
 
     return blocks
 
@@ -628,6 +979,9 @@ class SlackHandler:
         # Now get tracer from the properly configured provider
         self._tracer = trace.get_tracer("oci-slack-handler")
 
+        # Register this instance globally for auth callback resumption
+        set_slack_handler_instance(self)
+
     def _is_duplicate_event(self, event: dict) -> bool:
         """Return True if the event was recently processed."""
         event_key = event.get("client_msg_id") or event.get("event_ts") or event.get("ts")
@@ -680,6 +1034,7 @@ class SlackHandler:
         """
         import asyncio
         import inspect
+
         from slack_sdk.errors import SlackApiError
 
         last_error = None
@@ -688,7 +1043,10 @@ class SlackHandler:
                 result = method(**kwargs)
                 # If the result is a coroutine (async client), await it
                 if inspect.iscoroutine(result):
-                    return await result
+                    result = await result
+                if hasattr(result, "get") and result.get("ok") is False:
+                    error = result.get("error", "unknown_error")
+                    raise RuntimeError(f"Slack API error: {error}")
                 # Otherwise (sync client), return directly
                 return result
             except SlackApiError as e:
@@ -704,7 +1062,7 @@ class SlackHandler:
                     await asyncio.sleep(retry_after)
                 else:
                     raise
-            except (asyncio.TimeoutError, TimeoutError) as e:
+            except TimeoutError as e:
                 last_error = e
                 if attempt < max_retries - 1:
                     wait_time = 2 ** attempt
@@ -729,7 +1087,7 @@ class SlackHandler:
         Returns:
             Slack Block Kit blocks for the thinking progress
         """
-        from src.agents.coordinator.transparency import ThinkingPhase, PHASE_EMOJIS
+        from src.agents.coordinator.transparency import PHASE_EMOJIS
 
         if not steps:
             return [{
@@ -782,6 +1140,7 @@ class SlackHandler:
         """
         import asyncio
         import inspect
+
         from slack_sdk.errors import SlackApiError
 
         last_error = None
@@ -791,6 +1150,9 @@ class SlackHandler:
                 # If the result is a coroutine (async mode), await it
                 if inspect.iscoroutine(result):
                     result = await result
+                if hasattr(result, "get") and result.get("ok") is False:
+                    error = result.get("error", "unknown_error")
+                    raise RuntimeError(f"Slack say failed: {error}")
                 return result
             except SlackApiError as e:
                 last_error = e
@@ -804,7 +1166,7 @@ class SlackHandler:
                     await asyncio.sleep(retry_after)
                 else:
                     raise
-            except (asyncio.TimeoutError, TimeoutError) as e:
+            except TimeoutError as e:
                 last_error = e
                 if attempt < max_retries - 1:
                     wait_time = 2 ** attempt
@@ -925,8 +1287,9 @@ class SlackHandler:
         connection issues that occur when creating new event loops.
         """
         # Ensure AsyncRuntime is started before registering handlers
-        from src.channels.async_runtime import AsyncRuntime
         import time
+
+        from src.channels.async_runtime import AsyncRuntime
 
         runtime = AsyncRuntime.get_instance()
         # Wait for loop to be fully started
@@ -943,8 +1306,11 @@ class SlackHandler:
         @app.event("app_mention")
         def handle_mention(event: dict, say: Callable, client: Any) -> None:
             """Handle @mentions of the bot."""
-            if self._is_duplicate_event(event):
-                return
+            logger.info(
+                ">>> APP_MENTION event received",
+                user=event.get("user"),
+                text_preview=event.get("text", "")[:50],
+            )
             # Use shared async runtime instead of asyncio.run()
             run_async(self._process_message(event, say, client))
 
@@ -954,19 +1320,22 @@ class SlackHandler:
             text = event.get("text", "")
             channel_type = event.get("channel_type")
             thread_ts = event.get("thread_ts")
+            channel = event.get("channel")
+            is_dm = channel_type == "im" or (channel.startswith("D") if channel else False)
+            logger.info(
+                ">>> MESSAGE event received",
+                user=event.get("user"),
+                channel_type=channel_type,
+                subtype=event.get("subtype"),
+                bot_id=event.get("bot_id"),
+                text_preview=text[:50] if text else None,
+            )
             # Skip bot's own messages and message_changed events
             if event.get("bot_id") or event.get("subtype"):
                 return
-            if self._is_duplicate_event(event):
-                return
 
             # Handle DMs
-            if channel_type == "im":
-                run_async(self._process_message(event, say, client))
-            # Handle thread replies (user continuing conversation without @mention)
-            elif thread_ts:
-                run_async(self._process_message(event, say, client))
-            elif self._is_bot_mention(text):
+            if is_dm or thread_ts or self._is_bot_mention(text):
                 run_async(self._process_message(event, say, client))
             else:
                 # Skip non-threaded channel messages - app_mention handles @mentions
@@ -1077,8 +1446,7 @@ class SlackHandler:
         @app.event("app_mention")
         async def handle_mention(event: dict, say, client) -> None:
             """Handle @mentions of the bot."""
-            if self._is_duplicate_event(event):
-                return
+            logger.info(">>> APP_MENTION event received", user=event.get("user"), text_preview=event.get("text", "")[:50])
             await self._process_message(event, say, client)
 
         @app.event("message")
@@ -1090,20 +1458,18 @@ class SlackHandler:
             subtype = event.get("subtype")
             bot_id = event.get("bot_id")
             user = event.get("user")
+            channel = event.get("channel")
+            is_dm = channel_type == "im" or (channel.startswith("D") if channel else False)
+
+            logger.info(">>> MESSAGE event received", user=user, channel_type=channel_type, subtype=subtype, bot_id=bot_id, text_preview=text[:50] if text else None)
 
             # Skip bot's own messages and message_changed events
             if bot_id or subtype:
-                return
-            if self._is_duplicate_event(event):
+                logger.debug(">>> MESSAGE skipped (bot or subtype)", bot_id=bot_id, subtype=subtype)
                 return
 
             # Handle DMs
-            if channel_type == "im":
-                await self._process_message(event, say, client)
-            # Handle thread replies (user continuing conversation without @mention)
-            elif thread_ts:
-                await self._process_message(event, say, client)
-            elif self._is_bot_mention(text):
+            if is_dm or thread_ts or self._is_bot_mention(text):
                 await self._process_message(event, say, client)
             else:
                 # Skip non-threaded channel messages - app_mention handles @mentions
@@ -1222,7 +1588,21 @@ class SlackHandler:
             user = event.get("user", "unknown")
             channel = event.get("channel")
             text = event.get("text", "")
-            thread_ts = event.get("thread_ts") or event.get("ts")
+            channel_type = event.get("channel_type")
+            thread_ts = event.get("thread_ts")
+            reply_in_thread = os.getenv("SLACK_REPLY_IN_THREAD", "true").lower() in ("1", "true", "yes")
+            is_dm = channel_type == "im" or (channel.startswith("D") if channel else False)
+            if is_dm:
+                thread_ts = None
+            elif thread_ts is None and reply_in_thread:
+                thread_ts = event.get("ts")
+
+            # Deduplicate events to prevent stacking messages
+            if self._is_duplicate_event(event):
+                logger.info("Ignoring duplicate event",
+                           event_id=event.get("event_id"),
+                           msg_id=event.get("client_msg_id"))
+                return
 
             # Remove bot mention from text
             text = self._clean_message(text)
@@ -1297,6 +1677,21 @@ class SlackHandler:
                             blocks=build_profile_selection_blocks(profiles, current_profile),
                             thread_ts=thread_ts,
                         )
+                    return
+
+                # Require explicit profile selection when multiple profiles exist
+                profile_manager = ProfileManager.get_instance()
+                await profile_manager.initialize()
+                profile_context = await profile_manager.get_profile_context(user)
+                if profile_context.get("needs_selection"):
+                    profiles = profile_manager.list_profiles()
+                    current_profile = profile_context.get("profile")
+                    await self._safe_say(
+                        say,
+                        text="Select OCI Profile",
+                        blocks=build_profile_selection_blocks(profiles, current_profile),
+                        thread_ts=thread_ts,
+                    )
                     return
 
                 # Initialize conversation context for this thread
@@ -1382,7 +1777,7 @@ class SlackHandler:
                         ),
                         timeout=coordinator_timeout_s,
                     )
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     error_msg = (
                         "Coordinator timed out after "
                         f"{os.getenv('SLACK_COORDINATOR_TIMEOUT_SECONDS', '300')}s"
@@ -1448,12 +1843,16 @@ class SlackHandler:
                         formatted = self._format_response(response)
                         msg_text = response.get("message", "")
 
+                        # Use formatted summary for notifications (clean, no JSON)
+                        fallback_text = formatted.get("summary", "Response")
+
                         # Handle empty or whitespace-only responses
                         if not msg_text or not msg_text.strip():
                             msg_text = (
                                 "I processed your request but the response was empty. "
                                 "Please try rephrasing your question."
                             )
+                            fallback_text = msg_text
                         # Get follow-up suggestions based on query type
                         routing_type = response.get("agent_id", text)
                         suggestions = get_follow_up_suggestions(routing_type)
@@ -1487,7 +1886,7 @@ class SlackHandler:
                             client=client,
                             channel=channel,
                             thread_ts=thread_ts,
-                            text=msg_text[:200] if isinstance(msg_text, str) else "Response",
+                            text=fallback_text,
                             blocks=all_blocks if all_blocks else None,
                         )
                         # Update conversation memory
@@ -1865,7 +2264,12 @@ class SlackHandler:
             # Format and send response
             if response:
                 formatted = self._format_response(response)
-                msg_text = response.get("message", "Response")
+
+                # Use formatted summary for notifications (clean, no JSON)
+                fallback_text = formatted.get("summary", "Response")
+
+                # Get raw message for conversation memory
+                msg_text = response.get("message", fallback_text)
 
                 # Get follow-up suggestions based on query type
                 routing_type = response.get("routing_type", query)
@@ -1881,7 +2285,7 @@ class SlackHandler:
                     client.chat_postMessage,
                     channel=channel,
                     thread_ts=thread_ts,
-                    text=msg_text[:200] if isinstance(msg_text, str) else "Response",
+                    text=fallback_text,
                     blocks=all_blocks if all_blocks else None,
                 )
 
@@ -2225,15 +2629,18 @@ class SlackHandler:
                     from src.main import get_coordinator
                     prewarm_coordinator = get_coordinator()
 
-                    if prewarm_coordinator is not None:
+                    if prewarm_coordinator is not None and not _has_llm_channel_overrides("slack"):
                         self._langgraph_coordinator = prewarm_coordinator
                         logger.info("Using pre-warmed LangGraph coordinator")
                     else:
                         # Fallback: lazy initialization (should rarely happen)
-                        logger.warning("Pre-warmed coordinator not available, initializing lazily")
+                        if prewarm_coordinator is not None:
+                            logger.info("Slack LLM overrides set; initializing Slack-specific coordinator")
+                        else:
+                            logger.warning("Pre-warmed coordinator not available, initializing lazily")
 
                         # Initialize coordinator components
-                        llm = get_llm()
+                        llm = get_llm(channel_type="slack")
 
                         # Use MCPConnectionManager for persistent tool catalog connections
                         # This ensures we reuse the initialized MCP connections from main.py
@@ -2270,7 +2677,9 @@ class SlackHandler:
                         memory = SharedMemoryManager(redis_url=redis_url)
 
                         # Load pre-built workflows for fast deterministic routing
-                        from src.agents.coordinator.workflows import get_workflow_registry
+                        from src.agents.coordinator.workflows import (
+                            get_workflow_registry,
+                        )
                         workflow_registry = get_workflow_registry()
 
                         # Create coordinator with workflows
@@ -2419,7 +2828,7 @@ class SlackHandler:
             span.set_attribute("user.id", user_id)
 
             # Get LLM for agent
-            llm = get_llm()
+            llm = get_llm(channel_type="slack")
 
             # Get tool catalog for MCP tools using persistent connection manager.
             # The MCPConnectionManager maintains connections across messages,
@@ -2546,10 +2955,13 @@ class SlackHandler:
             response: Agent response with 'message' and optional 'agent_id'
 
         Returns:
-            Slack Block Kit formatted response
+            Slack Block Kit formatted response with 'blocks' and 'summary' keys.
+            'summary' is a plain text description for notifications/accessibility.
         """
         if response.get("type") == "error":
-            return _slack_formatter.format_error(response.get("message", "Unknown error"))
+            result = _slack_formatter.format_error(response.get("message", "Unknown error"))
+            result["summary"] = f"Error: {response.get('message', 'Unknown error')[:150]}"
+            return result
 
         # Extract agent info
         agent_id = response.get("agent_id", "Agent Response")
@@ -2560,6 +2972,9 @@ class SlackHandler:
 
         # Use SlackFormatter to convert StructuredResponse to Block Kit
         formatted = _slack_formatter.format_response(parse_result.response)
+
+        # Generate plain text summary for notifications/accessibility
+        summary = self._generate_summary(parse_result.response)
 
         # Add any extra sections from the original response (backwards compat)
         blocks = formatted.get("blocks", [])
@@ -2575,7 +2990,41 @@ class SlackHandler:
                     "text": {"type": "mrkdwn", "text": sec["content"][:2900]},
                 })
 
-        return {"blocks": blocks}
+        return {"blocks": blocks, "summary": summary}
+
+    def _generate_summary(self, response) -> str:
+        """Generate plain text summary for Slack notifications.
+
+        Extracts title and key metrics from StructuredResponse for use
+        as fallback text in notifications and accessibility.
+
+        Args:
+            response: StructuredResponse object
+
+        Returns:
+            Plain text summary (max 200 chars)
+        """
+        parts = []
+
+        # Start with header title
+        if response.header and response.header.title:
+            parts.append(response.header.title)
+
+        # Add key metrics if available (first section with metrics)
+        for section in response.sections:
+            if section.metrics:
+                metric_parts = []
+                for metric in section.metrics[:3]:  # First 3 metrics
+                    label = metric.label or ""
+                    value = metric.value if metric.value is not None else ""
+                    if label and value:
+                        metric_parts.append(f"{label}: {value}")
+                if metric_parts:
+                    parts.append(" | ".join(metric_parts))
+                break  # Only use first section with metrics
+
+        summary = " - ".join(parts) if parts else "Response"
+        return summary[:200]
 
     # NOTE: _extract_content_from_response and _infer_table_title removed
     # Parsing logic consolidated into src/formatting/parser.py (ResponseParser)
