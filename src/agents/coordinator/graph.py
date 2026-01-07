@@ -19,7 +19,6 @@ Phase 4 Enhancements:
 
 from __future__ import annotations
 
-import os
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
@@ -412,18 +411,14 @@ class LangGraphCoordinator:
             - thinking_trace: ThinkingTrace object
             - thinking_summary: str (compact summary)
         """
-        import hashlib
         import uuid
 
         if not self._compiled_graph:
             await self.initialize()
 
         # Create unique thread_id per query to avoid stale checkpoints
-        # Include query hash so different queries in same thread get fresh state
-        query_hash = hashlib.md5(query.encode()).hexdigest()[:8]
         if thread_id:
-            # Preserve thread_id for conversation tracking, add query hash for uniqueness
-            effective_thread_id = f"{thread_id}_{query_hash}"
+            effective_thread_id = thread_id
         else:
             effective_thread_id = str(uuid.uuid4())
 
@@ -464,6 +459,16 @@ class LangGraphCoordinator:
             messages=[HumanMessage(content=full_query)],
             max_iterations=self.max_iterations,
             metadata=metadata or {},
+            # Explicitly reset transient state for new turn
+            final_response=None,
+            error=None,
+            tool_calls=[],
+            tool_results=[],
+            iteration=0,
+            routing=None,
+            current_agent=None,
+            workflow_name=None,
+            agent_context=None,
         )
 
         # Thread config for checkpointer

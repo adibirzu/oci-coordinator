@@ -22,7 +22,6 @@ from src.agents.coordinator.transparency import (
     ThinkingTrace,
 )
 
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Context Variable for Thinking Callback
 # ─────────────────────────────────────────────────────────────────────────────
@@ -316,7 +315,7 @@ class CoordinatorState:
 
     def add_thinking_step(
         self,
-        phase: "ThinkingPhase",
+        phase: ThinkingPhase,
         message: str,
         data: dict[str, Any] | None = None,
     ) -> None:
@@ -330,7 +329,7 @@ class CoordinatorState:
         """
         import asyncio
         import inspect
-        from src.agents.coordinator.transparency import ThinkingPhase, ThinkingStep
+
 
         if self.thinking_trace is None:
             from src.agents.coordinator.transparency import create_thinking_trace

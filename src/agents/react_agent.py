@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -133,7 +134,7 @@ class OCIReActAgent:
         llm: Any,
         tool_catalog: ToolCatalog | None = None,
         resource_cache: OCIResourceCache | None = None,
-        memory_manager: "SharedMemoryManager | None" = None,
+        memory_manager: SharedMemoryManager | None = None,
         agent_id: str = "oci-react-agent",
         max_iterations: int = 5,
     ):
@@ -474,71 +475,13 @@ class SpecializedReActAgent(OCIReActAgent):
     Extends base agent with domain-specific prompts and tool preferences.
     """
 
-    # Domain-specific focus areas (tools are discovered dynamically)
-    DOMAIN_PROMPTS = {
-        "database": """You are an Oracle Database Troubleshooting Agent.
-
-Focus on:
-- Autonomous Database (ATP/ADW) analysis
-- DB System performance
-- Blocking sessions and wait events
-- AWR report analysis
-- SQL tuning and query optimization
-
-Use the dynamically discovered tools below to query real database data.
-""",
-        "infrastructure": """You are an OCI Infrastructure Agent.
-
-Focus on:
-- Compartment and tenancy management
-- Compute instance management (list, start, stop, restart)
-- Network configuration (VCN, subnets, security lists)
-- Load balancers and security
-- Resource utilization and inventory
-
-Use the dynamically discovered tools below to manage OCI resources.
-""",
-        "finops": """You are an OCI FinOps Agent.
-
-Focus on:
-- Cost analysis and optimization by service and compartment
-- Budget tracking and alerts
-- Resource rightsizing recommendations
-- Usage anomaly detection and spike analysis
-- Credit forecasting
-
-Use the dynamically discovered tools below to analyze costs.
-""",
-        "security": """You are an OCI Security Agent.
-
-Focus on:
-- Cloud Guard findings and problems
-- Security compliance monitoring
-- IAM policy analysis
-- Threat detection and MITRE mapping
-- Vulnerability scanning
-
-Use the dynamically discovered tools below for security analysis.
-""",
-        "observability": """You are an OCI Observability Agent.
-
-Focus on:
-- Log search and analysis
-- Metrics and alarms
-- Error correlation across services
-- Audit log analysis
-- Pattern detection
-
-Use the dynamically discovered tools below for observability tasks.
-""",
-    }
-
     def __init__(
         self,
         domain: str,
         llm: Any,
         tool_catalog: ToolCatalog | None = None,
         resource_cache: OCIResourceCache | None = None,
+        prompts_dir: str = "prompts",
         **kwargs,
     ):
         """
@@ -549,6 +492,7 @@ Use the dynamically discovered tools below for observability tasks.
             llm: LangChain LLM
             tool_catalog: MCP tool catalog
             resource_cache: OCI resource cache
+            prompts_dir: Directory containing prompt files
         """
         agent_id = f"oci-{domain}-agent"
         super().__init__(
@@ -559,7 +503,39 @@ Use the dynamically discovered tools below for observability tasks.
             **kwargs,
         )
         self.domain = domain
-        self.domain_prompt = self.DOMAIN_PROMPTS.get(domain, "")
+        self._prompts_dir = Path(prompts_dir)
+        self.domain_prompt = self._load_domain_prompt()
+
+    def _load_domain_prompt(self) -> str:
+        """Load domain-specific prompt from file."""
+        # Try specific domain file first
+        prompt_file = self._prompts_dir / f"{self.domain}.md"
+
+        # Fallback mappings for common domains if exact match not found
+        if not prompt_file.exists():
+            # Try mapping common aliases
+            aliases = {
+                "infrastructure": "05-INFRASTRUCTURE-AGENT.md",
+                "database": "01-DB-TROUBLESHOOT-AGENT.md",
+                "finops": "04-FINOPS-AGENT.md",
+                "security": "03-SECURITY-THREAT-AGENT.md",
+                "observability": "02-LOG-ANALYTICS-AGENT.md",
+            }
+            if self.domain in aliases:
+                prompt_file = self._prompts_dir / aliases[self.domain]
+            else:
+                 # Check for generic agent prompt
+                 prompt_file = self._prompts_dir / "01-GENERIC-AGENT.md"
+
+        if prompt_file.exists():
+            try:
+                self._logger.info(f"Loading prompt from {prompt_file}")
+                return prompt_file.read_text().strip()
+            except Exception as e:
+                self._logger.error(f"Failed to load prompt from {prompt_file}", error=str(e))
+
+        # severe fallback if files missing
+        return f"You are an OCI {self.domain.title()} Agent. Use available tools to assist the user."
 
     async def _get_compartment_context(self) -> str:
         """Get context with domain-specific additions and dynamic tool discovery."""

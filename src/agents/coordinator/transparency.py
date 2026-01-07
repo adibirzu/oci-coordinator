@@ -261,7 +261,7 @@ class ThinkingTrace:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "ThinkingTrace":
+    def from_dict(cls, data: dict[str, Any]) -> ThinkingTrace:
         """Restore from serialized dict (for JSON-based serialization)."""
         from datetime import datetime
         trace = cls()

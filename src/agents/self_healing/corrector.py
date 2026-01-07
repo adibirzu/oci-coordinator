@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -98,7 +98,7 @@ OCI_PARAM_CORRECTIONS = {
 # Tool-specific parameter requirements
 TOOL_PARAM_REQUIREMENTS = {
     "oci_cost_get_summary": {
-        "optional": ["compartment_id", "days", "service_filter"],
+        "optional": ["compartment_id", "days", "service_filter", "start_date", "end_date", "profile"],
         "defaults": {"days": 30},
     },
     "oci_database_list_autonomous": {
@@ -138,7 +138,7 @@ class ParameterCorrector:
     - LLM-guided complex corrections
     """
 
-    def __init__(self, llm: "BaseChatModel | None" = None):
+    def __init__(self, llm: BaseChatModel | None = None):
         """
         Initialize parameter corrector.
 

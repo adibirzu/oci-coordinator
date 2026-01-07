@@ -66,7 +66,7 @@ async def _run_oci_cli(
             None,
             lambda: subprocess.run(
                 command,
-                capture_output=True,
+                check=False, capture_output=True,
                 text=True,
                 timeout=timeout,
             ),
@@ -90,7 +90,7 @@ async def _run_oci_cli(
 
 
 async def _execute_with_cli_fallback(
-    tool_catalog: "ToolCatalog",
+    tool_catalog: ToolCatalog,
     tool_name: str,
     tool_params: dict[str, Any],
     cli_command: list[str],
@@ -142,20 +142,105 @@ async def _execute_with_cli_fallback(
     return f"Error: Both MCP tool and OCI CLI failed. MCP tool: {tool_name}, CLI error: {cli_result}"
 
 
-def _get_root_compartment() -> str | None:
+def _get_root_compartment(profile: str | None = None) -> str | None:
     """
     Get the root compartment (tenancy) ID from OCI config.
+
+    Args:
+        profile: OCI profile name (e.g., "DEFAULT", "EMDEMO"). If None, uses DEFAULT.
 
     Returns the tenancy OCID which can be used as default compartment
     when no specific compartment is provided.
     """
     try:
         import oci
-        config = oci.config.from_file()
+        profile_name = (profile or "DEFAULT").upper()
+
+        # Handle profile name variations
+        if profile_name == "EMDEMO":
+            profile_name = "emdemo"  # OCI config uses lowercase
+
+        config = oci.config.from_file(profile_name=profile_name)
         return config.get("tenancy")
     except Exception as e:
-        logger.debug("Could not get tenancy from OCI config", error=str(e))
+        logger.debug("Could not get tenancy from OCI config", profile=profile, error=str(e))
+        # Fall back to DEFAULT profile
+        if profile:
+            try:
+                import oci
+                config = oci.config.from_file()
+                return config.get("tenancy")
+            except Exception:
+                pass
         return None
+
+
+def _get_profile_compartment(
+    profile: str | None,
+    service: str = "default",
+) -> tuple[str | None, str | None]:
+    """
+    Get profile-specific compartment and region for OCI services.
+
+    Different profiles may have different compartments for different services:
+    - EMDEMO: DB Management in us-ashburn-1, OPSI in uk-london-1, etc.
+    - DEFAULT: Uses root tenancy by default
+
+    Args:
+        profile: Profile name (e.g., "EMDEMO", "DEFAULT")
+        service: Service type - "dbmgmt", "opsi", "logan", "root"
+
+    Returns:
+        Tuple of (compartment_id, region) - either may be None to use defaults
+    """
+    import os
+
+    profile_upper = (profile or "DEFAULT").upper()
+    service_lower = service.lower()
+
+    # Environment variable prefixes for known profiles
+    env_prefix_map = {
+        "EMDEMO": "OCI_EMDEMO",
+        "DEFAULT": "OCI_DEFAULT",
+        "PROD": "OCI_PROD",
+        "DEV": "OCI_DEV",
+    }
+
+    prefix = env_prefix_map.get(profile_upper)
+    if not prefix:
+        return None, None
+
+    # Service-specific compartment and region mapping
+    service_map = {
+        "dbmgmt": ("DBMGMT_COMPARTMENT_ID", "DBMGMT_REGION"),
+        "opsi": ("OPSI_COMPARTMENT_ID", "OPSI_REGION"),
+        "logan": ("LOGAN_COMPARTMENT_ID", "LOGAN_REGION"),
+        "exadata": ("EXADATA_COMPARTMENT_ID", "EXADATA_REGION"),
+        "oandm": ("OANDM_DEMO_COMPARTMENT_ID", None),  # OandM-Demo parent
+        "root": ("TENANCY_ID", "HOME_REGION"),
+    }
+
+    compartment_suffix, region_suffix = service_map.get(service_lower, (None, None))
+
+    compartment_id = None
+    region = None
+
+    if compartment_suffix:
+        env_var = f"{prefix}_{compartment_suffix}"
+        compartment_id = os.getenv(env_var)
+        if compartment_id:
+            logger.debug(
+                "Using profile-specific compartment",
+                profile=profile_upper,
+                service=service_lower,
+                env_var=env_var,
+                compartment_id=compartment_id[:50] + "..." if len(compartment_id) > 50 else compartment_id,
+            )
+
+    if region_suffix:
+        region = os.getenv(f"{prefix}_{region_suffix}")
+
+    return compartment_id, region
 
 
 def _extract_result(result: ToolCallResult | str | Any) -> str:
@@ -666,6 +751,7 @@ async def cost_summary_workflow(
     entities: dict[str, Any],
     tool_catalog: ToolCatalog,
     memory: SharedMemoryManager,
+    metadata: dict[str, Any] | None = None,
 ) -> str:
     """
     Get cost summary for the tenancy.
@@ -696,6 +782,16 @@ async def cost_summary_workflow(
             "compartment_id": compartment_id,  # None defaults to tenancy in tool
             "days": days,
         }
+
+        # Get profile from entities first (extracted from query), then metadata (user's active profile)
+        oci_profile = entities.get("oci_profile") or (metadata.get("oci_profile") if metadata else None)
+        if oci_profile:
+            tool_params["profile"] = oci_profile
+            logger.info(
+                "cost_summary_workflow using profile",
+                profile=oci_profile,
+                source="entities" if entities.get("oci_profile") else "metadata",
+            )
 
         # Support explicit date ranges for historical queries (e.g., "November costs")
         start_date = entities.get("start_date")
@@ -729,6 +825,7 @@ async def database_costs_workflow(
     entities: dict[str, Any],
     tool_catalog: ToolCatalog,
     memory: SharedMemoryManager,
+    metadata: dict[str, Any] | None = None,
 ) -> str:
     """
     Get database-specific cost summary.
@@ -763,6 +860,11 @@ async def database_costs_workflow(
             "service_filter": "database",  # Filter for database services only
         }
 
+        # Get profile from entities first (extracted from query), then metadata (user's active profile)
+        oci_profile = entities.get("oci_profile") or (metadata.get("oci_profile") if metadata else None)
+        if oci_profile:
+            tool_params["profile"] = oci_profile
+
         # Support explicit date ranges
         start_date = entities.get("start_date")
         end_date = entities.get("end_date")
@@ -784,6 +886,7 @@ async def compute_costs_workflow(
     entities: dict[str, Any],
     tool_catalog: ToolCatalog,
     memory: SharedMemoryManager,
+    metadata: dict[str, Any] | None = None,
 ) -> str:
     """
     Get compute-specific cost summary.
@@ -809,6 +912,11 @@ async def compute_costs_workflow(
             "service_filter": "compute",
         }
 
+        # Get profile from entities first (extracted from query), then metadata (user's active profile)
+        oci_profile = entities.get("oci_profile") or (metadata.get("oci_profile") if metadata else None)
+        if oci_profile:
+            tool_params["profile"] = oci_profile
+
         # Support explicit date ranges
         start_date = entities.get("start_date")
         end_date = entities.get("end_date")
@@ -830,6 +938,7 @@ async def storage_costs_workflow(
     entities: dict[str, Any],
     tool_catalog: ToolCatalog,
     memory: SharedMemoryManager,
+    metadata: dict[str, Any] | None = None,
 ) -> str:
     """
     Get storage-specific cost summary.
@@ -854,6 +963,11 @@ async def storage_costs_workflow(
             "days": days,
             "service_filter": "storage",
         }
+
+        # Get profile from entities first (extracted from query), then metadata (user's active profile)
+        oci_profile = entities.get("oci_profile") or (metadata.get("oci_profile") if metadata else None)
+        if oci_profile:
+            tool_params["profile"] = oci_profile
 
         # Support explicit date ranges
         start_date = entities.get("start_date")
@@ -881,17 +995,19 @@ async def list_databases_workflow(
     entities: dict[str, Any],
     tool_catalog: ToolCatalog,
     memory: SharedMemoryManager,
+    metadata: dict[str, Any] | None = None,
 ) -> str:
     """
     List databases in the tenancy.
 
-    Lists Autonomous Databases and DB Systems accessible to the user.
+    Lists Managed Databases (DB Management), Autonomous Databases, and DB Systems.
     Runs data sources in PARALLEL for fast response, prioritizing results.
 
     Features:
     - 5-minute cache to avoid repeated OPSI/API calls
     - Parallel execution of multiple data sources
     - Graceful fallback when some sources fail
+    - Profile support for multi-tenancy (e.g., EMDEMO, Default)
 
     Matches intents: list_databases, show_databases, database_names,
                      list_db, show_db, get_databases
@@ -919,7 +1035,7 @@ async def list_databases_workflow(
                 "error", "timeout", "validation error", "missing required"
             ]):
                 return (tool_name, result_str)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning(f"Tool {tool_name} timed out after {TOOL_TIMEOUT}s")
         except Exception as e:
             logger.debug(f"Tool {tool_name} failed", error=str(e))
@@ -936,9 +1052,32 @@ async def list_databases_workflow(
             if compartment_id:
                 logger.info("list_databases: using root compartment as default")
 
+        # ── Extract Profiles ──────────────────────────────────────────────────
+        # Extract profiles from entities or metadata (supports multi-tenancy: EMDEMO, Default, etc.)
+        # Priority: entities.profiles > entities.oci_profile > metadata.oci_profile
+        profiles_to_query: list[str] = []
+
+        # Check entities first (extracted from query text)
+        if entities.get("profiles"):
+            profiles_to_query = entities["profiles"]
+            logger.info(f"list_databases: found profiles {profiles_to_query} from query")
+        elif entities.get("oci_profile"):
+            profiles_to_query = [entities["oci_profile"]]
+            logger.info(f"list_databases: using profile '{profiles_to_query[0]}' from entities")
+        # Fall back to metadata (user's active profile)
+        elif metadata and metadata.get("oci_profile"):
+            profiles_to_query = [metadata["oci_profile"]]
+            logger.info(f"list_databases: using profile '{profiles_to_query[0]}' from metadata")
+
+        # If no profiles specified, use None (default profile)
+        if not profiles_to_query:
+            profiles_to_query = [None]  # type: ignore[list-item]
+            logger.info("list_databases: no profile specified, using default")
+
         # ── Cache Check ──────────────────────────────────────────────────────
-        # Build cache key from compartment (or "root" if none)
-        cache_key = f"{CACHE_PREFIX}:{compartment_id or 'root'}"
+        # Build cache key from compartment and profiles
+        profiles_key = "+".join(sorted(p or "default" for p in profiles_to_query))
+        cache_key = f"{CACHE_PREFIX}:{compartment_id or 'root'}:{profiles_key}"
 
         # Try to get cached result
         try:
@@ -947,6 +1086,7 @@ async def list_databases_workflow(
                 logger.info(
                     "list_databases: returning cached result",
                     cache_key=cache_key,
+                    profiles=profiles_to_query,
                     ttl_minutes=5,
                 )
                 return cached_result
@@ -954,63 +1094,121 @@ async def list_databases_workflow(
             # Cache failure should not block the workflow
             logger.debug("Cache read failed", error=str(cache_err))
 
-        # ── Execute Database Queries ─────────────────────────────────────────
-        # Prepare all tool calls
-        tasks = []
+        # ── Build tasks for ALL profiles in parallel ──────────────────────────
+        # Each profile gets its own set of tool calls, all executed concurrently
+        tasks: list[Any] = []
+        task_metadata: list[tuple[str, str | None]] = []  # (tool_name, profile)
 
-        # OPSI search_databases (fastest - uses cache)
-        opsi_params = {"limit": 50}
-        if compartment_id:
-            opsi_params["compartment_id"] = compartment_id
-        tasks.append(safe_execute("oci_opsi_search_databases", opsi_params))
+        for profile in profiles_to_query:
+            profile_label = profile or "DEFAULT"
 
-        # Autonomous databases (requires compartment_id)
-        if compartment_id:
-            tasks.append(safe_execute(
-                "oci_database_list_autonomous",
-                {"compartment_id": compartment_id}
-            ))
+            # ── DB Management - Managed Databases ────────────────────────────
+            # Use profile-specific compartment (e.g., EMDEMO uses OCI_EMDEMO_DBMGMT_COMPARTMENT_ID)
+            dbmgmt_compartment, dbmgmt_region = _get_profile_compartment(profile, "dbmgmt")
+            dbmgmt_params: dict[str, Any] = {"limit": 50, "include_subtree": True}
 
-        # Database connections (database-observatory)
+            # Use profile-specific compartment, or fall back to query compartment, then root
+            if dbmgmt_compartment:
+                dbmgmt_params["compartment_id"] = dbmgmt_compartment
+            elif compartment_id:
+                dbmgmt_params["compartment_id"] = compartment_id
+            else:
+                # Get tenancy root for this profile
+                profile_root = _get_root_compartment(profile)
+                if profile_root:
+                    dbmgmt_params["compartment_id"] = profile_root
+
+            if profile:
+                dbmgmt_params["profile"] = profile
+            if dbmgmt_region:
+                dbmgmt_params["region"] = dbmgmt_region
+
+            tasks.append(safe_execute("oci_dbmgmt_list_databases", dbmgmt_params))
+            task_metadata.append(("oci_dbmgmt_list_databases", profile_label))
+
+            # ── OPSI - Operations Insights Databases ─────────────────────────
+            # OPSI may be in a different region (e.g., EMDEMO OPSI is in uk-london-1)
+            opsi_compartment, opsi_region = _get_profile_compartment(profile, "opsi")
+            opsi_params: dict[str, Any] = {"limit": 50}
+
+            if opsi_compartment:
+                opsi_params["compartment_id"] = opsi_compartment
+            elif compartment_id:
+                opsi_params["compartment_id"] = compartment_id
+
+            if profile:
+                opsi_params["profile"] = profile
+            if opsi_region:
+                opsi_params["region"] = opsi_region
+
+            tasks.append(safe_execute("oci_opsi_search_databases", opsi_params))
+            task_metadata.append(("oci_opsi_search_databases", profile_label))
+
+            # ── Autonomous Databases ─────────────────────────────────────────
+            adb_compartment = dbmgmt_compartment or compartment_id or _get_root_compartment(profile)
+            if adb_compartment:
+                adb_params: dict[str, Any] = {"compartment_id": adb_compartment}
+                if profile:
+                    adb_params["profile"] = profile
+                tasks.append(safe_execute("oci_database_list_autonomous", adb_params))
+                task_metadata.append(("oci_database_list_autonomous", profile_label))
+
+        # Database connections (profile-agnostic - SQLcl connections)
         tasks.append(safe_execute("oci_database_list_connections", {}))
+        task_metadata.append(("oci_database_list_connections", None))
 
-        # Run all tools in PARALLEL - significantly faster than sequential
-        logger.info(f"list_databases: running {len(tasks)} tools in parallel")
+        # Run all tools in PARALLEL across all profiles
+        logger.info(
+            f"list_databases: running {len(tasks)} tools in parallel",
+            profiles=profiles_to_query,
+            task_count=len(tasks),
+        )
         results_raw = await asyncio.gather(*tasks, return_exceptions=True)
 
-        # Process results with priority ordering
-        results = []
-        errors = []
+        # Process results with priority ordering and profile grouping
+        results: list[tuple[int, str, bool, str | None]] = []  # (priority, content, is_json, profile)
+        errors: list[str] = []
         source_priority = {
-            "oci_opsi_search_databases": ("Databases (from OPSI)", 1),
-            "oci_database_list_autonomous": ("Autonomous Databases", 2),
-            "oci_database_list_connections": ("Database Connections", 3),
+            "oci_dbmgmt_list_databases": ("Managed Databases", 1),
+            "oci_opsi_search_databases": ("OPSI Databases", 2),
+            "oci_database_list_autonomous": ("Autonomous Databases", 3),
+            "oci_database_list_connections": ("Database Connections", 4),
         }
 
-        for item in results_raw:
+        for idx, item in enumerate(results_raw):
+            tool_name, profile_label = task_metadata[idx]
             if isinstance(item, Exception):
-                errors.append(str(item))
+                errors.append(f"{tool_name} ({profile_label}): {item}")
                 continue
-            tool_name, result_str = item
+            _, result_str = item
             if result_str:
                 source_name, priority = source_priority.get(tool_name, (tool_name, 99))
                 if tool_name == "oci_database_list_connections":
                     # Returns JSON - don't add markdown header, parser handles formatting
                     result_str = _format_database_connections(result_str)
-                    results.append((priority, result_str, True))  # True = is_json
+                    results.append((priority, result_str, True, None))  # True = is_json
+                elif '"type":' in result_str:
+                    # Typed JSON response - pass directly to parser for Slack table formatting
+                    # Parser handles: managed_databases, database_connections, etc.
+                    results.append((priority, result_str, True, profile_label))
                 else:
-                    results.append((priority, f"## {source_name}\n{result_str}", False))
+                    # Non-JSON result - add markdown header
+                    if len(profiles_to_query) > 1 and profile_label:
+                        header = f"## {source_name} ({profile_label})"
+                    else:
+                        header = f"## {source_name}"
+                    results.append((priority, f"{header}\n{result_str}", False, profile_label))
             else:
                 source_name, _ = source_priority.get(tool_name, (tool_name, 99))
-                errors.append(f"{source_name} unavailable")
+                errors.append(f"{source_name} ({profile_label}) unavailable")
 
         if results:
-            # Sort by priority and combine results
-            results.sort(key=lambda x: x[0])
+            # Sort by priority, then by profile for consistent ordering
+            results.sort(key=lambda x: (x[0], x[3] or ""))
 
             # If only one result and it's JSON, return it directly for parser
             # This enables proper Slack table rendering via ResponseParser
-            if len(results) == 1 and len(results[0]) == 3 and results[0][2]:
+            if len(results) == 1 and results[0][2]:  # Check is_json flag
                 final_result = results[0][1]  # Return JSON directly
             else:
                 # Multiple results - combine as markdown
@@ -1160,6 +1358,7 @@ async def resource_cost_overview_workflow(
     entities: dict[str, Any],
     tool_catalog: ToolCatalog,
     memory: SharedMemoryManager,
+    metadata: dict[str, Any] | None = None,
 ) -> str:
     """
     Get comprehensive cost overview with associated resources.
@@ -1181,9 +1380,12 @@ async def resource_cost_overview_workflow(
         # Fetch cost summary and resource discovery in parallel
         async def get_costs():
             try:
+                tool_params = {"days": days, "compartment_id": compartment_id}
+                if metadata and metadata.get("oci_profile"):
+                    tool_params["profile"] = metadata["oci_profile"]
                 result = await tool_catalog.execute(
                     "oci_cost_get_summary",
-                    {"days": days, "compartment_id": compartment_id},
+                    tool_params,
                 )
                 return _extract_result(result)
             except Exception as e:
@@ -1247,6 +1449,7 @@ async def compute_with_costs_workflow(
     entities: dict[str, Any],
     tool_catalog: ToolCatalog,
     memory: SharedMemoryManager,
+    metadata: dict[str, Any] | None = None,
 ) -> str:
     """
     List compute instances with associated cost data.
@@ -1278,13 +1481,16 @@ async def compute_with_costs_workflow(
 
         async def get_compute_costs():
             try:
+                tool_params = {
+                    "days": days,
+                    "compartment_id": compartment_id,
+                    "service_filter": "compute",
+                }
+                if metadata and metadata.get("oci_profile"):
+                    tool_params["profile"] = metadata["oci_profile"]
                 result = await tool_catalog.execute(
                     "oci_cost_get_summary",
-                    {
-                        "days": days,
-                        "compartment_id": compartment_id,
-                        "service_filter": "compute",
-                    },
+                    tool_params,
                 )
                 return _extract_result(result)
             except Exception as e:
@@ -1330,6 +1536,7 @@ async def database_with_costs_workflow(
     entities: dict[str, Any],
     tool_catalog: ToolCatalog,
     memory: SharedMemoryManager,
+    metadata: dict[str, Any] | None = None,
 ) -> str:
     """
     List databases with associated cost data.
@@ -1396,6 +1603,8 @@ async def database_with_costs_workflow(
                 }
                 if compartment_id:
                     cost_params["compartment_id"] = compartment_id
+                if metadata and metadata.get("oci_profile"):
+                    cost_params["profile"] = metadata["oci_profile"]
                 result = await tool_catalog.execute(
                     "oci_cost_get_summary",
                     cost_params,
@@ -1444,6 +1653,7 @@ async def compartment_cost_breakdown_workflow(
     entities: dict[str, Any],
     tool_catalog: ToolCatalog,
     memory: SharedMemoryManager,
+    metadata: dict[str, Any] | None = None,
 ) -> str:
     """
     Get costs grouped by compartment with resource summary.
@@ -1474,9 +1684,12 @@ async def compartment_cost_breakdown_workflow(
 
         async def get_total_costs():
             try:
+                tool_params = {"days": days}
+                if metadata and metadata.get("oci_profile"):
+                    tool_params["profile"] = metadata["oci_profile"]
                 result = await tool_catalog.execute(
                     "oci_cost_get_summary",
-                    {"days": days},
+                    tool_params,
                 )
                 return _extract_result(result)
             except Exception as e:

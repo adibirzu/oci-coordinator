@@ -24,6 +24,7 @@ import structlog
 
 if TYPE_CHECKING:
     from langchain_core.language_models import BaseChatModel
+
     from src.mcp.catalog import ToolCatalog
 
 logger = structlog.get_logger(__name__)
@@ -195,8 +196,8 @@ class LogicValidator:
 
     def __init__(
         self,
-        llm: "BaseChatModel | None" = None,
-        tool_catalog: "ToolCatalog | None" = None,
+        llm: BaseChatModel | None = None,
+        tool_catalog: ToolCatalog | None = None,
     ):
         """
         Initialize logic validator.

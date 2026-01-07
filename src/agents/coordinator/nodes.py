@@ -18,8 +18,6 @@ import time
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
-import os
-
 import structlog
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from opentelemetry import trace
@@ -37,7 +35,6 @@ from src.agents.coordinator.state import (
 from src.agents.coordinator.transparency import (
     AgentCandidate,
     ThinkingPhase,
-    ThinkingTrace,
     create_thinking_trace,
 )
 
@@ -91,6 +88,21 @@ class CoordinatorNodes:
         self.workflow_registry = workflow_registry or {}
         self.orchestrator = orchestrator
         self._logger = logger.bind(component="CoordinatorNodes")
+
+    def _enrich_intent(
+        self, intent: IntentClassification, state: CoordinatorState
+    ) -> IntentClassification:
+        """Merge context from previous intent if needed."""
+        # IF previous intent exists AND has entities
+        if state.intent and state.intent.entities:
+            # Merge entities, new entities take precedence
+            merged_entities = state.intent.entities.copy()
+            merged_entities.update(intent.entities)
+
+            # Update the intent with merged entities
+            return replace(intent, entities=merged_entities)
+
+        return intent
 
     # ─────────────────────────────────────────────────────────────────────────
     # Input Node
@@ -194,7 +206,7 @@ class CoordinatorNodes:
                             "domains": pre_classified.domains,
                         },
                     )
-                return {"intent": pre_classified}
+                return {"intent": self._enrich_intent(pre_classified, state)}
 
             # 2. Check resource-cost mapping queries (e.g., "what's costing me the most")
             pre_classified = self._pre_classify_resource_cost_query(state.query)
@@ -216,7 +228,7 @@ class CoordinatorNodes:
                             "domains": pre_classified.domains,
                         },
                     )
-                return {"intent": pre_classified}
+                return {"intent": self._enrich_intent(pre_classified, state)}
 
             # 3. Check domain-specific cost queries
             pre_classified = self._pre_classify_cost_query(state.query)
@@ -238,7 +250,7 @@ class CoordinatorNodes:
                             "domains": pre_classified.domains,
                         },
                     )
-                return {"intent": pre_classified}
+                return {"intent": self._enrich_intent(pre_classified, state)}
 
             # 4. Check DB Management queries (fleet health, AWR, SQL performance)
             pre_classified = self._pre_classify_dbmgmt_query(state.query)
@@ -260,7 +272,7 @@ class CoordinatorNodes:
                             "domains": pre_classified.domains,
                         },
                     )
-                return {"intent": pre_classified}
+                return {"intent": self._enrich_intent(pre_classified, state)}
 
             # 5. Check OPSI queries (ADDM, capacity, insights)
             pre_classified = self._pre_classify_opsi_query(state.query)
@@ -282,7 +294,7 @@ class CoordinatorNodes:
                             "domains": pre_classified.domains,
                         },
                     )
-                return {"intent": pre_classified}
+                return {"intent": self._enrich_intent(pre_classified, state)}
 
             # 6. Check identity queries (compartments, tenancy, regions)
             pre_classified = self._pre_classify_identity_query(state.query)
@@ -304,7 +316,7 @@ class CoordinatorNodes:
                             "domains": pre_classified.domains,
                         },
                     )
-                return {"intent": pre_classified}
+                return {"intent": self._enrich_intent(pre_classified, state)}
 
             # No pre-classification match - use LLM
             if thinking_trace:
@@ -350,7 +362,7 @@ class CoordinatorNodes:
                         },
                     )
 
-                return {"intent": intent}
+                return {"intent": self._enrich_intent(intent, state)}
 
             except Exception as e:
                 span.set_attribute("error", True)
@@ -384,9 +396,8 @@ class CoordinatorNodes:
         Returns:
             Dict with 'start_date' and 'end_date' in YYYY-MM-DD format, or empty dict
         """
-        import re
-        from datetime import datetime
         from calendar import monthrange
+        from datetime import datetime
 
         query_lower = query.lower()
         today = datetime.now()
@@ -450,6 +461,58 @@ class CoordinatorNodes:
 
         return {}
 
+    def _extract_profiles(self, query: str) -> list[str]:
+        """
+        Extract OCI profile names from natural language queries.
+
+        Handles patterns like:
+        - "from emdemo" → ["EMDEMO"]
+        - "in Default profile" → ["DEFAULT"]
+        - "databases from emdemo and default" → ["EMDEMO", "DEFAULT"]
+        - "show dbs for EMDEMO tenancy" → ["EMDEMO"]
+
+        Returns:
+            List of profile names (uppercase) found in query, or empty list
+        """
+        import re
+
+        query_lower = query.lower()
+        profiles: list[str] = []
+
+        # Common OCI profile names - add more as needed
+        # These are case-insensitive patterns that might appear in queries
+        known_profiles = [
+            "emdemo", "default", "prod", "production", "dev", "development",
+            "test", "testing", "staging", "sandbox", "demo",
+        ]
+
+        # Pattern 1: "from <profile>" or "in <profile>"
+        # e.g., "from emdemo", "in default profile"
+        from_in_pattern = r"\b(?:from|in|for|using)\s+(\w+)(?:\s+(?:profile|tenancy))?\b"
+        matches = re.findall(from_in_pattern, query_lower)
+        for match in matches:
+            if match in known_profiles or match.upper() in ["EMDEMO", "DEFAULT"]:
+                profiles.append(match.upper())
+
+        # Pattern 2: "<profile> profile/tenancy"
+        # e.g., "emdemo profile", "default tenancy"
+        profile_suffix_pattern = r"\b(\w+)\s+(?:profile|tenancy)\b"
+        matches = re.findall(profile_suffix_pattern, query_lower)
+        for match in matches:
+            if match in known_profiles or match.upper() in ["EMDEMO", "DEFAULT"]:
+                if match.upper() not in profiles:
+                    profiles.append(match.upper())
+
+        # Pattern 3: Explicit profile names in query without indicators
+        # Check for standalone known profile names
+        for profile in ["emdemo", "default"]:
+            if profile in query_lower and profile.upper() not in profiles:
+                # Make sure it's a word boundary match
+                if re.search(rf"\b{profile}\b", query_lower):
+                    profiles.append(profile.upper())
+
+        return profiles
+
     def _pre_classify_cost_query(self, query: str) -> IntentClassification | None:
         """
         Pre-classify domain-specific cost queries using keyword matching.
@@ -474,6 +537,9 @@ class CoordinatorNodes:
 
         # Extract date range from query (e.g., "November", "last month")
         date_entities = self._extract_date_range(query)
+
+        # Extract OCI profiles from query (e.g., "EMDEMO costs", "costs from default")
+        profiles = self._extract_profiles(query)
 
         # Check if query requires LLM reasoning (temporal, analytical, etc.)
         needs_reasoning = has_complexity_indicators(query)
@@ -512,8 +578,12 @@ class CoordinatorNodes:
                 confidence = 0.70 if needs_reasoning else 0.95
                 category = IntentCategory.ANALYSIS if needs_reasoning else IntentCategory.QUERY
 
-                # Include extracted date entities
+                # Include extracted date entities and profiles
                 entities = dict(date_entities)  # Copy date entities if any
+                if profiles:
+                    entities["profiles"] = profiles
+                    if len(profiles) == 1:
+                        entities["oci_profile"] = profiles[0]
 
                 return IntentClassification(
                     intent=config["intent"],
@@ -528,29 +598,40 @@ class CoordinatorNodes:
         # General cost query (not domain-specific)
         # If it needs reasoning, route to agent; otherwise to workflow
         if needs_reasoning:
+            entities = dict(date_entities)
+            if profiles:
+                entities["profiles"] = profiles
+                if len(profiles) == 1:
+                    entities["oci_profile"] = profiles[0]
             return IntentClassification(
                 intent="cost_analysis",
                 category=IntentCategory.ANALYSIS,
                 confidence=0.70,  # Lower confidence triggers agent routing
                 domains=["cost"],
-                entities=dict(date_entities),
+                entities=entities,
                 suggested_workflow="cost_summary",
                 suggested_agent="finops-agent",
             )
 
         # Simple cost query with date range (e.g., "costs for November")
-        if date_entities:
+        if date_entities or profiles:
+            entities = dict(date_entities)
+            if profiles:
+                entities["profiles"] = profiles
+                if len(profiles) == 1:
+                    entities["oci_profile"] = profiles[0]
             self._logger.info(
-                "Pre-classified cost query with date range",
-                start_date=date_entities.get("start_date"),
-                end_date=date_entities.get("end_date"),
+                "Pre-classified cost query with date range or profiles",
+                start_date=entities.get("start_date"),
+                end_date=entities.get("end_date"),
+                profiles=profiles,
             )
             return IntentClassification(
                 intent="cost_summary",
                 category=IntentCategory.QUERY,
                 confidence=0.95,
                 domains=["cost"],
-                entities=date_entities,
+                entities=entities,
                 suggested_workflow="cost_summary",
                 suggested_agent=None,
             )
@@ -650,12 +731,26 @@ class CoordinatorNodes:
             if any(kw in query_lower for kw in perf_keywords):
                 return None  # Let LLM route to appropriate agent
 
+            # Extract profile names from query (e.g., "from emdemo", "in Default profile")
+            profiles = self._extract_profiles(query)
+            entities: dict[str, Any] = {}
+            if profiles:
+                # If single profile, set it directly for metadata propagation
+                # If multiple profiles, workflow will need to handle iteration
+                entities["profiles"] = profiles
+                if len(profiles) == 1:
+                    entities["oci_profile"] = profiles[0]
+                self._logger.debug(
+                    "Extracted profiles from database query",
+                    profiles=profiles,
+                )
+
             return IntentClassification(
                 intent="list_databases",
                 category=IntentCategory.QUERY,
                 confidence=0.95,
                 domains=["database"],
-                entities={},
+                entities=entities,
                 suggested_workflow="list_databases",
                 suggested_agent=None,  # Workflow handles this
             )
@@ -807,23 +902,23 @@ class CoordinatorNodes:
                 intent="awr_report",
                 category=IntentCategory.ANALYSIS,
                 confidence=0.95,
-                domains=["dbmgmt", "database"],
+                domains=["database"],  # Single domain to avoid parallel routing
                 entities={},
                 suggested_workflow="awr_report",
-                suggested_agent=None,
+                suggested_agent="db-troubleshoot-agent",  # Route to DB agent
             )
 
         # Top SQL / SQL performance patterns
-        sql_perf_keywords = ["top sql", "expensive queries", "sql cpu", "high cpu sql", "slow queries", "sql performance"]
+        sql_perf_keywords = ["top sql", "expensive queries", "sql cpu", "high cpu sql", "slow queries", "sql performance", "analyze slow", "analyze query", "query analysis"]
         if any(kw in query_lower for kw in sql_perf_keywords):
             return IntentClassification(
                 intent="top_sql",
                 category=IntentCategory.ANALYSIS,
                 confidence=0.95,
-                domains=["dbmgmt", "database"],
+                domains=["database"],  # Single domain to avoid parallel routing
                 entities={},
                 suggested_workflow="top_sql",
-                suggested_agent=None,
+                suggested_agent="db-troubleshoot-agent",  # Route to DB agent
             )
 
         # Wait events patterns
@@ -833,10 +928,10 @@ class CoordinatorNodes:
                 intent="wait_events",
                 category=IntentCategory.ANALYSIS,
                 confidence=0.95,
-                domains=["dbmgmt", "database"],
+                domains=["database"],  # Single domain to avoid parallel routing
                 entities={},
                 suggested_workflow="wait_events",
-                suggested_agent=None,
+                suggested_agent="db-troubleshoot-agent",  # Route to DB agent
             )
 
         # SQL Plan Baselines patterns
@@ -866,16 +961,16 @@ class CoordinatorNodes:
             )
 
         # DB performance overview (combined analysis)
-        perf_overview_keywords = ["database performance", "db performance", "comprehensive db", "full db analysis"]
+        perf_overview_keywords = ["database performance", "db performance", "comprehensive db", "full db analysis", "check database performance"]
         if any(kw in query_lower for kw in perf_overview_keywords):
             return IntentClassification(
                 intent="db_performance_overview",
                 category=IntentCategory.ANALYSIS,
                 confidence=0.95,
-                domains=["dbmgmt", "opsi", "database"],
+                domains=["database"],  # Single domain - workflow handles OPSI internally
                 entities={},
                 suggested_workflow="db_performance_overview",
-                suggested_agent=None,
+                suggested_agent="db-troubleshoot-agent",  # Route to DB agent
             )
 
         return None
@@ -1258,6 +1353,7 @@ Return only the JSON object, no other text."""
                     query=state.query,
                     intent=state.intent,
                     previous_results=state.tool_results,
+                    metadata=state.metadata,
                 )
 
             return {
@@ -1413,12 +1509,21 @@ Return only the JSON object, no other text."""
 
             try:
                 start_time = time.time()
-                result = await workflow(
-                    query=state.query,
-                    entities=state.intent.entities if state.intent else {},
-                    tool_catalog=self.tool_catalog,
-                    memory=self.memory,
-                )
+                workflow_kwargs = {
+                    "query": state.query,
+                    "entities": state.intent.entities if state.intent else {},
+                    "tool_catalog": self.tool_catalog,
+                    "memory": self.memory,
+                }
+                try:
+                    import inspect
+
+                    if "metadata" in inspect.signature(workflow).parameters:
+                        workflow_kwargs["metadata"] = state.metadata
+                except (TypeError, ValueError):
+                    pass
+
+                result = await workflow(**workflow_kwargs)
                 duration_ms = int((time.time() - start_time) * 1000)
 
                 span.set_attribute("workflow.duration_ms", duration_ms)
@@ -1724,7 +1829,7 @@ Return only the JSON object, no other text."""
                     "final_response": result,
                 }
 
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 duration_ms = int((time.time() - start_time) * 1000)
                 span.set_attribute("error", "timeout")
                 span.set_attribute("agent.duration_ms", duration_ms)
@@ -1755,10 +1860,16 @@ Return only the JSON object, no other text."""
                 # Provide agent-specific timeout guidance
                 agent_name = agent_role.replace("-agent", "").replace("-", " ").title()
                 timeout_guidance = {
-                    "finops": "Try asking about a shorter time period (e.g., 'last 7 days' instead of 'last month').",
-                    "db-troubleshoot": "Try asking about a specific database or a simpler query.",
-                    "log-analytics": "Try narrowing the time range or specifying a specific log source.",
-                    "infrastructure": "Try asking about specific resources instead of listing all.",
+                    "finops": "Try asking about a shorter time period (e.g., 'last 7 days' instead of 'last month'), or ask about a specific compartment.",
+                    "db-troubleshoot": (
+                        "OPSI APIs can be slow. Try:\n"
+                        "- Ask about fleet health instead (faster)\n"
+                        "- Specify a database name\n"
+                        "- Use 'show database insights' for quick status"
+                    ),
+                    "log-analytics": "Try narrowing the time range (e.g., 'last hour') or specifying a specific log source.",
+                    "infrastructure": "Try asking about specific resources instead of listing all compartments.",
+                    "security": "Try asking about a specific security service (Cloud Guard, VSS) instead of all.",
                 }
                 guidance = timeout_guidance.get(agent_role.replace("-agent", ""), "Try a more specific query.")
 

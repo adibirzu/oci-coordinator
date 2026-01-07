@@ -14,6 +14,7 @@ Enhanced Features:
 from __future__ import annotations
 
 import importlib
+import json
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -21,7 +22,6 @@ from typing import Any
 
 import httpx
 import structlog
-import json
 
 from src.agents.base import AgentDefinition, AgentStatus, BaseAgent
 
@@ -328,7 +328,7 @@ class AgentCatalog:
     _instance: AgentCatalog | None = None
 
     @classmethod
-    def get_instance(cls, tool_catalog: "ToolCatalog | None" = None) -> AgentCatalog:
+    def get_instance(cls, tool_catalog: ToolCatalog | None = None) -> AgentCatalog:
         """
         Get singleton instance of AgentCatalog.
 
@@ -346,7 +346,7 @@ class AgentCatalog:
         """Reset singleton instance (useful for testing)."""
         cls._instance = None
 
-    def __init__(self, tool_catalog: "ToolCatalog | None" = None) -> None:
+    def __init__(self, tool_catalog: ToolCatalog | None = None) -> None:
         """Initialize empty catalog."""
         self._agents: dict[str, AgentDefinition] = {}
         self._agent_classes: dict[str, type[BaseAgent]] = {}
@@ -355,11 +355,11 @@ class AgentCatalog:
         self._tool_catalog = tool_catalog
         self._logger = logger.bind(component="AgentCatalog")
 
-    def set_tool_catalog(self, tool_catalog: "ToolCatalog | None") -> None:
+    def set_tool_catalog(self, tool_catalog: ToolCatalog | None) -> None:
         """Attach a tool catalog for dynamic tool resolution."""
         self._tool_catalog = tool_catalog
 
-    def _resolve_tool_catalog(self) -> "ToolCatalog | None":
+    def _resolve_tool_catalog(self) -> ToolCatalog | None:
         if self._tool_catalog:
             return self._tool_catalog
         try:
@@ -1126,7 +1126,7 @@ class AgentCatalog:
             return {}
         return tool_catalog.get_domain_summary()
 
-    def sync_mcp_tools(self, tool_catalog: "ToolCatalog | None" = None) -> int:
+    def sync_mcp_tools(self, tool_catalog: ToolCatalog | None = None) -> int:
         """Refresh agent tool lists from the tool catalog."""
         tool_catalog = tool_catalog or self._resolve_tool_catalog()
         if not tool_catalog:
@@ -1237,7 +1237,7 @@ class AgentCatalog:
 
 def initialize_agents(
     agents_path: str = "src/agents",
-    tool_catalog: "ToolCatalog | None" = None,
+    tool_catalog: ToolCatalog | None = None,
 ) -> AgentCatalog:
     """
     Initialize agent catalog with auto-discovery.
