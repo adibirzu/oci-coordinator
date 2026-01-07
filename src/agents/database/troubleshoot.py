@@ -27,10 +27,10 @@ from src.agents.base import (
     BaseAgent,
     KafkaTopics,
 )
+from src.agents.self_healing import SelfHealingMixin
 from src.agents.skills import (
     StepResult,
 )
-from src.agents.self_healing import SelfHealingMixin
 from src.observability import get_trace_id
 
 if TYPE_CHECKING:
@@ -38,7 +38,6 @@ if TYPE_CHECKING:
     from src.memory.manager import SharedMemoryManager
 
 from src.skills.troubleshoot_database import DBTroubleshootSkill
-
 
 logger = structlog.get_logger(__name__)
 
@@ -328,10 +327,10 @@ class DbTroubleshootAgent(BaseAgent, SelfHealingMixin):
             ),
             health_endpoint="http://localhost:8010/health",
             metadata=AgentMetadata(
-                version="3.0.0",  # Updated for oci-unified integration
+                version="3.1.0",  # Updated for improved timeout handling
                 namespace="oci-coordinator",
                 max_iterations=15,
-                timeout_seconds=180,  # DB operations via MCP can be slow
+                timeout_seconds=300,  # Increased for slow OPSI APIs (240s tool timeout + buffer)
             ),
             description=(
                 "Database Expert Agent for Oracle performance analysis using "
@@ -396,7 +395,7 @@ class DbTroubleshootAgent(BaseAgent, SelfHealingMixin):
         # Add edges
         graph.add_edge("discover", "performance_overview")
         graph.add_edge("performance_overview", "analyze_metrics")
-        
+
         # Branching: If RCA requested, go to enhanced_rca
         graph.add_conditional_edges(
             "analyze_metrics",
@@ -406,7 +405,7 @@ class DbTroubleshootAgent(BaseAgent, SelfHealingMixin):
                 "advanced_rca": "enhanced_rca"
             }
         )
-        
+
         graph.add_edge("sql_analysis", "generate_recommendations")
         graph.add_edge("enhanced_rca", "output") # RCA generates its own report for now
         graph.add_edge("generate_recommendations", "output")
@@ -425,16 +424,16 @@ class DbTroubleshootAgent(BaseAgent, SelfHealingMixin):
         """Execute the Enhanced Database Troubleshooting Skill."""
         skill = DBTroubleshootSkill(self)
         workflow = skill.build_graph()
-        
+
         # Map agent state to skill state
         skill_input = {
             "query": state.query,
             "database_id": state.database_id,
             "compartment_id": state.compartment_id
         }
-        
-        result = await workflow.ainvoke(skill_input)
-        
+
+        result = await workflow.ainvoke(skill_input, {"recursion_limit": 50})
+
         # Map skill output back to agent result
         return {
             "result": DbAnalysisResult(
@@ -1051,8 +1050,9 @@ class DbTroubleshootAgent(BaseAgent, SelfHealingMixin):
 
         # Try OCIResourceCache as fallback
         try:
-            from src.cache.oci_resource_cache import OCIResourceCache
             import os
+
+            from src.cache.oci_resource_cache import OCIResourceCache
 
             redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
             cache = OCIResourceCache.get_instance(redis_url)
@@ -1297,8 +1297,6 @@ class DbTroubleshootAgent(BaseAgent, SelfHealingMixin):
         Returns:
             AwrReportData with HTML content or None if failed
         """
-        import base64
-        from datetime import datetime
 
         with self._tracer.start_as_current_span("get_awr_report") as span:
             span.set_attribute("awr.source_preference", source)

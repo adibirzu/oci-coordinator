@@ -446,6 +446,7 @@ class InfrastructureAgent(BaseAgent, SelfHealingMixin):
             Compartment OCID if found, None otherwise
         """
         import re
+
         from src.oci.tenancy_manager import TenancyManager
 
         query_lower = query.lower()

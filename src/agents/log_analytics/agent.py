@@ -70,8 +70,8 @@ class LogAnalyticsAgent(BaseAgent, SelfHealingMixin):
 
     def __init__(
         self,
-        memory_manager: "SharedMemoryManager | None" = None,
-        tool_catalog: "ToolCatalog | None" = None,
+        memory_manager: SharedMemoryManager | None = None,
+        tool_catalog: ToolCatalog | None = None,
         config: dict[str, Any] | None = None,
         llm: Any = None,
     ):

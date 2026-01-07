@@ -41,6 +41,7 @@ from src.agents.self_healing import SelfHealingMixin
 
 if TYPE_CHECKING:
     from langchain_core.language_models import BaseChatModel
+
     from src.mcp.catalog import ToolCatalog
     from src.memory.manager import SharedMemoryManager
 
@@ -172,10 +173,10 @@ class ErrorAnalysisAgent(BaseAgent, SelfHealingMixin):
 
     def __init__(
         self,
-        memory_manager: "SharedMemoryManager | None" = None,
-        tool_catalog: "ToolCatalog | None" = None,
+        memory_manager: SharedMemoryManager | None = None,
+        tool_catalog: ToolCatalog | None = None,
         config: dict[str, Any] | None = None,
-        llm: "BaseChatModel | None" = None,
+        llm: BaseChatModel | None = None,
         todo_manager: AdminTodoManager | None = None,
     ):
         """
@@ -524,7 +525,7 @@ Format each recommendation as a clear action item."""
         except Exception as e:
             logger.error("Error analysis failed", error=str(e))
             return {
-                "response": f"Error analysis failed: {str(e)}",
+                "response": f"Error analysis failed: {e!s}",
                 "success": False,
             }
 

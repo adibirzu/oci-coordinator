@@ -7,9 +7,9 @@ and compliance monitoring in OCI.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import json
 import os
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -73,8 +73,8 @@ class SecurityThreatAgent(BaseAgent, SelfHealingMixin):
 
     def __init__(
         self,
-        memory_manager: "SharedMemoryManager | None" = None,
-        tool_catalog: "ToolCatalog | None" = None,
+        memory_manager: SharedMemoryManager | None = None,
+        tool_catalog: ToolCatalog | None = None,
         config: dict[str, Any] | None = None,
         llm: Any = None,
     ):
