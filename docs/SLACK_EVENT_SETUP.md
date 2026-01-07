@@ -5,6 +5,19 @@
 The Slack bot is successfully connected via Socket Mode (PING/PONG heartbeats working),
 but **Event Subscriptions are not enabled**, causing the bot to not receive any user messages.
 
+## Known Good Configuration Snapshot
+
+Use this as a rollback reference if Slack replies stop working:
+
+- Status: Working as of 2026-01-06 (Socket Mode + events configured)
+- `SLACK_APP_TOKEN` (starts with `xapp-`)
+- `SLACK_BOT_TOKEN` (starts with `xoxb-`)
+- `SLACK_SIGNING_SECRET` (set)
+- `SLACK_REPLY_IN_THREAD` (`true` for threaded replies, `false` for top-level)
+- `USE_LANGGRAPH_COORDINATOR` (`true`)
+- `REDIS_URL` (optional, for profile/session persistence)
+- `LLM_PROVIDER_SLACK` / `OCA_MODEL_SLACK` (only if Slack-specific LLM overrides are enabled)
+
 ## Required Configuration
 
 ### 1. Go to Slack App Settings

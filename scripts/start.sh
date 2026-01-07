@@ -99,6 +99,17 @@ if [ "$ENABLE_CACHE" = true ]; then
     echo "ShowOCI cache enabled"
 fi
 
+# Determine Python executable - prefer venv, fallback to poetry
+PYTHON_CMD=""
+if [ -f "$PROJECT_DIR/.venv/bin/python" ]; then
+    PYTHON_CMD="$PROJECT_DIR/.venv/bin/python"
+elif command -v poetry &> /dev/null; then
+    PYTHON_CMD="poetry run python"
+else
+    echo "Error: Neither .venv/bin/python nor poetry found"
+    exit 1
+fi
+
 echo "Starting OCI AI Agent Coordinator..."
 echo "  Mode: $MODE"
 echo "  Port: $PORT (if API mode)"
@@ -108,10 +119,10 @@ echo "  Log: $LOG_FILE"
 if [ "$FOREGROUND" = true ]; then
     # Run in foreground
     echo "Running in foreground (Ctrl+C to stop)..."
-    poetry run python -m src.main --mode "$MODE" --port "$PORT"
+    $PYTHON_CMD -m src.main --mode "$MODE" --port "$PORT"
 else
     # Run in background
-    nohup poetry run python -m src.main --mode "$MODE" --port "$PORT" > "$LOG_FILE" 2>&1 &
+    nohup $PYTHON_CMD -m src.main --mode "$MODE" --port "$PORT" > "$LOG_FILE" 2>&1 &
     PID=$!
     echo "$PID" > "$PID_FILE"
 

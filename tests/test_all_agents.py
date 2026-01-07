@@ -11,8 +11,9 @@ Run with:
     poetry run pytest tests/test_all_agents.py -v
 """
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock
+
+import pytest
 
 from src.mcp.client import ToolCallResult, ToolDefinition
 
@@ -495,7 +496,7 @@ class TestAgentSkillExecution:
     ):
         """Test agent skill execution framework."""
         from src.agents.database.troubleshoot import DbTroubleshootAgent
-        from src.agents.skills import SkillRegistry, SkillStatus, StepResult
+        from src.agents.skills import SkillRegistry
 
         # Add mock tools that the RCA workflow needs
         def get_tool_expanded(name):

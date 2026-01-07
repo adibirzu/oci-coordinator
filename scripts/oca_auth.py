@@ -27,7 +27,6 @@ import json
 import os
 import secrets
 import sys
-import threading
 import urllib.parse
 import webbrowser
 from pathlib import Path
@@ -199,14 +198,14 @@ class CallbackHandler(http.server.BaseHTTPRequestHandler):
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html")
                 self.end_headers()
-                self.wfile.write("""
+                self.wfile.write(b"""
                     <html>
                     <body style="font-family: system-ui; text-align: center; padding: 50px;">
                         <h1 style="color: #27ae60;">Authentication Successful!</h1>
                         <p>You can close this window and return to your terminal.</p>
                     </body>
                     </html>
-                """.encode())
+                """)
             else:
                 CallbackHandler.error = "Token exchange failed"
                 self.send_response(400)
@@ -238,8 +237,8 @@ def run_auth_flow():
     server = http.server.HTTPServer((CALLBACK_HOST, CALLBACK_PORT), CallbackHandler)
     server.timeout = 300  # 5 minute timeout
 
-    print(f"\n[OCA Auth] Opening browser for authentication...")
-    print(f"[OCA Auth] If browser doesn't open, visit:")
+    print("\n[OCA Auth] Opening browser for authentication...")
+    print("[OCA Auth] If browser doesn't open, visit:")
     print(f"    {auth_url}\n")
 
     # Open browser
@@ -284,7 +283,7 @@ def check_token_status():
         expires_at = token.get("_expires_at", 0)
         refresh_expires_at = token.get("_refresh_expires_at", 0)
 
-        print(f"[OCA Auth] Token status:")
+        print("[OCA Auth] Token status:")
         print(f"  - Expires in: {max(0, expires_at - now):.0f} seconds")
         print(f"  - Refresh expires in: {max(0, refresh_expires_at - now):.0f} seconds")
         print(f"  - Valid: {now < expires_at - 180}")  # 3 min buffer

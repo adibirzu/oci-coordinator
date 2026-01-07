@@ -434,10 +434,10 @@ class MCPCacheIntegrationTests:
         try:
             # Import from mcp-oci's shared memory
             from mcp_server_oci.core.shared_memory import (
+                EventType,
                 InMemorySharedStore,
                 SharedContext,
                 SharedEvent,
-                EventType,
                 get_shared_store,
                 share_finding,
             )

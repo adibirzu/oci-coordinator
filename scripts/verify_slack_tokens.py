@@ -60,7 +60,7 @@ def check_bot_token() -> bool:
         data = response.json()
 
         if data.get("ok"):
-            print(f"  ✓ Token valid!")
+            print("  ✓ Token valid!")
             print(f"    Team: {data.get('team', 'unknown')}")
             print(f"    Bot: {data.get('user', 'unknown')}")
             print(f"    Bot ID: {data.get('user_id', 'unknown')}")

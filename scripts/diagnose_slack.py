@@ -18,6 +18,7 @@ sys.path.insert(0, str(project_root))
 
 # Load .env.local FIRST - before any imports that might read env vars
 from dotenv import load_dotenv
+
 env_file = project_root / ".env.local"
 if env_file.exists():
     load_dotenv(env_file, override=True)
@@ -211,8 +212,10 @@ def test_socket_mode_connection():
 
     async def test_connection():
         try:
+            from slack_bolt.adapter.socket_mode.async_handler import (
+                AsyncSocketModeHandler,
+            )
             from slack_bolt.async_app import AsyncApp
-            from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
             from slack_sdk.web.async_client import AsyncWebClient
 
             print("1️⃣  Creating AsyncApp...")
@@ -225,13 +228,13 @@ def test_socket_mode_connection():
             @app.event("app_mention")
             async def test_mention(event, say):
                 events_received.append(event)
-                print(f"   📨 Received app_mention event!")
+                print("   📨 Received app_mention event!")
 
             @app.event("message")
             async def test_message(event, say):
                 if not event.get("bot_id") and not event.get("subtype"):
                     events_received.append(event)
-                    print(f"   📨 Received message event!")
+                    print("   📨 Received message event!")
 
             print("2️⃣  Testing bot token with API...")
             client = AsyncWebClient(token=bot_token)
@@ -319,7 +322,7 @@ def test_full_slack_handler():
                 bot_token=bot_token,
                 app_token=app_token,
             )
-            print(f"   ✅ SlackHandler created")
+            print("   ✅ SlackHandler created")
             print(f"      bot_token: {handler.bot_token[:15]}...{handler.bot_token[-4:]}")
             print(f"      app_token: {handler.app_token[:15]}...{handler.app_token[-4:]}")
 

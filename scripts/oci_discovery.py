@@ -685,7 +685,7 @@ Examples:
     if args.status:
         status = await get_cache_status()
         print(f"\nCache Directory: {status['cache_dir']}")
-        print(f"\nCached Profiles:")
+        print("\nCached Profiles:")
         for profile, data in status["profiles"].items():
             if "error" in data:
                 print(f"  {profile}: ERROR - {data['error']}")
@@ -717,7 +717,7 @@ Examples:
         print("No OCI profiles found in ~/.oci/config")
         return
 
-    print(f"\nOCI Multi-Profile Discovery")
+    print("\nOCI Multi-Profile Discovery")
     print(f"Profiles to discover: {', '.join(profiles)}")
     print(f"Include databases: {not args.compartments_only}")
 
@@ -756,7 +756,7 @@ Examples:
         total_opsi += result.opsi_databases
         total_dbmgmt += result.dbmgmt_databases
 
-    print(f"\nTOTAL:")
+    print("\nTOTAL:")
     print(f"  Profiles: {len(results)}")
     print(f"  Compartments: {total_compartments}")
     print(f"  Databases: {total_databases}")

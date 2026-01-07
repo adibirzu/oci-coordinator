@@ -26,7 +26,6 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Any
 
 # Add project root to path
 project_root = Path(__file__).parent.parent
@@ -151,8 +150,7 @@ async def test_coordinator_init(verbose: bool = False) -> tuple[bool, dict]:
         from src.agents.coordinator.graph import LangGraphCoordinator
         from src.agents.coordinator.workflows import get_workflow_registry
         from src.llm import get_llm
-        from src.mcp.catalog import ToolCatalog
-        from src.mcp.config import load_mcp_config, initialize_mcp_from_config
+        from src.mcp.config import initialize_mcp_from_config, load_mcp_config
         from src.memory.manager import SharedMemoryManager
 
         print_step("Getting LLM client...")
@@ -306,7 +304,7 @@ async def test_workflow_execution(query: str, verbose: bool = False) -> tuple[bo
         from src.agents.coordinator.graph import LangGraphCoordinator
         from src.agents.coordinator.workflows import get_workflow_registry
         from src.llm import get_llm
-        from src.mcp.config import load_mcp_config, initialize_mcp_from_config
+        from src.mcp.config import initialize_mcp_from_config, load_mcp_config
         from src.memory.manager import SharedMemoryManager
 
         print_step(f'Executing query: "{query}"')
@@ -473,7 +471,7 @@ def print_summary(all_results: dict) -> None:
         print(f"   {Colors.YELLOW}⚠️  Make sure Slack App has event subscriptions enabled:{Colors.RESET}")
         print("      → app_mention, message.im, message.channels")
         print()
-        print(f"   Run the Slack bot: poetry run python -m src.main")
+        print("   Run the Slack bot: poetry run python -m src.main")
     else:
         print(f"   {Colors.RED}{Colors.BOLD}{failed}/{total} tests failed{Colors.RESET}")
         print()

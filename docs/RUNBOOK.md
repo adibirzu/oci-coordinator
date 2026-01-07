@@ -90,6 +90,26 @@ registry._failure_counts["database-observatory"] = 0
 registry._circuit_open_until["database-observatory"] = datetime.min
 ```
 
+### 1.4 FinOps Coordinator Registration
+
+**Symptoms:**
+- FinOps tools appear but coordinator shows "not registered"
+- `finops_register_with_coordinator` returns "skipped"
+
+**Required configuration:**
+```bash
+# Coordinator callback endpoint for FinOps MCP registration
+# Use your coordinator base URL or registration endpoint.
+export FINOPS_COORDINATOR_ENDPOINT=http://localhost:3001
+```
+
+**Recovery:**
+```bash
+# Trigger registration (from finopsai-mcp)
+poetry run python -c "import asyncio; from finopsai_mcp.coordinator import register_with_coordinator; print(asyncio.run(register_with_coordinator(force=True)))"
+```
+Note: The current FinOps registration stores metadata locally; a coordinator HTTP callback is a future integration.
+
 ---
 
 ## 2. LLM Provider Issues
