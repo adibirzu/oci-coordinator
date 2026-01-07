@@ -267,7 +267,7 @@ class Bulkhead:
                 state.semaphore.acquire(),
                 timeout=timeout,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             state.metrics.total_timeouts += 1
             self._logger.warning(
                 "Bulkhead acquisition timeout",
@@ -313,7 +313,7 @@ class Bulkhead:
         """
         try:
             return await self.acquire(partition, timeout)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             if isinstance(partition, str):
                 partition = BulkheadPartition(partition)
             state = self._partitions.get(partition, self._partitions[BulkheadPartition.DEFAULT])

@@ -25,7 +25,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from src.agents.catalog import AgentCatalog
+from src.agents.catalog import MCP_SERVER_DOMAINS, AgentCatalog
 from src.mcp.catalog import ToolCatalog
 from src.mcp.registry import ServerRegistry
 
@@ -117,7 +117,7 @@ class AppState:
                     from src.agents.coordinator.graph import create_coordinator
                     from src.llm import get_llm
 
-                    llm = get_llm()
+                    llm = get_llm(channel_type="api")
                     self._coordinator = await create_coordinator(llm=llm)
                     logger.info("Coordinator initialized for API")
         return self._coordinator
@@ -409,7 +409,6 @@ async def chat(request: ChatRequest):
     try:
         # Get or create coordinator
         from src.agents.coordinator.orchestrator import ParallelOrchestrator
-        from src.llm import get_llm
 
         # Initialize components
         tool_catalog = ToolCatalog.get_instance()
@@ -480,7 +479,7 @@ async def chat(request: ChatRequest):
         logger.error("Chat request failed", error=str(e), thread_id=thread_id)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to process request: {str(e)}",
+            detail=f"Failed to process request: {e!s}",
         )
 
 
@@ -509,7 +508,7 @@ async def chat_stream(request: ChatRequest):
 
         except Exception as e:
             logger.error("Streaming failed", error=str(e))
-            yield f"data: Error: {str(e)}\n\n"
+            yield f"data: Error: {e!s}\n\n"
 
     return StreamingResponse(
         generate(),
@@ -540,34 +539,35 @@ async def get_logs(limit: int = 50, live: bool = False) -> dict[str, Any]:
     # 1. Try OCI Logging if requested
     if live:
         try:
-            import oci
             from oci.loggingsearch import LogSearchClient
             from oci.loggingsearch.models import SearchLogsDetails
+
+            import oci
 
             # Config
             profile = os.getenv("OCI_PROFILE", "DEFAULT")
             config = oci.config.from_file(profile_name=profile)
             region = os.getenv("OCI_LOGGING_REGION") or config.get("region", "eu-frankfurt-1")
-            
+
             # Initialize Client
             search_client = LogSearchClient(config)
-            
+
             # Time range: Last 1 hour
             end_time = datetime.utcnow()
             start_time = end_time - timedelta(hours=1)
-            
+
             # Search Query
             query = 'search "oci-coordinator" | sort by datetime desc'
-            
+
             search_details = SearchLogsDetails(
                 time_start=start_time,
                 time_end=end_time,
                 search_query=query,
                 is_return_field_info=False
             )
-            
+
             response = search_client.search_logs(search_details)
-            
+
             if response.data and response.data.results:
                 oci_logs = []
                 for result in response.data.results[:limit]:
@@ -581,7 +581,7 @@ async def get_logs(limit: int = 50, live: bool = False) -> dict[str, Any]:
                         "raw": str(result.data)
                     })
                 return {"logs": oci_logs, "source": "oci_live"}
-                
+
         except ImportError:
              logger.warning("OCI SDK not available for live logs")
         except Exception as e:
@@ -593,15 +593,15 @@ async def get_logs(limit: int = 50, live: bool = False) -> dict[str, Any]:
         log_file = "logs/coordinator.log"
         if not os.path.exists(log_file):
             return {"logs": [], "error": "Log file not found"}
-            
+
         logs = []
         # inefficient but simple for now - read last N lines
         # simpler than backward reading for small N
-        with open(log_file, "r") as f:
+        with open(log_file) as f:
             lines = f.readlines()
             # Parse structlog JSON lines if possible, or return raw
             raw_lines = lines[-limit:]
-            
+
             import json
             for line in raw_lines:
                 try:
@@ -615,12 +615,12 @@ async def get_logs(limit: int = 50, live: bool = False) -> dict[str, Any]:
                     })
                 except json.JSONDecodeError:
                     logs.append({
-                        "timestamp": "", 
-                        "level": "INFO", 
+                        "timestamp": "",
+                        "level": "INFO",
                         "message": line.strip(),
                         "source": "system"
                     })
-                    
+
         return {"logs": logs, "source": "local_file"}
     except Exception as e:
         logger.error("Failed to fetch logs", error=str(e))
@@ -631,29 +631,30 @@ async def get_logs(limit: int = 50, live: bool = False) -> dict[str, Any]:
 async def get_apm_stats() -> dict[str, Any]:
     """Get APM statistics (trace count, error rate) for the last hour."""
     try:
-        import oci
         from oci.apm_traces import QueryClient
+
+        import oci
 
         # Config
         profile = os.getenv("OCI_PROFILE", "DEFAULT")
         config = oci.config.from_file(profile_name=profile)
-        
+
         domain_id = os.getenv("OCI_APM_DOMAIN_ID")
         if not domain_id:
              return {"status": "disabled", "error": "OCI_APM_DOMAIN_ID not set"}
 
         client = QueryClient(config)
-        
+
         # Simple query for stats
         # Note: APM TQL support depends on region/domain type
         # We'll try to get quick snapshot
         end_time = datetime.utcnow()
         start_time = end_time - timedelta(hours=1)
-        
+
         # Mocking real query for now as TQL syntax can be complex
         # Ideally: "SELECT count(*) FROM Traces WHERE StartTime > now() - 1h"
         # But for this MVP we might just return status "active" if client connects
-        
+
         return {
             "status": "active",
             "domain_id": domain_id,
@@ -891,6 +892,84 @@ async def reconnect_mcp_server(server_id: str) -> dict[str, Any]:
         raise
     except Exception as e:
         logger.error("MCP reconnect failed", server=server_id, error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e),
+        )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Architecture Endpoints
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+@app.get("/architecture", tags=["Architecture"])
+async def get_architecture() -> dict[str, Any]:
+    """
+    Get system architecture mapping for visualization.
+
+    Returns the dynamic relationships between agents, MCP servers, and domains.
+    This endpoint enables the frontend to visualize the architecture without
+    hardcoded mappings.
+
+    Returns:
+        - agents: List of agents with their domains
+        - mcp_servers: List of MCP servers with their domains and status
+        - agent_mcp_map: Computed mapping of which agents connect to which MCP servers
+        - domain_capabilities: Domain to capability mappings
+    """
+    try:
+        agent_catalog = AgentCatalog.get_instance()
+        registry = ServerRegistry.get_instance()
+
+        # Get all agents with their domains
+        agents_data = []
+        for agent_def in agent_catalog.list_all():
+            domains = agent_catalog.get_agent_domains(agent_def.role)
+            agents_data.append({
+                "role": agent_def.role,
+                "description": agent_def.description,
+                "capabilities": agent_def.capabilities,
+                "domains": domains,
+            })
+
+        # Get MCP servers with their domains and status
+        mcp_servers_data = {}
+        connected_servers = set()
+        for server_id in registry.list_servers():
+            info = registry.get_server_info(server_id)
+            server_status = registry.get_status(server_id)
+            mcp_servers_data[server_id] = {
+                "status": server_status,
+                "tool_count": info["tool_count"] if info else 0,
+                "domains": MCP_SERVER_DOMAINS.get(server_id, []),
+            }
+            if server_status == "connected":
+                connected_servers.add(server_id)
+
+        # Compute agent-to-MCP server mappings dynamically
+        # An agent connects to an MCP server if they share at least one domain
+        agent_mcp_map = {}
+        for agent in agents_data:
+            agent_domains = set(agent["domains"])
+            connected_mcps = []
+            for server_id, server_info in mcp_servers_data.items():
+                server_domains = set(server_info["domains"])
+                # Check if there's domain overlap
+                if agent_domains & server_domains:
+                    connected_mcps.append(server_id)
+            agent_mcp_map[agent["role"]] = connected_mcps
+
+        return {
+            "agents": agents_data,
+            "mcp_servers": mcp_servers_data,
+            "agent_mcp_map": agent_mcp_map,
+            "mcp_server_domains": MCP_SERVER_DOMAINS,
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+
+    except Exception as e:
+        logger.error("Architecture fetch failed", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=str(e),

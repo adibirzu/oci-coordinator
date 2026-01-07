@@ -44,12 +44,12 @@ from src.mcp.registry import (
 )
 from src.observability import init_observability, shutdown_observability
 from src.resilience import (
-    HealthMonitor,
-    HealthCheck,
-    HealthCheckResult,
-    HealthStatus,
     Bulkhead,
     DeadLetterQueue,
+    HealthCheck,
+    HealthCheckResult,
+    HealthMonitor,
+    HealthStatus,
 )
 
 # Global references for cleanup

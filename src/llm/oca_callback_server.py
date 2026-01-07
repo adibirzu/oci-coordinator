@@ -18,7 +18,7 @@ import os
 import socket
 import threading
 from collections.abc import Callable
-from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
@@ -368,7 +368,7 @@ class OCACallbackServer:
                 self._server.handle_request()
                 # Reset error counter on successful request handling
                 self._consecutive_errors = 0
-            except socket.timeout:
+            except TimeoutError:
                 # Socket timeout is expected, just continue
                 pass
             except OSError as e:

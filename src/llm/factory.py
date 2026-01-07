@@ -6,7 +6,7 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_openai import ChatOpenAI
 
 from src.llm.oca import ChatOCA, is_oca_authenticated
-from src.llm.rate_limiter import RateLimitedLLM, wrap_with_rate_limiter
+from src.llm.rate_limiter import wrap_with_rate_limiter
 
 
 class LLMFactory:
@@ -53,12 +53,14 @@ class LLMFactory:
                 api_key=config.get("api_key"),
                 model_name=config.get("model_name", "claude-3-sonnet-20240229"),
                 temperature=config.get("temperature", 0.7),
+                max_tokens=config.get("max_tokens", 4096),
             )
         elif provider == "openai":
             kwargs = {
                 "api_key": config.get("api_key"),
                 "model_name": config.get("model_name", "gpt-4-turbo-preview"),
                 "temperature": config.get("temperature", 0.7),
+                "max_tokens": config.get("max_tokens", 4096),
             }
             # Support custom base URL for LM Studio and other OpenAI-compatible APIs
             if config.get("base_url"):

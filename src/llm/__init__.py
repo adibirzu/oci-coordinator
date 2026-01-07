@@ -50,16 +50,30 @@ __all__ = [
 ]
 
 
-def get_llm_config() -> dict:
+def _env_with_channel(key: str, channel_type: str | None) -> str | None:
+    """Resolve channel-specific env var, falling back to the default key."""
+    if channel_type:
+        channel_key = f"{key}_{channel_type.upper()}"
+        value = os.getenv(channel_key)
+        if value is not None:
+            return value
+    return os.getenv(key)
+
+
+def get_llm_config(channel_type: str | None = None) -> dict:
     """Get LLM configuration from environment variables.
 
     Reads LLM_PROVIDER and related environment variables to build
     a configuration dictionary.
 
+    Args:
+        channel_type: Optional channel hint (e.g., "slack", "api") used to
+            resolve channel-specific overrides like LLM_PROVIDER_SLACK.
+
     Returns:
         Configuration dictionary for LLMFactory.create_llm()
     """
-    provider = os.getenv("LLM_PROVIDER", "anthropic").lower()
+    provider = (_env_with_channel("LLM_PROVIDER", channel_type) or "anthropic").lower()
 
     config = {"provider": provider}
 
@@ -67,39 +81,45 @@ def get_llm_config() -> dict:
         # Oracle Code Assist - uses shared token cache from ~/.oca/token.json
         # Authentication is handled externally via oca-langchain-client OAuth flow
         config["provider"] = "oca"
-        config["model_name"] = os.getenv("OCA_MODEL", "oca/gpt5")
-        config["temperature"] = float(os.getenv("LLM_TEMPERATURE", "0.7"))
+        config["model_name"] = _env_with_channel("OCA_MODEL", channel_type) or "oca/gpt5"
+        config["temperature"] = float(_env_with_channel("LLM_TEMPERATURE", channel_type) or "0.7")
+        config["max_tokens"] = int(_env_with_channel("LLM_MAX_TOKENS", channel_type) or "4096")
 
     elif provider == "anthropic":
-        config["api_key"] = os.getenv("ANTHROPIC_API_KEY")
-        config["model_name"] = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-20250514")
-        config["temperature"] = float(os.getenv("LLM_TEMPERATURE", "0.7"))
+        config["api_key"] = _env_with_channel("ANTHROPIC_API_KEY", channel_type)
+        config["model_name"] = _env_with_channel("ANTHROPIC_MODEL", channel_type) or "claude-sonnet-4-20250514"
+        config["temperature"] = float(_env_with_channel("LLM_TEMPERATURE", channel_type) or "0.7")
+        config["max_tokens"] = int(_env_with_channel("LLM_MAX_TOKENS", channel_type) or "4096")
 
     elif provider == "openai":
         config["api_key"] = os.getenv("OPENAI_API_KEY")
-        config["model_name"] = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-        config["temperature"] = float(os.getenv("LLM_TEMPERATURE", "0.7"))
-        if os.getenv("OPENAI_BASE_URL"):
-            config["base_url"] = os.getenv("OPENAI_BASE_URL")
+        config["model_name"] = _env_with_channel("OPENAI_MODEL", channel_type) or "gpt-4o-mini"
+        config["temperature"] = float(_env_with_channel("LLM_TEMPERATURE", channel_type) or "0.7")
+        config["max_tokens"] = int(_env_with_channel("LLM_MAX_TOKENS", channel_type) or "4096")
+        base_url = _env_with_channel("OPENAI_BASE_URL", channel_type)
+        if base_url:
+            config["base_url"] = base_url
 
     elif provider == "lm_studio":
         # LM Studio uses OpenAI-compatible API
         config["provider"] = "openai"
-        config["api_key"] = os.getenv("LLM_API_KEY", "lm-studio")
-        config["model_name"] = os.getenv("LLM_MODEL", "local-model")
-        config["base_url"] = os.getenv("LLM_BASE_URL", "http://localhost:1234/v1")
-        config["temperature"] = float(os.getenv("LLM_TEMPERATURE", "0.7"))
+        config["api_key"] = _env_with_channel("LLM_API_KEY", channel_type) or "lm-studio"
+        config["model_name"] = _env_with_channel("LLM_MODEL", channel_type) or "local-model"
+        config["base_url"] = _env_with_channel("LLM_BASE_URL", channel_type) or "http://localhost:1234/v1"
+        config["temperature"] = float(_env_with_channel("LLM_TEMPERATURE", channel_type) or "0.7")
+        config["max_tokens"] = int(_env_with_channel("LLM_MAX_TOKENS", channel_type) or "4096")
 
     else:
         # Default to Anthropic
         config["provider"] = "anthropic"
-        config["api_key"] = os.getenv("ANTHROPIC_API_KEY")
-        config["model_name"] = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-20250514")
+        config["api_key"] = _env_with_channel("ANTHROPIC_API_KEY", channel_type)
+        config["model_name"] = _env_with_channel("ANTHROPIC_MODEL", channel_type) or "claude-sonnet-4-20250514"
+        config["max_tokens"] = int(_env_with_channel("LLM_MAX_TOKENS", channel_type) or "4096")
 
     return config
 
 
-def get_llm() -> BaseChatModel:
+def get_llm(channel_type: str | None = None) -> BaseChatModel:
     """Get an LLM instance based on environment configuration.
 
     This is the primary entry point for getting an LLM in the application.
@@ -123,7 +143,7 @@ def get_llm() -> BaseChatModel:
         >>> llm = get_llm()
         >>> response = llm.invoke("Hello, how are you?")
     """
-    config = get_llm_config()
+    config = get_llm_config(channel_type)
 
     logger.info(
         "Creating LLM instance",

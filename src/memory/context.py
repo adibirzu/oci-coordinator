@@ -147,7 +147,7 @@ class ContextManager:
                 self.memory.get_conversation_history(thread_id),
                 timeout=timeout_s,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             self._logger.warning(
                 "Conversation history load timed out",
                 thread_id=thread_id,

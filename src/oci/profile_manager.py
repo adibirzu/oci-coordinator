@@ -67,7 +67,7 @@ class ProfileManager:
     - Profile-aware context for coordinator
     """
 
-    _instance: "ProfileManager | None" = None
+    _instance: ProfileManager | None = None
 
     def __init__(
         self,
@@ -83,7 +83,7 @@ class ProfileManager:
         self._logger = logger.bind(component="ProfileManager")
 
     @classmethod
-    def get_instance(cls) -> "ProfileManager":
+    def get_instance(cls) -> ProfileManager:
         """Get singleton instance."""
         if cls._instance is None:
             cls._instance = cls()
@@ -279,14 +279,25 @@ class ProfileManager:
         if not self._initialized:
             await self.initialize()
 
-        profile_name = await self.get_active_profile(user_id)
+        selected_profile = None
+        if self._redis:
+            try:
+                key = f"oci:profile:{user_id}"
+                cached = await self._redis.get(key)
+                if cached:
+                    selected_profile = cached.decode() if isinstance(cached, bytes) else cached
+            except Exception as e:
+                self._logger.warning("Redis get failed", error=str(e))
+
+        needs_selection = self.has_multiple_profiles() and not selected_profile
+        profile_name = selected_profile or await self.get_active_profile(user_id)
         profile = self._profiles.get(profile_name)
 
         if not profile:
             return {
                 "profile": "DEFAULT",
                 "region": "unknown",
-                "needs_selection": self.has_multiple_profiles(),
+                "needs_selection": needs_selection,
             }
 
         return {
@@ -294,7 +305,7 @@ class ProfileManager:
             "region": profile.region,
             "tenancy_ocid": profile.tenancy_ocid,
             "display_name": profile.display_name,
-            "needs_selection": False,
+            "needs_selection": needs_selection,
         }
 
     def build_profile_selection_blocks(
