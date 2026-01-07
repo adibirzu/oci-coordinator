@@ -982,12 +982,28 @@ class DbTroubleshootAgent(BaseAgent, SelfHealingMixin):
 
         query_lower = query.lower()
 
-        # Regex patterns for database name extraction
+        # Common words that are never database names
+        filtered_words = {
+            "the", "a", "my", "our", "this", "that", "all", "any",
+            "performance", "health", "status", "metrics", "issues",
+            "slow", "error", "problem", "check", "query", "queries",
+        }
+
+        # Regex patterns for database name extraction (order matters!)
+        # More specific patterns first, then fallback to generic ones
         db_patterns = [
+            # Pattern: "DBNAME database/db performance" - captures word before db/database
+            r"['\"]?([\w_-]+)['\"]?\s+(?:database|db)\s+(?:performance|health|status)",
+            # Pattern: "check/analyze DBNAME db" or "check DBNAME database"
+            r"(?:for|on|analyze|check|troubleshoot|investigate)\s+['\"]?([\w_-]+)['\"]?\s+(?:database|db)",
+            # Pattern: "performance/status/health of/for DBNAME"
+            r"(?:performance|status|health)\s+(?:of|for)\s+['\"]?([\w_-]+)['\"]?",
+            # Pattern: "DBNAME database" or "DBNAME db" (at end of phrase)
+            r"['\"]?([\w_-]+)['\"]?\s+(?:database|db)(?:\s|$|[,.])",
+            # Pattern: "database DBNAME" or "db DBNAME"
             r"(?:database|db)\s+['\"]?([\w_-]+)['\"]?",
-            r"(?:for|on|analyze|check|troubleshoot|investigate)\s+['\"]?([\w_-]+)['\"]?\s*(?:database|db)?",
-            r"['\"]?([\w_-]+)['\"]?\s+(?:database|db)",
-            r"performance\s+(?:of|for)\s+['\"]?([\w_-]+)['\"]?",
+            # Fallback: "check/analyze DBNAME" without explicit db keyword
+            r"(?:for|on|analyze|check|troubleshoot|investigate)\s+['\"]?([\w_-]+)['\"]?",
         ]
 
         for pattern in db_patterns:
@@ -995,7 +1011,7 @@ class DbTroubleshootAgent(BaseAgent, SelfHealingMixin):
             if match:
                 name = match.group(1)
                 # Filter out common words that aren't database names
-                if name not in {"the", "a", "my", "our", "this", "that", "all", "any"}:
+                if name not in filtered_words:
                     return name
 
         return None
