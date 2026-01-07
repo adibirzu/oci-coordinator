@@ -2,7 +2,6 @@ import logging
 import os
 from datetime import datetime
 
-import structlog
 from fastmcp import FastMCP
 from opentelemetry import trace
 from opentelemetry.sdk.resources import Resource

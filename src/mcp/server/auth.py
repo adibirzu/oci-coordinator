@@ -1,7 +1,33 @@
+import configparser
 import os
-from functools import lru_cache
 
 import oci
+
+
+def _find_profile_case_insensitive(config_file: str, profile: str) -> str | None:
+    """Find a profile name in OCI config file with case-insensitive matching.
+
+    Args:
+        config_file: Path to OCI config file
+        profile: Profile name to find (case-insensitive)
+
+    Returns:
+        The actual profile name from config file, or None if not found
+    """
+    expanded_path = os.path.expanduser(config_file)
+    if not os.path.exists(expanded_path):
+        return None
+
+    try:
+        parser = configparser.ConfigParser()
+        parser.read(expanded_path)
+        profile_lower = profile.lower()
+        for section in parser.sections():
+            if section.lower() == profile_lower:
+                return section
+    except Exception:
+        pass
+    return None
 
 
 def get_oci_config(profile: str | None = None) -> dict:
@@ -9,6 +35,7 @@ def get_oci_config(profile: str | None = None) -> dict:
 
     Args:
         profile: OCI config profile name. Defaults to OCI_CLI_PROFILE env var.
+                 Profile lookup is case-insensitive.
 
     Returns:
         OCI configuration dictionary
@@ -18,6 +45,17 @@ def get_oci_config(profile: str | None = None) -> dict:
 
     try:
         return oci.config.from_file(file_location=config_file, profile_name=profile)
+    except oci.exceptions.ProfileNotFound:
+        # Try case-insensitive lookup
+        actual_profile = _find_profile_case_insensitive(config_file, profile)
+        if actual_profile:
+            try:
+                return oci.config.from_file(
+                    file_location=config_file, profile_name=actual_profile
+                )
+            except Exception:
+                return {}
+        return {}
     except Exception:
         # Fallback to instance principals or other methods if needed
         return {}
@@ -52,9 +90,9 @@ def get_network_client():
     config = get_oci_config()
     return oci.core.VirtualNetworkClient(config)
 
-def get_usage_client():
+def get_usage_client(profile: str | None = None):
     """Get OCI Usage client."""
-    config = get_oci_config()
+    config = get_oci_config(profile)
     return oci.usage_api.UsageapiClient(config)
 
 def get_identity_client():
@@ -97,7 +135,9 @@ def get_database_management_client(
     Returns:
         DbManagementClient for managed database operations
     """
-    cache_key = f"dbmgmt:{profile or 'default'}:{region or 'default'}"
+    # Normalize profile to lowercase for consistent cache keys
+    profile_key = (profile or "default").lower()
+    cache_key = f"dbmgmt:{profile_key}:{region or 'default'}"
     if cache_key in _client_cache:
         return _client_cache[cache_key]
 
@@ -120,7 +160,9 @@ def get_opsi_client(
     Returns:
         OperationsInsightsClient for OPSI operations
     """
-    cache_key = f"opsi:{profile or 'default'}:{region or 'default'}"
+    # Normalize profile to lowercase for consistent cache keys
+    profile_key = (profile or "default").lower()
+    cache_key = f"opsi:{profile_key}:{region or 'default'}"
     if cache_key in _client_cache:
         return _client_cache[cache_key]
 
@@ -143,7 +185,9 @@ def get_log_analytics_client(
     Returns:
         LogAnalyticsClient for log analytics operations
     """
-    cache_key = f"logan:{profile or 'default'}:{region or 'default'}"
+    # Normalize profile to lowercase for consistent cache keys
+    profile_key = (profile or "default").lower()
+    cache_key = f"logan:{profile_key}:{region or 'default'}"
     if cache_key in _client_cache:
         return _client_cache[cache_key]
 
@@ -166,7 +210,9 @@ def get_diagnosability_client(
     Returns:
         DiagnosabilityClient for AWR/ADDM operations
     """
-    cache_key = f"diag:{profile or 'default'}:{region or 'default'}"
+    # Normalize profile to lowercase for consistent cache keys
+    profile_key = (profile or "default").lower()
+    cache_key = f"diag:{profile_key}:{region or 'default'}"
     if cache_key in _client_cache:
         return _client_cache[cache_key]
 

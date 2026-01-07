@@ -23,10 +23,11 @@ import json
 import os
 import time
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import structlog
 import yaml
@@ -34,11 +35,12 @@ from langchain_core.tools import StructuredTool
 
 from src.mcp.client import ToolCallResult, ToolDefinition
 from src.mcp.registry import ServerRegistry
+from src.resilience.deadletter import FailureType
 
 if TYPE_CHECKING:
     from src.memory.manager import SharedMemoryManager
-    from src.resilience.deadletter import DeadLetterQueue
     from src.resilience.bulkhead import Bulkhead
+    from src.resilience.deadletter import DeadLetterQueue
 
 logger = structlog.get_logger(__name__)
 
@@ -193,8 +195,6 @@ TOOL_TIERS: dict[str, ToolTier] = {
     # Tier 2: Cost reads
     "oci_cost_get_summary": ToolTier(2, 800, "none"),
     "oci_cost_by_service": ToolTier(2, 800, "none"),
-    "oci_cost_by_compartment": ToolTier(2, 800, "none"),
-    "oci_cost_monthly_trend": ToolTier(2, 800, "none"),
     # Tier 2: Observability reads
     "oci_observability_list_alarms": ToolTier(2, 500, "none"),
     "oci_observability_get_alarm_history": ToolTier(2, 600, "none"),
@@ -354,7 +354,10 @@ def _load_json_file(path: Path) -> dict[str, Any] | None:
     if not path.exists():
         return None
     try:
-        return json.loads(path.read_text())
+        data = json.loads(path.read_text())
+        if isinstance(data, dict):
+            return cast("dict[str, Any]", data)
+        return None
     except Exception as exc:
         logger.warning("Failed to load JSON config", path=str(path), error=str(exc))
         return None
@@ -454,16 +457,16 @@ class ToolCatalog:
     def __init__(
         self,
         registry: ServerRegistry | None = None,
-        deadletter_queue: "DeadLetterQueue | None" = None,
-        bulkhead: "Bulkhead | None" = None,
-        memory_manager: "SharedMemoryManager | None" = None,
+        deadletter_queue: DeadLetterQueue | None = None,
+        bulkhead: Bulkhead | None = None,
+        memory_manager: SharedMemoryManager | None = None,
     ):
         self._registry = registry or ServerRegistry.get_instance()
         self._tools: dict[str, ToolDefinition] = {}
         self._tool_to_server: dict[str, str] = {}
         self._custom_tools: dict[str, ToolDefinition] = {}  # Dynamically registered
-        self._tool_callbacks: dict[str, list[Callable]] = {}  # Event callbacks
-        self._tool_usage_stats: dict[str, dict] = {}  # Usage tracking
+        self._tool_callbacks: dict[str, list[Callable[..., Any]]] = {}  # Event callbacks
+        self._tool_usage_stats: dict[str, dict[str, Any]] = {}  # Usage tracking
         self._tool_metadata: dict[str, ToolMetadata] = {}  # Manifest metadata
         self._refresh_lock = asyncio.Lock() if hasattr(asyncio, 'Lock') else None
         self._last_refresh: datetime | None = None
@@ -480,7 +483,7 @@ class ToolCatalog:
     def get_instance(
         cls,
         registry: ServerRegistry | None = None,
-        memory_manager: "SharedMemoryManager | None" = None,
+        memory_manager: SharedMemoryManager | None = None,
     ) -> ToolCatalog:
         """Get singleton instance."""
         if cls._instance is None:
@@ -494,7 +497,7 @@ class ToolCatalog:
         """Reset singleton (for testing)."""
         cls._instance = None
 
-    def set_memory_manager(self, memory_manager: "SharedMemoryManager | None") -> None:
+    def set_memory_manager(self, memory_manager: SharedMemoryManager | None) -> None:
         """Attach a shared memory manager for tool result caching."""
         self._memory_manager = memory_manager
         if memory_manager:
@@ -653,7 +656,7 @@ class ToolCatalog:
         name: str,
         description: str,
         input_schema: dict[str, Any],
-        handler: Callable,
+        handler: Callable[..., Any],
         server_id: str = "custom",
         tier: int = 2,
         risk_level: str = "low",
@@ -695,7 +698,7 @@ class ToolCatalog:
         )
 
         # Store handler reference
-        tool_def._handler = handler
+        tool_def._handler = handler  # type: ignore[attr-defined]
 
         # Add to custom tools and main catalog
         self._custom_tools[name] = tool_def
@@ -775,7 +778,7 @@ class ToolCatalog:
     # Event System
     # ─────────────────────────────────────────────────────────────────────────
 
-    def on_event(self, event: str, callback: Callable) -> None:
+    def on_event(self, event: str, callback: Callable[..., Any]) -> None:
         """
         Register a callback for catalog events.
 
@@ -993,6 +996,24 @@ class ToolCatalog:
             )
 
         return tool_def.name.startswith(f"oci_{domain_lower}_")
+
+    def _schema_supports_param(self, schema: dict[str, Any] | None, param: str) -> bool:
+        """Return True if JSON schema defines the given parameter."""
+        if not isinstance(schema, dict):
+            return False
+
+        props = schema.get("properties")
+        if isinstance(props, dict) and param in props:
+            return True
+
+        for key in ("anyOf", "oneOf", "allOf"):
+            variants = schema.get(key)
+            if isinstance(variants, list):
+                for variant in variants:
+                    if self._schema_supports_param(variant, param):
+                        return True
+
+        return False
 
     def _resolve_metadata_for_tool(
         self,
@@ -1340,12 +1361,11 @@ class ToolCatalog:
         # Acquire bulkhead slot for resource isolation
         # Timeout reduced from 30s to 10s - fail fast, don't cascade delays
         bulkhead_handle = None
-        bulkhead_skipped = False
         if self._bulkhead:
             partition = self._bulkhead.get_partition_for_tool(tool_name)
             try:
                 bulkhead_handle = await self._bulkhead.acquire(partition, timeout=10.0)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 # Check if this is a read-only operation (list, get, search, etc.)
                 # Read-only ops can proceed without isolation as a graceful degradation
                 read_only_prefixes = ("list_", "get_", "search_", "analyze_", "describe_")
@@ -1360,7 +1380,6 @@ class ToolCatalog:
                         tool=tool_name,
                         partition=partition.value,
                     )
-                    bulkhead_skipped = True
                 else:
                     self._logger.warning(
                         "Bulkhead timeout",
@@ -1405,7 +1424,7 @@ class ToolCatalog:
         # Check if this is a custom tool with a handler
         if tool_name in self._custom_tools and hasattr(tool_def, "_handler"):
             try:
-                handler = tool_def._handler
+                handler = tool_def._handler  # type: ignore[attr-defined]
                 if asyncio.iscoroutinefunction(handler):
                     result_data = await handler(arguments)
                 else:
@@ -1454,6 +1473,77 @@ class ToolCatalog:
                 success=False,
                 error=f"Server not connected: {tool_def.server_id}",
             )
+
+        # Auto-enrich arguments for FinOps tools (tenancy_ocid from session/profile)
+        try:
+            needs_tenancy = (
+                "tenancy_ocid" not in (arguments or {})
+                and self._schema_supports_param(tool_def.input_schema, "tenancy_ocid")
+            )
+            is_finops_tool = (
+                tool_def.server_id == "finopsai"
+                or tool_name.startswith("oci_cost_")
+                or (self.get_tool_domain(tool_name) in ("finops", "cost"))
+            )
+            if needs_tenancy and is_finops_tool:
+                finops_client = self._registry.get_client("finopsai")
+                if finops_client:
+                    # Try session context first
+                    tenancy = None
+                    try:
+                        ctx_res = await finops_client.call_tool(
+                            "finops_session_context",
+                            {"action": "get", "key": "tenancy_ocid"},
+                        )
+                        if getattr(ctx_res, "success", False):
+                            ctx_payload = ctx_res.result
+                            if isinstance(ctx_payload, dict):
+                                tenancy = ctx_payload.get("value") or ctx_payload.get("tenancy_ocid")
+                            else:
+                                try:
+                                    parsed = json.loads(ctx_payload)
+                                    tenancy = parsed.get("value") or parsed.get("tenancy_ocid")
+                                except Exception:
+                                    tenancy = None
+                    except Exception:
+                        tenancy = None
+
+                    # If not in session, resolve from profile via get_tenancy_info
+                    if not tenancy:
+                        try:
+                            info_res = await finops_client.call_tool(
+                                "get_tenancy_info",
+                                {"response_format": "json"},
+                            )
+                            if getattr(info_res, "success", False):
+                                info_payload = info_res.result
+                                if isinstance(info_payload, dict):
+                                    data = info_payload.get("data") or info_payload
+                                    if isinstance(data, dict):
+                                        tenancy = data.get("tenancy_ocid")
+                                else:
+                                    try:
+                                        parsed = json.loads(info_payload)
+                                        data = parsed.get("data") or parsed
+                                        if isinstance(data, dict):
+                                            tenancy = data.get("tenancy_ocid")
+                                    except Exception:
+                                        tenancy = None
+                        except Exception:
+                            tenancy = None
+
+                    # Persist to session for subsequent calls
+                    if tenancy:
+                        with suppress(Exception):
+                            await finops_client.call_tool(
+                                "finops_session_context",
+                                {"action": "set", "key": "tenancy_ocid", "value": tenancy},
+                            )
+                        if arguments is None:
+                            arguments = {}
+                        arguments["tenancy_ocid"] = tenancy
+        except Exception as exc:
+            self._logger.debug("FinOps arg enrichment skipped", error=str(exc))
 
         # Execute the tool via MCP
         result = await client.call_tool(tool_name, arguments)
@@ -1518,7 +1608,6 @@ class ToolCatalog:
             # Enqueue failed operations for analysis and retry
             if self._deadletter_queue:
                 try:
-                    from src.resilience.deadletter import FailureType
                     await self._deadletter_queue.enqueue(
                         failure_type=FailureType.TOOL_CALL,
                         operation=tool_name,
@@ -1588,7 +1677,6 @@ class ToolCatalog:
                 return f"Error: {result.error}"
 
             # Build input schema from tool definition
-            schema = tool_def.input_schema.get("properties", {})
 
             structured_tool = StructuredTool.from_function(
                 func=tool_func,

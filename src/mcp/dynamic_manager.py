@@ -15,20 +15,21 @@ Features:
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import Enum
-from typing import Any, Callable
+from typing import Any
 
 import structlog
 
 from src.agents.catalog import AgentCatalog
 from src.mcp.catalog import ToolCatalog
 from src.mcp.registry import (
-    ServerRegistry,
     EVENT_SERVER_CONNECTED,
     EVENT_SERVER_DISCONNECTED,
     EVENT_TOOLS_UPDATED,
+    ServerRegistry,
 )
 
 logger = structlog.get_logger(__name__)

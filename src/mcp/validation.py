@@ -13,7 +13,6 @@ Features:
 
 from __future__ import annotations
 
-import asyncio
 import json
 import re
 from dataclasses import dataclass, field
@@ -174,8 +173,8 @@ class ToolCatalogValidator:
 
     def __init__(
         self,
-        catalog: "ToolCatalog",
-        registry: "ServerRegistry | None" = None,
+        catalog: ToolCatalog,
+        registry: ServerRegistry | None = None,
     ):
         """Initialize validator.
 
@@ -340,8 +339,8 @@ class ToolCatalogValidator:
 
 
 async def validate_tool_catalog(
-    catalog: "ToolCatalog",
-    registry: "ServerRegistry | None" = None,
+    catalog: ToolCatalog,
+    registry: ServerRegistry | None = None,
     include_health_check: bool = False,
 ) -> ValidationResult:
     """
@@ -360,7 +359,7 @@ async def validate_tool_catalog(
 
 
 async def validate_server_manifests(
-    registry: "ServerRegistry",
+    registry: ServerRegistry,
     required_fields: list[str] | None = None,
 ) -> dict[str, Any]:
     """
@@ -430,7 +429,7 @@ async def validate_server_manifests(
 
 
 async def verify_startup_health(
-    catalog: "ToolCatalog",
+    catalog: ToolCatalog,
     test_categories: list[str] | None = None,
 ) -> dict[str, Any]:
     """
@@ -465,7 +464,7 @@ async def verify_startup_health(
         if not matching_tools:
             results[category] = {
                 "status": "skipped",
-                "message": f"No list tool found for category",
+                "message": "No list tool found for category",
             }
             continue
 

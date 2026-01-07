@@ -1,10 +1,10 @@
 import asyncio
 import json
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
-import oci
 from opentelemetry import trace
 
+import oci
 from src.mcp.server.auth import get_oci_config, get_usage_client
 
 # Get tracer for cost tools
@@ -21,6 +21,7 @@ async def _get_cost_summary_logic(
     service_filter: str | None = None,
     start_date: str | None = None,
     end_date: str | None = None,
+    profile: str | None = None,
 ) -> str:
     """Internal logic for cost summary.
 
@@ -35,7 +36,7 @@ async def _get_cost_summary_logic(
     """
     with _tracer.start_as_current_span("mcp.cost.get_summary") as span:
         # Get tenancy ID from config if not provided
-        config = get_oci_config()
+        config = get_oci_config(profile)
         tenant_id = compartment_id or config.get("tenancy")
 
         if not tenant_id:
@@ -47,31 +48,81 @@ async def _get_cost_summary_logic(
         span.set_attribute("compartment_id", tenant_id)
         span.set_attribute("days", days)
 
-        client = get_usage_client()
+        client = get_usage_client(profile)
 
         try:
-            # OCI Usage API requires dates with hours/minutes/seconds set to 0
+            # OCI Usage API requires dates with hours/minutes/seconds set to 0 in UTC timezone
             # If explicit dates provided, use them; otherwise calculate from days
             if start_date and end_date:
                 try:
-                    start_time = datetime.strptime(start_date, "%Y-%m-%d").replace(
-                        hour=0, minute=0, second=0, microsecond=0
-                    )
-                    end_time = datetime.strptime(end_date, "%Y-%m-%d").replace(
-                        hour=23, minute=59, second=59, microsecond=0
+                    # Handle both YYYY-MM-DD and ISO datetime formats (YYYY-MM-DDTHH:MM:SSZ)
+                    def parse_date(date_str: str) -> datetime:
+                        """Parse date string in either YYYY-MM-DD or ISO format, returning UTC datetime at midnight."""
+                        # Try ISO format first (with time)
+                        if 'T' in date_str or 'Z' in date_str:
+                            # Remove Z and parse ISO format
+                            date_str_clean = date_str.replace('Z', '+00:00')
+                            dt = datetime.fromisoformat(date_str_clean)
+                            # Convert to UTC if timezone-aware, otherwise assume UTC
+                            if dt.tzinfo is not None:
+                                dt = dt.astimezone(UTC)
+                            else:
+                                dt = dt.replace(tzinfo=UTC)
+                            # Set to midnight UTC with all fractions zero
+                            return dt.replace(hour=0, minute=0, second=0, microsecond=0)
+                        else:
+                            # Simple YYYY-MM-DD format - create as UTC midnight
+                            dt = datetime.strptime(date_str, "%Y-%m-%d")
+                            return dt.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=UTC)
+
+                    start_time = parse_date(start_date)
+                    end_time = parse_date(end_date)
+                    # For end_date, we want the start of the next day (exclusive end)
+                    # OCI Usage API expects exclusive end, so add 1 day and set to midnight
+                    # Ensure timezone is preserved when adding days
+                    end_time = (end_time + timedelta(days=1)).replace(
+                        hour=0, minute=0, second=0, microsecond=0, tzinfo=UTC
                     )
                     # Recalculate days for display
-                    days = (end_time - start_time).days + 1
+                    days = (end_time - start_time).days
                     span.set_attribute("start_date", start_date)
                     span.set_attribute("end_date", end_date)
-                except ValueError as e:
+                except (ValueError, AttributeError) as e:
                     return json.dumps({
                         "type": "cost_summary",
-                        "error": f"Invalid date format. Use YYYY-MM-DD. Error: {e}"
+                        "error": f"Invalid date format. Use YYYY-MM-DD or ISO format (YYYY-MM-DDTHH:MM:SSZ). Error: {e}"
                     })
             else:
-                end_time = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+                # Use UTC timezone-aware datetime
+                end_time = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
                 start_time = (end_time - timedelta(days=days)).replace(hour=0, minute=0, second=0, microsecond=0)
+
+            # Clamp end_time to today if caller requested a future end date.
+            # OCI Usage API does not return future usage; clamp to prevent empty results.
+            now_utc = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+            if end_time > now_utc:
+                end_time = now_utc
+                days = max((end_time - start_time).days, 0)
+
+            if end_time <= start_time:
+                return json.dumps({
+                    "type": "cost_summary",
+                    "error": "Requested time range has no completed usage yet. Try an earlier end date.",
+                })
+
+            # Ensure datetimes are properly formatted for OCI API
+            # OCI requires: UTC timezone, hours/minutes/seconds/microseconds = 0
+            if start_time.tzinfo is None:
+                start_time = start_time.replace(tzinfo=UTC)
+            else:
+                start_time = start_time.astimezone(UTC)
+            start_time = start_time.replace(hour=0, minute=0, second=0, microsecond=0)
+
+            if end_time.tzinfo is None:
+                end_time = end_time.replace(tzinfo=UTC)
+            else:
+                end_time = end_time.astimezone(UTC)
+            end_time = end_time.replace(hour=0, minute=0, second=0, microsecond=0)
 
             request = oci.usage_api.models.RequestSummarizedUsagesDetails(
                 tenant_id=tenant_id,
@@ -92,7 +143,7 @@ async def _get_cost_summary_logic(
                     asyncio.get_event_loop().run_in_executor(None, _call_usage_api),
                     timeout=COST_API_TIMEOUT
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 span.set_attribute("error", "timeout")
                 return json.dumps({
                     "type": "cost_summary",
@@ -197,6 +248,8 @@ def register_cost_tools(mcp):
         service_filter: str | None = None,
         start_date: str | None = None,
         end_date: str | None = None,
+        profile: str | None = None,
+        format: str | None = None,  # Accepted for compatibility, but always returns JSON
     ) -> str:
         """Get summarized cost for a compartment or the entire tenancy.
 
@@ -206,11 +259,13 @@ def register_cost_tools(mcp):
             service_filter: Filter by service type (e.g., "database", "compute", "storage", "network")
             start_date: Start date in YYYY-MM-DD format (for historical queries like "November")
             end_date: End date in YYYY-MM-DD format (for historical queries like "November")
+            profile: OCI config profile name (defaults to OCI_CLI_PROFILE)
+            format: Output format (accepted for compatibility, but always returns JSON)
 
         Returns:
             JSON with cost summary including total spend and per-service breakdown.
             Note: This API has a 60s timeout. For slow responses, check the OCI console directly.
         """
         return await _get_cost_summary_logic(
-            compartment_id, days, service_filter, start_date, end_date
+            compartment_id, days, service_filter, start_date, end_date, profile
         )

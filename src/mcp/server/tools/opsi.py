@@ -14,7 +14,31 @@ from typing import Any
 
 from fastmcp import FastMCP
 
-from src.mcp.server.auth import get_opsi_client, get_oci_config_with_region
+from src.mcp.server.auth import get_opsi_client
+
+
+def _compute_insights_summary(insights: list[dict]) -> dict:
+    """Pre-compute summary statistics for database insights (BlinkOps pattern: result distillation)."""
+    if not insights:
+        return {"summary": "No database insights found.", "health_status": "unknown"}
+
+    enabled = sum(1 for i in insights if i.get("status") == "ENABLED")
+    disabled = sum(1 for i in insights if i.get("status") == "DISABLED")
+    by_type = {}
+    for i in insights:
+        db_type = i.get("database_type", "unknown")
+        by_type[db_type] = by_type.get(db_type, 0) + 1
+
+    health = "healthy" if enabled > 0 and disabled == 0 else "degraded" if disabled > 0 else "unknown"
+
+    return {
+        "summary": f"{len(insights)} databases monitored: {enabled} enabled, {disabled} disabled",
+        "health_status": health,
+        "enabled_count": enabled,
+        "disabled_count": disabled,
+        "by_type": by_type,
+        "next_action": "Check disabled databases" if disabled > 0 else "All databases healthy",
+    }
 
 
 async def _list_database_insights_logic(
@@ -22,7 +46,7 @@ async def _list_database_insights_logic(
     include_subtree: bool = True,
     database_type: str | None = None,
     status: str | None = None,
-    limit: int = 50,
+    limit: int = 20,  # Reduced from 50 to minimize context usage
     profile: str | None = None,
     region: str | None = None,
 ) -> str:
@@ -61,8 +85,12 @@ async def _list_database_insights_logic(
                     "compartment_id": getattr(item, "compartment_id", None),
                 })
 
+        # Pre-computed summary (BlinkOps pattern: result distillation)
+        distilled = _compute_insights_summary(insights)
+
         return json.dumps({
             "type": "database_insights",
+            "distilled_summary": distilled,  # LLM reads this first
             "compartment_id": compartment,
             "include_subtree": include_subtree,
             "insight_count": len(insights),
@@ -223,13 +251,66 @@ async def _summarize_sql_insights_logic(
         return json.dumps({"error": str(e)})
 
 
+def _compute_sql_statistics_summary(items: list[dict], sort_by: str) -> dict:
+    """Pre-compute SQL statistics summary (BlinkOps pattern: result distillation)."""
+    if not items:
+        return {
+            "summary": "No SQL statements found matching criteria.",
+            "severity": "none",
+            "next_action": "No SQL performance issues detected",
+        }
+
+    # Compute totals (deterministic - not LLM)
+    total_db_time = sum(i.get("database_time_in_sec") or 0 for i in items)
+    total_cpu_time = sum(i.get("cpu_time_in_sec") or 0 for i in items)
+    total_io_time = sum(i.get("io_time_in_sec") or 0 for i in items)
+    total_executions = sum(i.get("executions_count") or 0 for i in items)
+
+    # Identify problematic SQLs
+    degrading = [i for i in items if i.get("category") == "DEGRADING"]
+    inefficient = [i for i in items if i.get("category") == "INEFFICIENT"]
+    high_variability = [i for i in items if i.get("variability") == "HIGH"]
+
+    # Top offenders
+    top_by_time = sorted(items, key=lambda x: -(x.get("database_time_in_sec") or 0))[:3]
+    top_offenders = []
+    for sql in top_by_time:
+        top_offenders.append({
+            "sql_id": sql.get("sql_identifier"),
+            "database": sql.get("database_display_name"),
+            "db_time_sec": round(sql.get("database_time_in_sec") or 0, 2),
+            "executions": sql.get("executions_count"),
+            "category": sql.get("category"),
+        })
+
+    severity = "critical" if degrading or inefficient else "warning" if high_variability else "low"
+
+    return {
+        "summary": f"{len(items)} SQL statements analyzed: {total_db_time:.1f}s total DB time across {total_executions} executions",
+        "severity": severity,
+        "totals": {
+            "database_time_sec": round(total_db_time, 2),
+            "cpu_time_sec": round(total_cpu_time, 2),
+            "io_time_sec": round(total_io_time, 2),
+            "executions": total_executions,
+        },
+        "problem_counts": {
+            "degrading": len(degrading),
+            "inefficient": len(inefficient),
+            "high_variability": len(high_variability),
+        },
+        "top_offenders": top_offenders,
+        "next_action": f"Tune {degrading[0].get('sql_identifier')} (degrading performance)" if degrading else f"Review {inefficient[0].get('sql_identifier')} (inefficient)" if inefficient else "Monitor SQL performance",
+    }
+
+
 async def _summarize_sql_statistics_logic(
     compartment_id: str | None = None,
     database_id: str | None = None,
     sql_identifier: str | None = None,
     sort_by: str = "databaseTimeInSec",
     category: str | None = None,
-    limit: int = 20,
+    limit: int = 10,  # Reduced from 20 to minimize context
     include_subtree: bool = True,
     profile: str | None = None,
     region: str | None = None,
@@ -263,7 +344,7 @@ async def _summarize_sql_statistics_logic(
             for item in response.data.items:
                 items.append({
                     "sql_identifier": getattr(item, "sql_identifier", None),
-                    "sql_text": getattr(item, "sql_text", None)[:200] if getattr(item, "sql_text", None) else None,
+                    "sql_text": getattr(item, "sql_text", None)[:150] if getattr(item, "sql_text", None) else None,  # Reduced from 200
                     "database_display_name": getattr(item, "database_display_name", None),
                     "category": getattr(item, "category", None),
                     "executions_count": getattr(item, "executions_count", None),
@@ -276,8 +357,12 @@ async def _summarize_sql_statistics_logic(
                     "variability": getattr(item, "variability", None),
                 })
 
+        # Pre-computed summary (BlinkOps pattern)
+        distilled = _compute_sql_statistics_summary(items, sort_by)
+
         return json.dumps({
             "type": "sql_statistics",
+            "distilled_summary": distilled,  # LLM reads this first
             "compartment_id": compartment,
             "sort_by": sort_by,
             "sql_count": len(items),
@@ -293,12 +378,61 @@ async def _summarize_sql_statistics_logic(
         return json.dumps({"error": str(e)})
 
 
+def _compute_addm_findings_summary(items: list[dict]) -> dict:
+    """Pre-compute ADDM findings summary with severity classification (BlinkOps pattern)."""
+    if not items:
+        return {
+            "summary": "No ADDM findings - database performance is optimal.",
+            "severity": "none",
+            "critical_count": 0,
+            "high_count": 0,
+            "medium_count": 0,
+            "next_action": "No action required",
+        }
+
+    # Classify by impact (deterministic - not LLM)
+    critical = [i for i in items if (i.get("impact_overall_percent") or 0) >= 20]
+    high = [i for i in items if 10 <= (i.get("impact_overall_percent") or 0) < 20]
+    medium = [i for i in items if 5 <= (i.get("impact_overall_percent") or 0) < 10]
+    low = [i for i in items if (i.get("impact_overall_percent") or 0) < 5]
+
+    # Aggregate by category
+    by_category = {}
+    for i in items:
+        cat = i.get("category_display_name") or i.get("category_name") or "unknown"
+        by_category[cat] = by_category.get(cat, 0) + 1
+
+    top_issues = []
+    for i in sorted(items, key=lambda x: -(x.get("impact_overall_percent") or 0))[:3]:
+        top_issues.append({
+            "name": i.get("name"),
+            "impact_percent": i.get("impact_overall_percent"),
+            "category": i.get("category_display_name"),
+        })
+
+    severity = "critical" if critical else "high" if high else "medium" if medium else "low"
+    total_impact = sum(i.get("impact_overall_percent") or 0 for i in items)
+
+    return {
+        "summary": f"{len(items)} performance findings: {len(critical)} critical, {len(high)} high, {len(medium)} medium, {len(low)} low impact",
+        "severity": severity,
+        "total_impact_percent": round(total_impact, 1),
+        "critical_count": len(critical),
+        "high_count": len(high),
+        "medium_count": len(medium),
+        "low_count": len(low),
+        "by_category": by_category,
+        "top_issues": top_issues,
+        "next_action": f"Address {critical[0]['name']} ({critical[0].get('impact_overall_percent')}% impact)" if critical else "Review high-impact findings" if high else "Monitor performance",
+    }
+
+
 async def _summarize_addm_findings_logic(
     compartment_id: str | None = None,
     database_id: str | None = None,
     include_subtree: bool = True,
     finding_type: str | None = None,
-    limit: int = 20,
+    limit: int = 15,  # Reduced from 20 to minimize context
     profile: str | None = None,
     region: str | None = None,
 ) -> str:
@@ -338,8 +472,12 @@ async def _summarize_addm_findings_logic(
                     "frequency_count": getattr(item, "frequency_count", None),
                 })
 
+        # Pre-computed summary with severity (BlinkOps pattern)
+        distilled = _compute_addm_findings_summary(items)
+
         return json.dumps({
             "type": "addm_findings",
+            "distilled_summary": distilled,  # LLM reads this first
             "compartment_id": compartment,
             "finding_count": len(items),
             "items": items,
@@ -354,12 +492,51 @@ async def _summarize_addm_findings_logic(
         return json.dumps({"error": str(e)})
 
 
+def _compute_addm_recommendations_summary(items: list[dict]) -> dict:
+    """Pre-compute ADDM recommendations summary (BlinkOps pattern)."""
+    if not items:
+        return {
+            "summary": "No ADDM recommendations available.",
+            "next_action": "No performance tuning recommendations at this time",
+        }
+
+    # Calculate total potential benefit (deterministic)
+    total_benefit = sum(i.get("overall_benefit_percent") or 0 for i in items)
+    requires_restart = [i for i in items if i.get("require_restart")]
+
+    # Group by type
+    by_type = {}
+    for i in items:
+        rec_type = i.get("type") or "unknown"
+        by_type[rec_type] = by_type.get(rec_type, 0) + 1
+
+    # Top recommendations by benefit
+    top_recs = sorted(items, key=lambda x: -(x.get("overall_benefit_percent") or 0))[:3]
+    top_recommendations = []
+    for rec in top_recs:
+        top_recommendations.append({
+            "type": rec.get("type"),
+            "benefit_percent": rec.get("overall_benefit_percent"),
+            "requires_restart": rec.get("require_restart"),
+            "message": (rec.get("message") or "")[:100],
+        })
+
+    return {
+        "summary": f"{len(items)} recommendations with {total_benefit:.1f}% total potential benefit",
+        "total_potential_benefit_percent": round(total_benefit, 1),
+        "requires_restart_count": len(requires_restart),
+        "by_type": by_type,
+        "top_recommendations": top_recommendations,
+        "next_action": f"Apply {top_recs[0].get('type')} recommendation for {top_recs[0].get('overall_benefit_percent')}% improvement" if top_recs else "Review recommendations",
+    }
+
+
 async def _summarize_addm_recommendations_logic(
     compartment_id: str | None = None,
     database_id: str | None = None,
     finding_id: str | None = None,
     include_subtree: bool = True,
-    limit: int = 20,
+    limit: int = 10,  # Reduced from 20 to minimize context
     profile: str | None = None,
     region: str | None = None,
 ) -> str:
@@ -394,15 +571,19 @@ async def _summarize_addm_recommendations_logic(
                     "message": getattr(item, "message", None),
                     "require_restart": getattr(item, "require_restart", None),
                     "implement_actions": getattr(item, "implement_actions", None),
-                    "rationale": getattr(item, "rationale", None),
+                    "rationale": (getattr(item, "rationale", None) or "")[:200],  # Truncate rationale
                     "max_benefit_percent": getattr(item, "max_benefit_percent", None),
                     "overall_benefit_percent": getattr(item, "overall_benefit_percent", None),
                     "max_benefit_avg_active_sessions": getattr(item, "max_benefit_avg_active_sessions", None),
                     "frequency_count": getattr(item, "frequency_count", None),
                 })
 
+        # Pre-computed summary (BlinkOps pattern)
+        distilled = _compute_addm_recommendations_summary(items)
+
         return json.dumps({
             "type": "addm_recommendations",
+            "distilled_summary": distilled,  # LLM reads this first
             "compartment_id": compartment,
             "recommendation_count": len(items),
             "items": items,

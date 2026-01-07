@@ -297,8 +297,17 @@ class StdioTransport(MCPTransport):
             except TimeoutError:
                 self._process.kill()
 
+            # Reset process reference to ensure clean state
+            self._process = None
+
         self._connected = False
         self._logger.info("MCP server disconnected")
+
+    async def restart(self) -> None:
+        """Restart the MCP server process."""
+        self._logger.warning("Restarting MCP server process...")
+        await self.disconnect()
+        await self.connect()
 
     async def send_request(
         self, method: str, params: dict[str, Any] | None = None, timeout: int | None = None
@@ -345,6 +354,20 @@ class StdioTransport(MCPTransport):
         except TimeoutError:
             del self._pending_requests[request_id]
             raise MCPError(-32000, f"Request timeout: {method} (after {effective_timeout}s)")
+
+        except (ConnectionResetError, BrokenPipeError, asyncio.IncompleteReadError) as e:
+            # Handle transport-level connection errors
+            self._logger.error("Connection lost during request", error=str(e), method=method)
+
+            # Clean up potential zombie request
+            if request_id in self._pending_requests:
+                del self._pending_requests[request_id]
+
+            # Mark as disconnected
+            self._connected = False
+
+            # Raise specific error for higher-level retry logic
+            raise MCPError(-32099, "Connection lost", str(e))
 
     async def _read_responses(self) -> None:
         """Read responses from stdout."""
@@ -614,6 +637,20 @@ class MCPClient:
             span.set_attribute("mcp.tool.arguments", str(arguments)[:500])
             span.set_attribute("mcp.timeout_seconds", timeout)
 
+            # Auto-connect if not connected or previously disconnected
+            if not self.connected:
+                try:
+                    self._logger.info("Not connected, attempting to connect/reconnect...", tool=tool_name)
+                    await self.connect()
+                except Exception as e:
+                    span.set_attribute("mcp.error", True)
+                    span.set_attribute("mcp.error_type", "connection_failed")
+                    return ToolCallResult(
+                        tool_name=tool_name,
+                        success=False,
+                        error=f"Connection failed: {e!s}",
+                    )
+
             if not self._transport:
                 span.set_attribute("mcp.error", True)
                 span.set_attribute("mcp.error_type", "not_connected")
@@ -623,11 +660,26 @@ class MCPClient:
                     error="Not connected",
                 )
 
-            # Retry loop with exponential backoff
+            # Retry loop with exponential backoff and RECONNECTION logic
             last_error = None
+            max_reconnects = 2  # Max number of restarts per tool call
+            reconnect_count = 0
+
             for attempt in range(self.config.retry_attempts):
                 try:
                     span.set_attribute("mcp.attempt", attempt + 1)
+
+                    # Ensure we are connected before sending
+                    if not self._transport.connected:
+                        if reconnect_count < max_reconnects:
+                            self._logger.warning("Transport disconnected, restarting...", attempt=attempt+1)
+                            if hasattr(self._transport, 'restart'):
+                                await self._transport.restart()
+                            else:
+                                await self._transport.connect()
+                            reconnect_count += 1
+                        else:
+                            raise MCPError(-32099, "Transport disconnected (max restarts exceeded)")
 
                     # Pass tool-specific timeout to send_request
                     result = await self._transport.send_request(
@@ -683,16 +735,39 @@ class MCPClient:
                         # Increase timeout for retry
                         timeout = int(timeout * 1.5)
 
-                except MCPError as e:
+                except (OSError, MCPError, ConnectionResetError, BrokenPipeError) as e:
+                    # Handle MCP Errors (including wrapped connection errors) or Raw IO Errors
+                    code = getattr(e, 'code', -9999)
+
+                    # Handle Connection Lost (-32099) or raw IO errors
+                    if code == -32099 or isinstance(e, (ConnectionResetError, BrokenPipeError, IOError)):
+                        last_error = f"Connection lost: {e!s}"
+                        self._logger.warning(
+                            "Connection lost during tool call, will retry",
+                            tool=tool_name,
+                            attempt=attempt + 1,
+                            reconnects=reconnect_count
+                        )
+                        if attempt < self.config.retry_attempts - 1 and reconnect_count < max_reconnects:
+                           # Mark transport provided explicitly as disconnected to force reconnect check
+                           if self._transport:
+                               # Force disconnect state so next loop attempts reconnect
+                               self._transport._connected = False
+
+                        # Just continue to next attempt, the loop check will handle reconnect
+                        continue
+
                     # Don't retry non-timeout MCP errors
-                    if e.code == -32000 and "timeout" in str(e).lower():
+                    if code == -32000 and "timeout" in str(e).lower():
                         last_error = str(e)
                         if attempt < self.config.retry_attempts - 1:
                             backoff = (self.config.retry_backoff ** attempt) * 2
                             await asyncio.sleep(backoff)
                             timeout = int(timeout * 1.5)
                         continue
+
                     # Other errors - fail immediately
+
                     duration_ms = int((time.time() - start_time) * 1000)
                     span.set_attribute("mcp.duration_ms", duration_ms)
                     span.set_attribute("mcp.error", True)

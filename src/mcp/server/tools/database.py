@@ -11,11 +11,14 @@ Provides tools for:
 
 import asyncio
 import json
+from datetime import UTC
 from typing import Any
 
 from fastmcp import FastMCP
 
-from src.mcp.server.auth import get_database_management_client, get_oci_config_with_region
+from src.mcp.server.auth import (
+    get_database_management_client,
+)
 
 
 async def _call_oci(client_method, **kwargs):
@@ -301,13 +304,14 @@ async def _get_awr_db_report_logic(
     Uses the Database Management get_awr_db_report API for actual AWR data.
     Supports ADB, External SIDB, and External RAC databases.
     """
+    from datetime import datetime, timedelta
+
     import oci
-    from datetime import datetime, timedelta, timezone
 
     try:
         client = get_database_management_client(profile=profile, region=region)
 
-        end_time = datetime.now(timezone.utc)
+        end_time = datetime.now(UTC)
         begin_time = end_time - timedelta(hours=hours_back)
 
         try:
@@ -606,8 +610,9 @@ async def _get_fleet_health_logic(
     region: str | None = None,
 ) -> str:
     """Get database fleet health metrics."""
+    from datetime import datetime, timedelta
+
     import oci
-    from datetime import datetime, timedelta, timezone
 
     try:
         client = get_database_management_client(profile=profile, region=region)
@@ -615,7 +620,7 @@ async def _get_fleet_health_logic(
         compartment = compartment_id or config.get("tenancy")
 
         # Calculate baseline and target times based on compare_type
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         if compare_type == "WEEK":
             baseline_time = now - timedelta(weeks=1)
         elif compare_type == "MONTH":
@@ -753,13 +758,14 @@ async def _get_database_metrics_logic(
     region: str | None = None,
 ) -> str:
     """Get performance metrics for a managed database."""
+    from datetime import datetime, timedelta
+
     import oci
-    from datetime import datetime, timedelta, timezone
 
     try:
         client = get_database_management_client(profile=profile, region=region)
 
-        end_time = datetime.now(timezone.utc)
+        end_time = datetime.now(UTC)
         start_time = end_time - timedelta(hours=hours_back)
 
         # Default metrics to retrieve
