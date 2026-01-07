@@ -1841,7 +1841,7 @@ Return only the JSON object, no other text."""
                 if should_use_planner(state.query, workflow_type):
                     thread_id = state.metadata.get("thread_id") if state.metadata else None
                     planner = await create_planner_for_workflow(
-                        workflow_type=workflow_type,
+                        workflow_name=workflow_type,
                         query=state.query,
                         thread_id=thread_id,
                     )

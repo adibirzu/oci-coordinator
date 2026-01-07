@@ -54,3 +54,6 @@ config/*.secret.yaml
 dist/
 build/
 *.egg-info/
+
+# File-based planner artifacts
+.plan/

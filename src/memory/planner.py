@@ -587,29 +587,41 @@ class FileBasedPlanner:
 
 def should_use_planner(
     query: str,
-    estimated_tool_calls: int = 3,
+    workflow_type: str | None = None,
 ) -> bool:
     """
     Determine if file-based planning should be used for a query.
 
     Args:
         query: User query
-        estimated_tool_calls: Estimated number of tool calls needed
+        workflow_type: Type of workflow (e.g., "database_troubleshoot", "cost_analysis")
 
     Returns:
-        True if planner should be used
+        True if planner should be used for token optimization
     """
-    # Use planner for complex operations
+    # Workflows that always benefit from file-based planning
+    # These typically involve multiple tool calls and large outputs
+    complex_workflows = {
+        "database_troubleshoot",
+        "cost_analysis",
+        "security_audit",
+        "log_analysis",
+        "error_analysis",
+    }
+
+    # Check workflow type first - complex workflows always use planner
+    if workflow_type and workflow_type in complex_workflows:
+        return True
+
+    # Check for complex query keywords
     complex_keywords = [
         "investigate", "troubleshoot", "analyze", "audit", "compare",
         "spike", "anomaly", "report", "security", "performance",
-        "why", "root cause", "trend",
+        "why", "root cause", "trend", "diagnose", "debug",
     ]
 
     query_lower = query.lower()
-    has_complex_keyword = any(kw in query_lower for kw in complex_keywords)
-
-    return has_complex_keyword or estimated_tool_calls >= 3
+    return any(kw in query_lower for kw in complex_keywords)
 
 
 async def create_planner_for_workflow(
@@ -654,6 +666,19 @@ async def create_planner_for_workflow(
             "Check status",
             "Analyze metrics",
             "Generate summary",
+        ],
+        "log_analysis": [
+            "Define search scope",
+            "Search logs",
+            "Analyze patterns",
+            "Correlate events",
+            "Generate findings",
+        ],
+        "error_analysis": [
+            "Capture error details",
+            "Search for similar errors",
+            "Analyze root cause",
+            "Generate resolution",
         ],
     }
 
