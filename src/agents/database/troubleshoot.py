@@ -36,6 +36,7 @@ from src.observability import get_trace_id
 if TYPE_CHECKING:
     from src.mcp.catalog import ToolCatalog
     from src.memory.manager import SharedMemoryManager
+    from src.memory.planner import FileBasedPlanner
 
 from src.skills.troubleshoot_database import DBTroubleshootSkill
 
@@ -1188,6 +1189,11 @@ class DbTroubleshootAgent(BaseAgent, SelfHealingMixin):
                     compartment_id = resolved_compartment
                     span.set_attribute("compartment.pre_resolved", True)
 
+            # Get planner from context if available (for token optimization)
+            planner: FileBasedPlanner | None = context.get("planner")
+            if planner:
+                self._logger.debug("Using file-based planner for token optimization")
+
             # Create initial state with resolved values
             initial_state = TroubleshootState(
                 query=query,
@@ -1215,8 +1221,31 @@ class DbTroubleshootAgent(BaseAgent, SelfHealingMixin):
                 if result.get("result"):
                     analysis = result["result"]
                     span.set_attribute("health_score", analysis.health_score)
+
+                    # Save analysis summary to planner if available
+                    if planner:
+                        try:
+                            await planner.save_tool_output(
+                                tool_name="db_troubleshoot_analysis",
+                                output={
+                                    "health_score": analysis.health_score,
+                                    "severity": analysis.severity,
+                                    "issues_count": len(analysis.top_issues),
+                                    "recommendations_count": len(analysis.recommendations),
+                                },
+                                summary=f"Health: {analysis.health_score}/100 | Severity: {analysis.severity} | {len(analysis.top_issues)} issues found",
+                            )
+                            await planner.update_phase(4, status="completed")
+                        except Exception as planner_err:
+                            self._logger.warning("Failed to save to planner", error=str(planner_err))
+
                     return self._format_response(analysis)
                 elif result.get("error"):
+                    if planner:
+                        try:
+                            await planner.log_error(error=result["error"][:200], resolution="Check logs for details")
+                        except Exception:
+                            pass
                     return f"Error during analysis: {result['error']}"
                 else:
                     return "Analysis completed but no results available."
@@ -1228,6 +1257,17 @@ class DbTroubleshootAgent(BaseAgent, SelfHealingMixin):
                     trace_id=get_trace_id(),
                 )
                 span.set_attribute("error", True)
+
+                # Log error to planner if available
+                if planner:
+                    try:
+                        await planner.log_error(
+                            error=str(e)[:200],
+                            resolution="Agent execution failed - check logs",
+                        )
+                    except Exception:
+                        pass
+
                 return f"Database troubleshooting failed: {e}"
 
     async def quick_health_check(
