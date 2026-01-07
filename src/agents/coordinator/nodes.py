@@ -37,6 +37,11 @@ from src.agents.coordinator.transparency import (
     ThinkingPhase,
     create_thinking_trace,
 )
+from src.memory import (
+    FileBasedPlanner,
+    create_planner_for_workflow,
+    should_use_planner,
+)
 
 # Get tracer for coordinator nodes
 _tracer = trace.get_tracer("oci-coordinator")
@@ -103,6 +108,45 @@ class CoordinatorNodes:
             return replace(intent, entities=merged_entities)
 
         return intent
+
+    def _infer_workflow_type(self, agent_role: str, query: str) -> str:
+        """
+        Infer workflow type from agent role and query for planner creation.
+
+        Maps agent roles to workflow types used by FileBasedPlanner.
+
+        Args:
+            agent_role: Agent role identifier (e.g., "db-troubleshoot-agent")
+            query: User query for additional context
+
+        Returns:
+            Workflow type string (cost_analysis, database_troubleshoot, etc.)
+        """
+        # Map agent roles to workflow types
+        role_to_workflow = {
+            "db-troubleshoot-agent": "database_troubleshoot",
+            "db-health-agent": "database_troubleshoot",
+            "log-analytics-agent": "log_analysis",
+            "error-analysis-agent": "error_analysis",
+            "security-agent": "security_audit",
+            "finops-agent": "cost_analysis",
+            "infrastructure-agent": "infrastructure_check",
+        }
+
+        # Check if agent role has a mapped workflow type
+        workflow_type = role_to_workflow.get(agent_role, "general")
+
+        # Override based on query keywords if general
+        if workflow_type == "general":
+            query_lower = query.lower()
+            if any(kw in query_lower for kw in ["cost", "spend", "bill", "budget"]):
+                workflow_type = "cost_analysis"
+            elif any(kw in query_lower for kw in ["security", "audit", "vulnerab", "compliance"]):
+                workflow_type = "security_audit"
+            elif any(kw in query_lower for kw in ["database", "db", "sql", "awr", "performance"]):
+                workflow_type = "database_troubleshoot"
+
+        return workflow_type
 
     # ─────────────────────────────────────────────────────────────────────────
     # Input Node
@@ -1790,6 +1834,24 @@ Return only the JSON object, no other text."""
                 context["output_format"] = state.output_format
                 context["channel_type"] = state.channel_type
 
+                # Create file-based planner for complex queries to reduce token usage
+                # The planner stores tool outputs in .plan/ files instead of context
+                planner = None
+                workflow_type = self._infer_workflow_type(agent_role, state.query)
+                if should_use_planner(state.query, workflow_type):
+                    thread_id = state.metadata.get("thread_id") if state.metadata else None
+                    planner = await create_planner_for_workflow(
+                        workflow_type=workflow_type,
+                        query=state.query,
+                        thread_id=thread_id,
+                    )
+                    context["planner"] = planner
+                    self._logger.info(
+                        "Created file-based planner for agent",
+                        agent_role=agent_role,
+                        workflow_type=workflow_type,
+                    )
+
                 # Wrap agent invocation with timeout
                 result = await asyncio.wait_for(
                     agent_instance.invoke(state.query, context),
@@ -1812,6 +1874,22 @@ Return only the JSON object, no other text."""
                     agent_role=agent_role,
                     duration_ms=duration_ms,
                 )
+
+                # Log planner summary if used (token optimization tracking)
+                if planner:
+                    try:
+                        summary = await planner.get_summary()
+                        self._logger.info(
+                            "File-based planner completed",
+                            agent_role=agent_role,
+                            planner_summary=summary,
+                            plan_dir=str(planner.plan_dir),
+                        )
+                    except Exception as planner_err:
+                        self._logger.warning(
+                            "Failed to get planner summary",
+                            error=str(planner_err),
+                        )
 
                 # Add thinking step for agent completion
                 thinking_trace = state.thinking_trace
@@ -1856,6 +1934,16 @@ Return only the JSON object, no other text."""
                         f"Agent timed out after {timeout_seconds}s",
                         {"agent": agent_role, "timeout_seconds": timeout_seconds},
                     )
+
+                # Log timeout error to planner if used (persists to .plan/task_plan.md)
+                if planner:
+                    try:
+                        await planner.log_error(
+                            error=f"Agent timeout after {timeout_seconds}s",
+                            resolution="Reduce query scope or time range",
+                        )
+                    except Exception:
+                        pass  # Don't fail on planner logging
 
                 # Provide agent-specific timeout guidance
                 agent_name = agent_role.replace("-agent", "").replace("-", " ").title()
@@ -1910,6 +1998,16 @@ Return only the JSON object, no other text."""
                         f"Agent failed: {str(e)[:100]}",
                         {"agent": agent_role, "error": str(e)},
                     )
+
+                # Log error to planner if used (persists to .plan/task_plan.md)
+                if planner:
+                    try:
+                        await planner.log_error(
+                            error=str(e)[:200],
+                            resolution="Agent execution failed",
+                        )
+                    except Exception:
+                        pass  # Don't fail on planner logging
 
                 return {"error": f"Agent failed: {e}"}
 
