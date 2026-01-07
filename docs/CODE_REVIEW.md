@@ -429,8 +429,7 @@ ELSE:
 | Layer | Backend | Purpose | TTL |
 |-------|---------|---------|-----|
 | **Hot Cache** | Redis | Session state, tool results | 1-4 hours |
-| **Persistent** | ATP/Neo4j | Conversation history, audit | Permanent |
-| **Checkpoints** | LangGraph + ATP | Graph state snapshots | Session |
+| **Checkpoints** | LangGraph MemorySaver | Graph state snapshots | Session |
 
 ### 6.2 OCI Resource Cache Features
 

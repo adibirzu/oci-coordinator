@@ -25,7 +25,7 @@ The OCI AI Agent Coordinator implements a **Workflow-First** multi-agent archite
 
 ### 3. State Persistence
 - Conversation state via LangGraph checkpoints
-- Tiered memory: Redis (hot) + ATP (persistent)
+- Tiered memory: Redis (hot cache)
 - Context compression for long conversations (>150k tokens)
 - Thread-based session management
 
@@ -480,8 +480,7 @@ async def list_compartments_workflow(
 | Layer | Backend | Purpose | TTL |
 |-------|---------|---------|-----|
 | Hot Cache | Redis | Session state, tool results | 1 hour |
-| Persistent | OCI ATP | Conversation history, audit | Permanent |
-| Checkpoints | LangGraph | Graph state, iterations | Session |
+| Checkpoints | LangGraph MemorySaver | Graph state, iterations | Session |
 | Vector Store | Redis VSS | RAG embeddings | Permanent |
 
 ### Context Compression

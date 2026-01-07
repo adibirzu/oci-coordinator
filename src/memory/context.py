@@ -20,7 +20,9 @@ Usage:
 
 from __future__ import annotations
 
+import asyncio
 import json
+import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
@@ -138,8 +140,28 @@ class ContextManager:
         Returns:
             ContextWindow with context data
         """
-        # Get full conversation history
-        history = await self.memory.get_conversation_history(thread_id) or []
+        # Get full conversation history with a short timeout to avoid blocking on persistent stores.
+        timeout_s = float(os.getenv("CONTEXT_HISTORY_TIMEOUT_SECONDS", "3"))
+        try:
+            history = await asyncio.wait_for(
+                self.memory.get_conversation_history(thread_id),
+                timeout=timeout_s,
+            )
+        except TimeoutError:
+            self._logger.warning(
+                "Conversation history load timed out",
+                thread_id=thread_id,
+                timeout_s=timeout_s,
+            )
+            history = []
+        except Exception as e:
+            self._logger.warning(
+                "Conversation history load failed",
+                thread_id=thread_id,
+                error=str(e),
+            )
+            history = []
+        history = history or []
 
         if not history:
             return ContextWindow(

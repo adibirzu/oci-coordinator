@@ -41,6 +41,7 @@ from src.agents.self_healing import SelfHealingMixin
 
 if TYPE_CHECKING:
     from langchain_core.language_models import BaseChatModel
+
     from src.mcp.catalog import ToolCatalog
     from src.memory.manager import SharedMemoryManager
 
@@ -170,21 +171,12 @@ class ErrorAnalysisAgent(BaseAgent, SelfHealingMixin):
     - LLM-powered error pattern analysis recovery
     """
 
-    # MCP tools for error analysis
-    MCP_TOOLS = [
-        "oci_logging_search_logs",
-        "oci_logan_execute_query",
-        "oci_logan_detect_anomalies",
-        "oci_logging_list_log_groups",
-        "oci_logging_get_log",
-    ]
-
     def __init__(
         self,
-        memory_manager: "SharedMemoryManager | None" = None,
-        tool_catalog: "ToolCatalog | None" = None,
+        memory_manager: SharedMemoryManager | None = None,
+        tool_catalog: ToolCatalog | None = None,
         config: dict[str, Any] | None = None,
-        llm: "BaseChatModel | None" = None,
+        llm: BaseChatModel | None = None,
         todo_manager: AdminTodoManager | None = None,
     ):
         """
@@ -241,7 +233,6 @@ class ErrorAnalysisAgent(BaseAgent, SelfHealingMixin):
                 timeout_seconds=300,
             ),
             description="Analyzes OCI logs for errors, detects patterns, and creates admin todos",
-            mcp_tools=cls.MCP_TOOLS,
             mcp_servers=["oci-unified", "database-observatory"],
         )
 
@@ -534,7 +525,7 @@ Format each recommendation as a clear action item."""
         except Exception as e:
             logger.error("Error analysis failed", error=str(e))
             return {
-                "response": f"Error analysis failed: {str(e)}",
+                "response": f"Error analysis failed: {e!s}",
                 "success": False,
             }
 

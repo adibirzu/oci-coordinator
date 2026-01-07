@@ -1,5 +1,7 @@
 # Track Plan: Foundation & Core Infrastructure
 
+> **Note (2026-01):** ATP persistent memory references in this planning document are historical. ATP has been removed from the codebase; the memory layer now uses Redis cache with LangGraph MemorySaver.
+
 **Track Started**: 2025-12-29
 **Last Updated**: 2025-12-30
 **Status**: Phase 4 IN PROGRESS 🔄 - Evaluation Framework Complete, Baseline Eval Pending

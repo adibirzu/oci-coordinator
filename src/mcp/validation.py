@@ -13,7 +13,7 @@ Features:
 
 from __future__ import annotations
 
-import asyncio
+import json
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -173,8 +173,8 @@ class ToolCatalogValidator:
 
     def __init__(
         self,
-        catalog: "ToolCatalog",
-        registry: "ServerRegistry | None" = None,
+        catalog: ToolCatalog,
+        registry: ServerRegistry | None = None,
     ):
         """Initialize validator.
 
@@ -339,8 +339,8 @@ class ToolCatalogValidator:
 
 
 async def validate_tool_catalog(
-    catalog: "ToolCatalog",
-    registry: "ServerRegistry | None" = None,
+    catalog: ToolCatalog,
+    registry: ServerRegistry | None = None,
     include_health_check: bool = False,
 ) -> ValidationResult:
     """
@@ -358,8 +358,78 @@ async def validate_tool_catalog(
     return await validator.validate(include_health_check)
 
 
+async def validate_server_manifests(
+    registry: ServerRegistry,
+    required_fields: list[str] | None = None,
+) -> dict[str, Any]:
+    """
+    Validate that connected servers expose a conforming manifest.
+
+    Args:
+        registry: Server registry with connected clients
+        required_fields: Required top-level manifest fields
+
+    Returns:
+        Validation summary with missing/invalid manifests
+    """
+    required_fields = required_fields or [
+        "schema_version",
+        "server_id",
+        "server_version",
+        "tools",
+        "domains",
+    ]
+
+    results = {
+        "total_servers": len(registry.list_servers()),
+        "checked": 0,
+        "missing_manifest": [],
+        "invalid_manifest": [],
+    }
+
+    for server_id in registry.list_servers():
+        client = registry.get_client(server_id)
+        if not client or not client.connected:
+            continue
+
+        results["checked"] += 1
+        try:
+            resources = client.resources or {}
+            if "server://manifest" not in resources:
+                results["missing_manifest"].append(server_id)
+                continue
+
+            raw = await client.read_resource("server://manifest")
+            if not raw:
+                results["invalid_manifest"].append(
+                    {"server_id": server_id, "error": "empty_manifest"}
+                )
+                continue
+
+            try:
+                manifest = json.loads(raw) if isinstance(raw, str) else raw
+            except json.JSONDecodeError as exc:
+                results["invalid_manifest"].append(
+                    {"server_id": server_id, "error": f"invalid_json: {exc}"}
+                )
+                continue
+
+            missing = [f for f in required_fields if f not in manifest]
+            if missing:
+                results["invalid_manifest"].append(
+                    {"server_id": server_id, "error": f"missing_fields: {missing}"}
+                )
+
+        except Exception as exc:
+            results["invalid_manifest"].append(
+                {"server_id": server_id, "error": str(exc)}
+            )
+
+    return results
+
+
 async def verify_startup_health(
-    catalog: "ToolCatalog",
+    catalog: ToolCatalog,
     test_categories: list[str] | None = None,
 ) -> dict[str, Any]:
     """
@@ -394,7 +464,7 @@ async def verify_startup_health(
         if not matching_tools:
             results[category] = {
                 "status": "skipped",
-                "message": f"No list tool found for category",
+                "message": "No list tool found for category",
             }
             continue
 

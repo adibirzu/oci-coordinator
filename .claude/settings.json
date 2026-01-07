@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '{\"hookSpecificOutput\": {\"hookEventName\": \"SessionStart\", \"additionalContext\": \"Activate Serena: mcp__plugin_serena_serena__activate_project with project=oci-coordinator. Available memories (load ON-DEMAND only when task requires): project_overview (env vars, agents), code_style (conventions), suggested_commands (dev commands), task_completion (checklist), architecture_details (coordinator, routing), mcp_tools (tool tiers, domains). Do NOT read all memories upfront - only read what the specific task needs.\"}}'"
+          }
+        ]
+      }
+    ]
+  }
+}

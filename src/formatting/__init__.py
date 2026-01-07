@@ -55,7 +55,11 @@ from src.formatting.base import (
 
 # Import formatters to register them
 from src.formatting.markdown import MarkdownFormatter
+
+# Import parser
+from src.formatting.parser import ParseResult, ResponseParser
 from src.formatting.slack import SlackFormatter
+from src.formatting.teams import TeamsFormatter
 
 __all__ = [
     # Core types
@@ -80,4 +84,8 @@ __all__ = [
     "FormatterRegistry",
     "MarkdownFormatter",
     "SlackFormatter",
+    "TeamsFormatter",
+    # Parser
+    "ResponseParser",
+    "ParseResult",
 ]

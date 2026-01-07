@@ -11,6 +11,8 @@ Enhanced Features:
 - Output format configuration (Slack, Markdown, Teams, etc.)
 """
 
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -22,7 +24,7 @@ import structlog
 if TYPE_CHECKING:
     from langgraph.graph import StateGraph
 
-    from src.agents.protocol import AgentMessage, AgentResult, MessageBus
+    from src.agents.protocol import AgentResult, MessageBus
     from src.agents.skills import SkillExecutionResult, SkillExecutor
     from src.formatting.base import StructuredResponse
     from src.mcp.catalog import ToolCatalog
@@ -136,7 +138,7 @@ class AgentDefinition:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "AgentDefinition":
+    def from_dict(cls, data: dict[str, Any]) -> AgentDefinition:
         """Deserialize agent definition from dictionary."""
         kafka_data = data.get("kafka_topics", {})
         metadata_data = data.get("metadata", {})
@@ -224,8 +226,8 @@ class BaseAgent(ABC):
 
     def __init__(
         self,
-        memory_manager: "SharedMemoryManager | None" = None,
-        tool_catalog: "ToolCatalog | None" = None,
+        memory_manager: SharedMemoryManager | None = None,
+        tool_catalog: ToolCatalog | None = None,
         config: dict[str, Any] | None = None,
     ):
         """
@@ -245,6 +247,14 @@ class BaseAgent(ABC):
             agent_role=self.get_definition().role,
             agent_id=self.get_definition().agent_id,
         )
+        if self.memory and self.tools:
+            try:
+                self.tools.set_memory_manager(self.memory)
+            except Exception as exc:
+                self._logger.debug(
+                    "Failed to attach memory manager to tool catalog",
+                    error=str(exc),
+                )
 
     @classmethod
     @abstractmethod
@@ -275,7 +285,7 @@ class BaseAgent(ABC):
         pass
 
     @abstractmethod
-    def build_graph(self) -> "StateGraph":
+    def build_graph(self) -> StateGraph:
         """
         Build the LangGraph for this agent.
 
@@ -362,7 +372,7 @@ class BaseAgent(ABC):
     # Inter-Agent Communication
     # ─────────────────────────────────────────────────────────────────────────
 
-    def _get_message_bus(self) -> "MessageBus":
+    def _get_message_bus(self) -> MessageBus:
         """Get the global message bus for inter-agent communication."""
         from src.agents.protocol import get_message_bus
 
@@ -375,7 +385,7 @@ class BaseAgent(ABC):
         context: dict[str, Any] | None = None,
         boundaries: list[str] | None = None,
         timeout_seconds: int = 60,
-    ) -> "AgentResult":
+    ) -> AgentResult:
         """
         Request assistance from another agent via the message bus.
 
@@ -455,7 +465,7 @@ class BaseAgent(ABC):
         query: str,
         context: dict[str, Any] | None = None,
         boundaries: list[str] | None = None,
-    ) -> "AgentResult | None":
+    ) -> AgentResult | None:
         """
         Delegate a subtask to an agent with the specified capability.
 
@@ -625,7 +635,7 @@ class BaseAgent(ABC):
     # Skill Execution
     # ─────────────────────────────────────────────────────────────────────────
 
-    def create_skill_executor(self) -> "SkillExecutor":
+    def create_skill_executor(self) -> SkillExecutor:
         """
         Create a skill executor for this agent.
 
@@ -644,7 +654,7 @@ class BaseAgent(ABC):
         skill_name: str,
         context: dict[str, Any] | None = None,
         handlers: dict[str, Any] | None = None,
-    ) -> "SkillExecutionResult":
+    ) -> SkillExecutionResult:
         """
         Execute a registered skill.
 
@@ -742,7 +752,7 @@ class BaseAgent(ABC):
         subtitle: str | None = None,
         severity: str | None = None,
         icon: str | None = None,
-    ) -> "StructuredResponse":
+    ) -> StructuredResponse:
         """
         Create a structured response.
 
@@ -782,7 +792,7 @@ class BaseAgent(ABC):
 
     def format_response(
         self,
-        response: "StructuredResponse",
+        response: StructuredResponse,
         format_name: str | None = None,
     ) -> str | dict[str, Any]:
         """

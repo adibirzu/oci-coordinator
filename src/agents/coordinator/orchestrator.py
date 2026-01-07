@@ -29,7 +29,6 @@ Usage:
 
 from __future__ import annotations
 
-import asyncio
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -50,8 +49,8 @@ from src.agents.protocol import (
 )
 from src.mcp.dynamic_manager import (
     DynamicToolManager,
-    UpdateEvent,
     ToolChangeEvent,
+    UpdateEvent,
 )
 
 if TYPE_CHECKING:
@@ -134,8 +133,8 @@ class ParallelOrchestrator:
     DEFAULT_TIMEOUT = 60
 
     # Loop prevention
-    MAX_ITERATIONS = 10  # Maximum orchestration iterations
-    MAX_RECURSION_DEPTH = 3  # Maximum nesting of agent calls
+    MAX_ITERATIONS = 15  # Maximum orchestration iterations
+    MAX_RECURSION_DEPTH = 5  # Maximum nesting of agent calls
 
     def __init__(
         self,
@@ -317,6 +316,7 @@ class ParallelOrchestrator:
                     role=agent_def.role,
                     memory_manager=self.memory,
                     tool_catalog=self.tool_catalog,
+                    llm=self.llm,
                 )
 
                 if not agent_instance:
@@ -397,7 +397,7 @@ class ParallelOrchestrator:
         query_hash = hash(query[:100])  # Use first 100 chars for dedup
         self._seen_queries[query_hash] = self._seen_queries.get(query_hash, 0) + 1
 
-        if self._seen_queries[query_hash] > 3:
+        if self._seen_queries[query_hash] > 5:
             self._logger.warning(
                 "Loop detected: repeated query",
                 query_hash=query_hash,

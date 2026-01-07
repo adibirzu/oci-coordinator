@@ -68,33 +68,10 @@ class LogAnalyticsAgent(BaseAgent, SelfHealingMixin):
     - LLM-powered anomaly detection recovery
     """
 
-    # MCP tools from oci-unified and database-observatory servers
-    MCP_TOOLS = [
-        # OCI Unified observability tools
-        "oci_logging_list_log_groups",
-        "oci_logging_search_logs",
-        "oci_logging_get_log",
-        "oci_observability_query_logs",
-        # Database Observatory Logan tools
-        "oci_logan_execute_query",
-        "oci_logan_list_sources",
-        "oci_logan_list_entities",
-        "oci_logan_list_parsers",
-        "oci_logan_list_labels",
-        "oci_logan_list_groups",
-        "oci_logan_run_security_query",
-        "oci_logan_detect_anomalies",
-        "oci_logan_get_summary",
-        "oci_logan_suggest_query",
-        "oci_logan_list_active_sources",
-        "oci_logan_get_entity_logs",
-        "oci_logan_list_skills",
-    ]
-
     def __init__(
         self,
-        memory_manager: "SharedMemoryManager | None" = None,
-        tool_catalog: "ToolCatalog | None" = None,
+        memory_manager: SharedMemoryManager | None = None,
+        tool_catalog: ToolCatalog | None = None,
         config: dict[str, Any] | None = None,
         llm: Any = None,
     ):
@@ -154,7 +131,6 @@ class LogAnalyticsAgent(BaseAgent, SelfHealingMixin):
                 "Log Analytics Expert Agent for OCI log search, pattern detection, "
                 "and correlation analysis across services."
             ),
-            mcp_tools=cls.MCP_TOOLS,
             mcp_servers=["oci-unified", "database-observatory"],
         )
 

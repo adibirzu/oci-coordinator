@@ -1,0 +1,49 @@
+{
+  "database-observatory": [
+    "database",
+    "opsi",
+    "logan",
+    "sql",
+    "performance",
+    "awr",
+    "schema",
+    "sqlwatch"
+  ],
+  "finopsai": [
+    "cost",
+    "budget",
+    "finops",
+    "anomaly",
+    "forecasting",
+    "rightsizing"
+  ],
+  "oci-infrastructure": [
+    "compute",
+    "network",
+    "security",
+    "cost",
+    "database",
+    "observability"
+  ],
+  "oci-mcp-security": [
+    "security",
+    "cloudguard",
+    "vss",
+    "bastion",
+    "audit",
+    "kms",
+    "waf",
+    "datasafe",
+    "accessgov",
+    "zones"
+  ],
+  "oci-unified": [
+    "identity",
+    "compute",
+    "network",
+    "cost",
+    "security",
+    "observability",
+    "discovery"
+  ]
+}

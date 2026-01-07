@@ -1,0 +1,39 @@
+{
+  "cloudguard": [
+    "oci_security_cloudguard_"
+  ],
+  "cost": [
+    "oci_cost_"
+  ],
+  "database": [
+    "oci_database_",
+    "oci_opsi_",
+    "oci_dbmgmt_",
+    "execute_sql",
+    "database_status"
+  ],
+  "finops": [
+    "oci_cost_",
+    "finops_"
+  ],
+  "identity": [
+    "oci_list_compartments",
+    "oci_get_compartment",
+    "oci_search_compartments",
+    "oci_get_tenancy"
+  ],
+  "infrastructure": [
+    "oci_compute_",
+    "oci_network_",
+    "oci_list_",
+    "oci_get_",
+    "oci_search_"
+  ],
+  "observability": [
+    "oci_observability_",
+    "oci_logan_"
+  ],
+  "security": [
+    "oci_security_"
+  ]
+}

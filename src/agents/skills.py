@@ -796,7 +796,7 @@ SECURITY_ASSESSMENT_WORKFLOW = SkillDefinition(
         SkillStep(
             name="list_security_problems",
             description="List active security problems from Cloud Guard",
-            required_tools=["oci_security_list_problems"],
+            required_tools=["oci_security_cloudguard_list_problems"],
             timeout_seconds=30,
         ),
         SkillStep(
@@ -818,11 +818,442 @@ SECURITY_ASSESSMENT_WORKFLOW = SkillDefinition(
             timeout_seconds=30,
         ),
     ],
-    required_tools=["oci_security_list_problems"],
+    required_tools=["oci_security_cloudguard_list_problems"],
     tags=["security", "compliance", "assessment"],
     estimated_duration_seconds=90,
 )
 
+
+SECURITY_POSTURE_WORKFLOW = SkillDefinition(
+    name="security_posture_workflow",
+    description="Summarize Cloud Guard posture with recommendations",
+    steps=[
+        SkillStep(
+            name="list_cloud_guard_problems",
+            description="List Cloud Guard security problems",
+            required_tools=["oci_security_cloudguard_list_problems"],
+            timeout_seconds=30,
+        ),
+        SkillStep(
+            name="get_security_score",
+            description="Retrieve Cloud Guard security score",
+            required_tools=["oci_security_cloudguard_get_security_score"],
+            timeout_seconds=30,
+        ),
+        SkillStep(
+            name="list_recommendations",
+            description="List Cloud Guard recommendations",
+            required_tools=["oci_security_cloudguard_list_recommendations"],
+            timeout_seconds=30,
+        ),
+        SkillStep(
+            name="posture_summary",
+            description="Generate posture summary using built-in skill",
+            required_tools=["oci_security_skill_posture_summary"],
+            timeout_seconds=60,
+        ),
+    ],
+    required_tools=[
+        "oci_security_cloudguard_list_problems",
+        "oci_security_cloudguard_get_security_score",
+        "oci_security_cloudguard_list_recommendations",
+        "oci_security_skill_posture_summary",
+    ],
+    tags=["security", "cloudguard", "posture"],
+    estimated_duration_seconds=120,
+)
+
+
+SECURITY_CLOUDGUARD_INVESTIGATION_WORKFLOW = SkillDefinition(
+    name="security_cloudguard_investigation_workflow",
+    description="Investigate Cloud Guard findings and responder context",
+    steps=[
+        SkillStep(
+            name="get_problem_details",
+            description="Get detailed Cloud Guard problem information",
+            required_tools=["oci_security_cloudguard_get_problem"],
+            timeout_seconds=30,
+        ),
+        SkillStep(
+            name="list_detectors",
+            description="List detector recipes for context",
+            required_tools=["oci_security_cloudguard_list_detectors"],
+            timeout_seconds=30,
+        ),
+        SkillStep(
+            name="list_responders",
+            description="List responder recipes for context",
+            required_tools=["oci_security_cloudguard_list_responders"],
+            timeout_seconds=30,
+        ),
+    ],
+    required_tools=[
+        "oci_security_cloudguard_get_problem",
+        "oci_security_cloudguard_list_detectors",
+        "oci_security_cloudguard_list_responders",
+    ],
+    tags=["security", "cloudguard", "investigation"],
+    estimated_duration_seconds=120,
+)
+
+
+SECURITY_CLOUDGUARD_REMEDIATION_WORKFLOW = SkillDefinition(
+    name="security_cloudguard_remediation_workflow",
+    description="Remediate Cloud Guard problems (requires explicit confirmation)",
+    steps=[
+        SkillStep(
+            name="remediate_problem",
+            description="Apply remediation to a Cloud Guard problem",
+            required_tools=["oci_security_cloudguard_remediate_problem"],
+            timeout_seconds=60,
+        ),
+    ],
+    required_tools=["oci_security_cloudguard_remediate_problem"],
+    tags=["security", "cloudguard", "remediation"],
+    estimated_duration_seconds=60,
+)
+
+
+SECURITY_VULNERABILITY_WORKFLOW = SkillDefinition(
+    name="security_vulnerability_workflow",
+    description="Review host and container vulnerability scans",
+    steps=[
+        SkillStep(
+            name="list_host_scans",
+            description="List host vulnerability scans",
+            required_tools=["oci_security_vss_list_host_scans"],
+            timeout_seconds=30,
+        ),
+        SkillStep(
+            name="get_host_scan",
+            description="Get host scan details",
+            required_tools=["oci_security_vss_get_host_scan"],
+            timeout_seconds=30,
+        ),
+        SkillStep(
+            name="list_container_scans",
+            description="List container vulnerability scans",
+            required_tools=["oci_security_vss_list_container_scans"],
+            timeout_seconds=30,
+        ),
+        SkillStep(
+            name="list_vulnerabilities",
+            description="List detected vulnerabilities",
+            required_tools=["oci_security_vss_list_vulnerabilities"],
+            timeout_seconds=30,
+        ),
+        SkillStep(
+            name="vulnerability_summary",
+            description="Generate vulnerability overview using built-in skill",
+            required_tools=["oci_security_skill_vulnerability_overview"],
+            timeout_seconds=60,
+        ),
+    ],
+    required_tools=[
+        "oci_security_vss_list_host_scans",
+        "oci_security_vss_get_host_scan",
+        "oci_security_vss_list_container_scans",
+        "oci_security_vss_list_vulnerabilities",
+        "oci_security_skill_vulnerability_overview",
+    ],
+    tags=["security", "vss", "vulnerability"],
+    estimated_duration_seconds=150,
+)
+
+
+SECURITY_ZONE_COMPLIANCE_WORKFLOW = SkillDefinition(
+    name="security_zone_compliance_workflow",
+    description="Evaluate Security Zones compliance and policies",
+    steps=[
+        SkillStep(
+            name="list_security_zones",
+            description="List Security Zones",
+            required_tools=["oci_security_zones_list_zones"],
+            timeout_seconds=30,
+        ),
+        SkillStep(
+            name="get_security_zone",
+            description="Get Security Zone details",
+            required_tools=["oci_security_zones_get_zone"],
+            timeout_seconds=30,
+        ),
+        SkillStep(
+            name="list_zone_policies",
+            description="List Security Zone policies",
+            required_tools=["oci_security_zones_list_policies"],
+            timeout_seconds=30,
+        ),
+    ],
+    required_tools=[
+        "oci_security_zones_list_zones",
+        "oci_security_zones_get_zone",
+        "oci_security_zones_list_policies",
+    ],
+    tags=["security", "zones", "compliance"],
+    estimated_duration_seconds=120,
+)
+
+
+SECURITY_BASTION_AUDIT_WORKFLOW = SkillDefinition(
+    name="security_bastion_audit_workflow",
+    description="Audit bastion hosts and active sessions",
+    steps=[
+        SkillStep(
+            name="list_bastions",
+            description="List bastion resources",
+            required_tools=["oci_security_bastion_list"],
+            timeout_seconds=30,
+        ),
+        SkillStep(
+            name="get_bastion_details",
+            description="Get bastion details",
+            required_tools=["oci_security_bastion_get"],
+            timeout_seconds=30,
+        ),
+        SkillStep(
+            name="list_bastion_sessions",
+            description="List active bastion sessions",
+            required_tools=["oci_security_bastion_list_sessions"],
+            timeout_seconds=30,
+        ),
+    ],
+    required_tools=[
+        "oci_security_bastion_list",
+        "oci_security_bastion_get",
+        "oci_security_bastion_list_sessions",
+    ],
+    tags=["security", "bastion", "access"],
+    estimated_duration_seconds=120,
+)
+
+
+SECURITY_BASTION_SESSION_CLEANUP_WORKFLOW = SkillDefinition(
+    name="security_bastion_session_cleanup_workflow",
+    description="Terminate bastion sessions (requires explicit confirmation)",
+    steps=[
+        SkillStep(
+            name="terminate_session",
+            description="Terminate a bastion session",
+            required_tools=["oci_security_bastion_terminate_session"],
+            timeout_seconds=60,
+        ),
+    ],
+    required_tools=["oci_security_bastion_terminate_session"],
+    tags=["security", "bastion", "remediation"],
+    estimated_duration_seconds=60,
+)
+
+
+SECURITY_DATASAFE_ASSESSMENT_WORKFLOW = SkillDefinition(
+    name="security_datasafe_assessment_workflow",
+    description="Review Data Safe targets, assessments, and findings",
+    steps=[
+        SkillStep(
+            name="list_datasafe_targets",
+            description="List Data Safe target databases",
+            required_tools=["oci_security_datasafe_list_targets"],
+            timeout_seconds=30,
+        ),
+        SkillStep(
+            name="list_datasafe_assessments",
+            description="List Data Safe assessments",
+            required_tools=["oci_security_datasafe_list_assessments"],
+            timeout_seconds=30,
+        ),
+        SkillStep(
+            name="get_datasafe_assessment",
+            description="Get Data Safe assessment details",
+            required_tools=["oci_security_datasafe_get_assessment"],
+            timeout_seconds=30,
+        ),
+        SkillStep(
+            name="list_datasafe_findings",
+            description="List Data Safe findings",
+            required_tools=["oci_security_datasafe_list_findings"],
+            timeout_seconds=30,
+        ),
+    ],
+    required_tools=[
+        "oci_security_datasafe_list_targets",
+        "oci_security_datasafe_list_assessments",
+        "oci_security_datasafe_get_assessment",
+        "oci_security_datasafe_list_findings",
+    ],
+    tags=["security", "datasafe", "database"],
+    estimated_duration_seconds=150,
+)
+
+
+SECURITY_WAF_POLICY_WORKFLOW = SkillDefinition(
+    name="security_waf_policy_workflow",
+    description="Review WAF firewalls and policies",
+    steps=[
+        SkillStep(
+            name="list_waf_firewalls",
+            description="List WAF firewalls",
+            required_tools=["oci_security_waf_list_firewalls"],
+            timeout_seconds=30,
+        ),
+        SkillStep(
+            name="get_waf_firewall",
+            description="Get WAF firewall details",
+            required_tools=["oci_security_waf_get_firewall"],
+            timeout_seconds=30,
+        ),
+        SkillStep(
+            name="list_waf_policies",
+            description="List WAF policies",
+            required_tools=["oci_security_waf_list_policies"],
+            timeout_seconds=30,
+        ),
+        SkillStep(
+            name="get_waf_policy",
+            description="Get WAF policy details",
+            required_tools=["oci_security_waf_get_policy"],
+            timeout_seconds=30,
+        ),
+    ],
+    required_tools=[
+        "oci_security_waf_list_firewalls",
+        "oci_security_waf_get_firewall",
+        "oci_security_waf_list_policies",
+        "oci_security_waf_get_policy",
+    ],
+    tags=["security", "waf", "policy"],
+    estimated_duration_seconds=150,
+)
+
+
+SECURITY_AUDIT_ACTIVITY_WORKFLOW = SkillDefinition(
+    name="security_audit_activity_workflow",
+    description="Review audit events and configuration",
+    steps=[
+        SkillStep(
+            name="list_audit_events",
+            description="List audit events",
+            required_tools=["oci_security_audit_list_events"],
+            timeout_seconds=30,
+        ),
+        SkillStep(
+            name="get_audit_configuration",
+            description="Get audit configuration",
+            required_tools=["oci_security_audit_get_configuration"],
+            timeout_seconds=30,
+        ),
+        SkillStep(
+            name="audit_digest",
+            description="Generate audit activity digest",
+            required_tools=["oci_security_skill_audit_digest"],
+            timeout_seconds=60,
+        ),
+    ],
+    required_tools=[
+        "oci_security_audit_list_events",
+        "oci_security_audit_get_configuration",
+        "oci_security_skill_audit_digest",
+    ],
+    tags=["security", "audit", "compliance"],
+    estimated_duration_seconds=120,
+)
+
+
+SECURITY_ACCESS_GOVERNANCE_WORKFLOW = SkillDefinition(
+    name="security_access_governance_workflow",
+    description="Review access governance instances",
+    steps=[
+        SkillStep(
+            name="list_access_governance_instances",
+            description="List access governance instances",
+            required_tools=["oci_security_accessgov_list_instances"],
+            timeout_seconds=30,
+        ),
+        SkillStep(
+            name="get_access_governance_instance",
+            description="Get access governance instance details",
+            required_tools=["oci_security_accessgov_get_instance"],
+            timeout_seconds=30,
+        ),
+    ],
+    required_tools=[
+        "oci_security_accessgov_list_instances",
+        "oci_security_accessgov_get_instance",
+    ],
+    tags=["security", "access-governance", "identity"],
+    estimated_duration_seconds=90,
+)
+
+
+SECURITY_KMS_INVENTORY_WORKFLOW = SkillDefinition(
+    name="security_kms_inventory_workflow",
+    description="Inventory KMS vaults and keys",
+    steps=[
+        SkillStep(
+            name="list_kms_vaults",
+            description="List KMS vaults",
+            required_tools=["oci_security_kms_list_vaults"],
+            timeout_seconds=30,
+        ),
+        SkillStep(
+            name="get_kms_vault",
+            description="Get KMS vault details",
+            required_tools=["oci_security_kms_get_vault"],
+            timeout_seconds=30,
+        ),
+        SkillStep(
+            name="list_kms_keys",
+            description="List KMS keys",
+            required_tools=["oci_security_kms_list_keys"],
+            timeout_seconds=30,
+        ),
+        SkillStep(
+            name="get_kms_key",
+            description="Get KMS key details",
+            required_tools=["oci_security_kms_get_key"],
+            timeout_seconds=30,
+        ),
+    ],
+    required_tools=[
+        "oci_security_kms_list_vaults",
+        "oci_security_kms_get_vault",
+        "oci_security_kms_list_keys",
+        "oci_security_kms_get_key",
+    ],
+    tags=["security", "kms", "encryption"],
+    estimated_duration_seconds=120,
+)
+
+
+SECURITY_IAM_REVIEW_WORKFLOW = SkillDefinition(
+    name="security_iam_review_workflow",
+    description="Review IAM users, groups, and policies",
+    steps=[
+        SkillStep(
+            name="list_users",
+            description="List IAM users",
+            required_tools=["oci_security_list_users"],
+            timeout_seconds=30,
+        ),
+        SkillStep(
+            name="list_groups",
+            description="List IAM groups",
+            required_tools=["oci_security_list_groups"],
+            timeout_seconds=30,
+        ),
+        SkillStep(
+            name="list_policies",
+            description="List IAM policies",
+            required_tools=["oci_security_list_policies"],
+            timeout_seconds=30,
+        ),
+    ],
+    required_tools=[
+        "oci_security_list_users",
+        "oci_security_list_groups",
+        "oci_security_list_policies",
+    ],
+    tags=["security", "iam", "policy"],
+    estimated_duration_seconds=120,
+)
 
 # =============================================================================
 # Infrastructure Agent Workflows (oci-infrastructure MCP server)
@@ -1009,3 +1440,16 @@ def register_default_skills() -> None:
     registry.register(RCA_WORKFLOW)
     registry.register(COST_ANALYSIS_WORKFLOW)
     registry.register(SECURITY_ASSESSMENT_WORKFLOW)
+    registry.register(SECURITY_POSTURE_WORKFLOW)
+    registry.register(SECURITY_CLOUDGUARD_INVESTIGATION_WORKFLOW)
+    registry.register(SECURITY_CLOUDGUARD_REMEDIATION_WORKFLOW)
+    registry.register(SECURITY_VULNERABILITY_WORKFLOW)
+    registry.register(SECURITY_ZONE_COMPLIANCE_WORKFLOW)
+    registry.register(SECURITY_BASTION_AUDIT_WORKFLOW)
+    registry.register(SECURITY_BASTION_SESSION_CLEANUP_WORKFLOW)
+    registry.register(SECURITY_DATASAFE_ASSESSMENT_WORKFLOW)
+    registry.register(SECURITY_WAF_POLICY_WORKFLOW)
+    registry.register(SECURITY_AUDIT_ACTIVITY_WORKFLOW)
+    registry.register(SECURITY_ACCESS_GOVERNANCE_WORKFLOW)
+    registry.register(SECURITY_KMS_INVENTORY_WORKFLOW)
+    registry.register(SECURITY_IAM_REVIEW_WORKFLOW)

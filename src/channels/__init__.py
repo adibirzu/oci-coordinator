@@ -5,8 +5,11 @@ for receiving user requests and sending agent responses.
 """
 
 from src.channels.slack import SlackHandler, create_slack_app
+from src.channels.streamlit import format_streamlit_message, render_streamlit_response
 
 __all__ = [
     "SlackHandler",
     "create_slack_app",
+    "format_streamlit_message",
+    "render_streamlit_response",
 ]

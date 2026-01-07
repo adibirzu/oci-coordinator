@@ -29,7 +29,7 @@ from dotenv import load_dotenv
 
 env_file = Path(__file__).parent.parent / ".env.local"
 if env_file.exists():
-    load_dotenv(env_file)
+    load_dotenv(env_file, override=True)
 
 import structlog
 
@@ -44,12 +44,12 @@ from src.mcp.registry import (
 )
 from src.observability import init_observability, shutdown_observability
 from src.resilience import (
-    HealthMonitor,
-    HealthCheck,
-    HealthCheckResult,
-    HealthStatus,
     Bulkhead,
     DeadLetterQueue,
+    HealthCheck,
+    HealthCheckResult,
+    HealthMonitor,
+    HealthStatus,
 )
 
 # Global references for cleanup
@@ -58,6 +58,7 @@ _catalog: ToolCatalog | None = None
 _health_monitor: HealthMonitor | None = None
 _bulkhead: Bulkhead | None = None
 _deadletter_queue: DeadLetterQueue | None = None
+_coordinator = None  # LangGraph coordinator (pre-warmed at startup)
 
 # Initialization lock to prevent race conditions in concurrent startup
 _init_lock: asyncio.Lock | None = None
@@ -165,7 +166,17 @@ async def initialize_coordinator() -> None:
         try:
             from src.llm.oca_callback_server import start_callback_server
 
-            await start_callback_server()
+            # Callback to notify Slack users when auth succeeds
+            def on_token_received(token: dict) -> None:
+                """Notify Slack users when OCA authentication succeeds."""
+                try:
+                    from src.channels.slack import notify_auth_success
+                    notify_auth_success()
+                    logger.info("Sent auth success notification to Slack")
+                except Exception as e:
+                    logger.warning("Failed to send auth notification", error=str(e))
+
+            await start_callback_server(on_token_received=on_token_received)
             logger.info("OCA callback server started (OAuth redirects enabled)")
         except Exception as e:
             logger.warning("OCA callback server failed to start", error=str(e))
@@ -228,6 +239,45 @@ async def initialize_coordinator() -> None:
                     total=len(registry.list_servers()),
                     tools=len(catalog.list_tools()),
                 )
+
+                # Optional validation (disable with COORDINATOR_VALIDATE_* env vars)
+                validate_catalog = os.getenv(
+                    "COORDINATOR_VALIDATE_CATALOG", "true"
+                ).lower() in ("true", "1", "yes", "on")
+                validate_manifest = os.getenv(
+                    "COORDINATOR_VALIDATE_MANIFEST", "true"
+                ).lower() in ("true", "1", "yes", "on")
+
+                if validate_catalog:
+                    try:
+                        from src.mcp.validation import validate_tool_catalog
+
+                        result = await validate_tool_catalog(
+                            catalog, registry, include_health_check=False
+                        )
+                        logger.info(
+                            "Tool catalog validation complete",
+                            valid=result.valid,
+                            errors=result.by_severity.get("error", 0),
+                            warnings=result.by_severity.get("warning", 0),
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            "Tool catalog validation failed",
+                            error=str(e),
+                        )
+
+                if validate_manifest:
+                    try:
+                        from src.mcp.validation import validate_server_manifests
+
+                        manifest_result = await validate_server_manifests(registry)
+                        logger.info("Manifest validation complete", **manifest_result)
+                    except Exception as e:
+                        logger.warning(
+                            "Manifest validation failed",
+                            error=str(e),
+                        )
             except Exception as e:
                 logger.warning("MCP initialization failed", error=str(e))
 
@@ -312,10 +362,16 @@ async def initialize_coordinator() -> None:
             logger.warning("Resilience initialization failed", error=str(e))
 
         # Initialize agent catalog with auto-discovery
-        agent_catalog = AgentCatalog.get_instance()
+        agent_catalog = AgentCatalog.get_instance(tool_catalog=_catalog)
         agent_catalog.auto_discover()
+        if _catalog:
+            agent_catalog.sync_mcp_tools(_catalog)
         agents = agent_catalog.list_all()
         logger.info("Agents discovered", count=len(agents))
+
+        # Pre-warm LangGraph coordinator to eliminate first-request latency
+        # This creates and compiles the graph so the first Slack message is fast
+        await prewarm_coordinator()
 
         # Initialize ShowOCI cache if enabled
         if os.getenv("SHOWOCI_CACHE_ENABLED", "false").lower() == "true":
@@ -365,6 +421,90 @@ async def _load_showoci_cache(cache_loader) -> None:
     except Exception as e:
         logger = structlog.get_logger(__name__)
         logger.error("ShowOCI cache load failed", error=str(e))
+
+
+async def prewarm_coordinator() -> None:
+    """Pre-warm the LangGraph coordinator to eliminate first-request latency.
+
+    Creates and initializes the LangGraph coordinator at startup so the first
+    Slack message doesn't incur initialization overhead (5-15s saved).
+
+    The coordinator is stored in the global _coordinator variable and can be
+    accessed via get_coordinator() by Slack handlers and other consumers.
+    """
+    global _coordinator
+
+    import time
+
+    start_time = time.time()
+    log = structlog.get_logger(__name__)
+    log.info("Pre-warming LangGraph coordinator...")
+
+    try:
+        from src.agents.catalog import AgentCatalog
+        from src.agents.coordinator.graph import LangGraphCoordinator
+        from src.agents.coordinator.workflows import get_workflow_registry
+        from src.llm import get_llm
+        from src.mcp.catalog import ToolCatalog
+        from src.memory.manager import SharedMemoryManager
+
+        # Get LLM (may involve API key validation)
+        llm = get_llm()
+
+        # Use existing singleton catalogs initialized by MCPConnectionManager
+        tool_catalog = ToolCatalog.get_instance()
+        agent_catalog = AgentCatalog.get_instance()
+
+        if not tool_catalog:
+            log.warning("Tool catalog not available for pre-warm, skipping")
+            return
+
+        # Initialize memory manager
+        redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
+        memory = SharedMemoryManager(redis_url=redis_url)
+
+        # Load workflow registry
+        workflow_registry = get_workflow_registry()
+
+        # Create and initialize coordinator
+        _coordinator = LangGraphCoordinator(
+            llm=llm,
+            tool_catalog=tool_catalog,
+            agent_catalog=agent_catalog,
+            memory=memory,
+            workflow_registry=workflow_registry,
+            max_iterations=10,
+        )
+
+        # Initialize the graph - this is the expensive operation we're pre-warming
+        await _coordinator.initialize()
+
+        duration_ms = int((time.time() - start_time) * 1000)
+        log.info(
+            "LangGraph coordinator pre-warmed",
+            duration_ms=duration_ms,
+            tool_count=len(tool_catalog.list_tools()) if tool_catalog else 0,
+            workflow_count=len(workflow_registry),
+            agent_count=len(agent_catalog.list_all()) if agent_catalog else 0,
+        )
+
+    except Exception as e:
+        log.warning("Coordinator pre-warm failed (will lazy-init on first request)", error=str(e))
+
+
+def get_coordinator():
+    """Get the pre-warmed LangGraph coordinator.
+
+    Returns:
+        LangGraphCoordinator if pre-warmed, None otherwise.
+
+    Usage:
+        from src.main import get_coordinator
+        coordinator = get_coordinator()
+        if coordinator:
+            result = await coordinator.invoke(query, thread_id, user_id)
+    """
+    return _coordinator
 
 
 def run_slack_mode_sync() -> None:
@@ -483,7 +623,8 @@ def main():
         await initialize_coordinator()
 
         if args.mode == "slack":
-            await run_slack_mode(blocking=True)
+            # Use async Socket Mode even in Slack-only mode to keep a single event loop.
+            await run_slack_mode(blocking=False)
         elif args.mode == "api":
             await run_api_mode(args.port)
         elif args.mode == "both":

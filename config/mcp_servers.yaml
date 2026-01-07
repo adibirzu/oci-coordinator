@@ -31,7 +31,7 @@ servers:
   # This is the primary server - no external dependencies
   oci-unified:
     transport: stdio
-    command: python
+    command: /Users/abirzu/dev/oci-coordinator/.venv/bin/python
     args:
       - "-m"
       - "src.mcp.server.main"
@@ -39,6 +39,7 @@ servers:
     env:
       OCI_CONFIG_FILE: "~/.oci/config"
       OCI_CLI_PROFILE: "DEFAULT"
+      MCP_OTEL_SDK_DISABLED: "true"  # Disable OTEL to speed up init
     enabled: true
     domains:
       - identity
@@ -47,14 +48,16 @@ servers:
       - cost
       - security
       - observability
-    description: "Unified OCI MCP Server - compartments, compute, network, cost, security"
-    timeout_seconds: 60
+      - database
+      - dbmgmt
+    description: "Unified OCI MCP Server - compartments, compute, network, cost, security, database"
+    timeout_seconds: 120  # Increased for slow initialization
 
   # Database Observatory - Primary database operations server
   # Replace path with your local installation
   database-observatory:
     transport: stdio
-    command: python
+    command: /Users/abirzu/dev/MCP/mcp-oci-database-observatory/.venv/bin/python
     args:
       - "-m"
       - "src.mcp_server"
@@ -63,6 +66,7 @@ servers:
       OCI_CONFIG_FILE: "~/.oci/config"
       OCI_CLI_PROFILE: "DEFAULT"
       SQLCL_PATH: "/Applications/sqlcl/bin/sql"
+      MCP_OTEL_SDK_DISABLED: "true"  # Disable OTEL to speed up init
     enabled: true
     domains:
       - database
@@ -70,7 +74,7 @@ servers:
       - logan
       - observability
     description: "Oracle Database Observatory with SQLcl, OPSI, and Logan Analytics"
-    timeout_seconds: 60
+    timeout_seconds: 120  # Increased for slow initialization
 
   # OCI Infrastructure MCP Server - External mcp-oci (fallback)
   # Full OCI management capabilities via mcp-oci
@@ -87,6 +91,7 @@ servers:
       OCI_CONFIG_FILE: "~/.oci/config"
       OCI_CLI_PROFILE: "DEFAULT"
       ALLOW_MUTATIONS: "false"  # Set to "true" to enable write operations
+      MCP_SERVER_ID: "oci-infrastructure"
     enabled: true
     domains:
       - compute
@@ -96,6 +101,33 @@ servers:
       - database
       - observability
     description: "OCI Infrastructure MCP server - compute, network, security, cost management"
+    timeout_seconds: 60
+
+  # OCI Security MCP Server - Comprehensive security services
+  oci-mcp-security:
+    transport: stdio
+    command: python
+    args:
+      - "-m"
+      - "oci_mcp_security.server"
+    working_dir: /Users/abirzu/dev/MCP/oci-mcp-security
+    env:
+      OCI_CONFIG_FILE: "~/.oci/config"
+      OCI_CLI_PROFILE: "DEFAULT"
+      PYTHONPATH: "/Users/abirzu/dev/MCP/oci-mcp-security/src"
+    enabled: false
+    domains:
+      - security
+      - cloudguard
+      - vss
+      - bastion
+      - audit
+      - kms
+      - waf
+      - datasafe
+      - accessgov
+      - zones
+    description: "OCI Security MCP server - Cloud Guard, VSS, Bastion, Audit, KMS, WAF, Data Safe"
     timeout_seconds: 60
 
   # OPSI MCP Server - Operations Insights (HTTP)
@@ -122,7 +154,7 @@ servers:
   # FinOps AI MCP Server - Multicloud cost management
   finopsai:
     transport: stdio
-    command: python
+    command: /Users/abirzu/dev/MCP/finopsai-mcp/.venv/bin/python
     args:
       - "-m"
       - "finopsai_mcp.server"
@@ -157,8 +189,8 @@ servers:
 # Agents can request servers by group name
 groups:
   database:
-    - database-observatory
-    - oci-unified  # Fallback for database operations
+    - oci-unified  # Primary for dbmgmt operations (fleet health, etc.)
+    - database-observatory  # External fallback for SQLcl, OPSI, Logan
   observability:
     - database-observatory
     - oci-unified
@@ -168,7 +200,8 @@ groups:
   identity:
     - oci-unified  # Compartments, tenancy, regions
   security:
-    - oci-unified  # IAM, Cloud Guard, policies
+    - oci-mcp-security  # Cloud Guard, VSS, Bastion, Audit, KMS
+    - oci-unified  # IAM, basic security
     - oci-infrastructure
   cost:
     - finopsai  # Primary for multicloud cost/FinOps
@@ -180,6 +213,7 @@ groups:
     - oci-unified
     - database-observatory
     - oci-infrastructure
+    - oci-mcp-security
     - finopsai
 
 # Default Settings
@@ -189,8 +223,30 @@ defaults:
   backoff_multiplier: 2
   # Tool-specific timeouts (in seconds)
   tool_timeouts:
+    # Infrastructure
     oci_compute_list_instances: 180  # Large compartments can have many instances
     oci_network_list_vcns: 120
+    # Cost
     oci_cost_get_summary: 180
+    # Observability
     oci_observability_query_logs: 300  # Log queries can be slow
-    oci_security_list_problems: 180
+    # Security
+    oci_security_cloudguard_list_problems: 180
+    oci_security_list_cloud_guard_problems: 180
+    # DB Management
+    oci_dbmgmt_get_fleet_health: 120
+    oci_dbmgmt_list_databases: 180  # Can scan many compartments
+    oci_dbmgmt_get_awr_report: 180  # AWR reports take time to generate
+    # Operations Insights (OPSI) - these APIs are slow
+    # Note: OPSI APIs can be very slow (>60s) due to backend processing
+    oci_opsi_list_database_insights: 180
+    oci_opsi_get_database_insight: 120
+    oci_opsi_get_addm_findings: 240  # Often slowest - aggregates across all DBs
+    oci_opsi_get_addm_recommendations: 240
+    oci_opsi_summarize_resource_stats: 180
+    oci_opsi_summarize_sql_insights: 180
+    oci_opsi_summarize_sql_statistics: 240  # Can be slow with many DBs
+    oci_opsi_search_databases: 120
+    oci_opsi_get_capacity_trend: 180
+    oci_opsi_get_capacity_forecast: 180
+    oci_opsi_sql_insights: 180

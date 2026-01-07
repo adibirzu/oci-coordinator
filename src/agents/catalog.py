@@ -14,6 +14,7 @@ Enhanced Features:
 from __future__ import annotations
 
 import importlib
+import json
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -61,6 +62,11 @@ DOMAIN_CAPABILITIES = {
         "iam-analysis",
         "policy-analysis",
         "security-audit",
+    ],
+    "cloudguard": [
+        "cloud-guard-analysis",
+        "security-posture",
+        "compliance-monitoring",
     ],
     "finops": [
         "cost-analysis",
@@ -153,176 +159,31 @@ MCP_SERVER_DOMAINS = {
     "logan": ["observability"],
 }
 
-# Comprehensive MCP tool registry by domain
-# This maps domains to the actual MCP tools available
-MCP_DOMAIN_TOOLS = {
-    "discovery": [
-        "oci_ping",
-        "oci_list_domains",
-        "oci_search_tools",
-        "oci_get_cache_stats",
-        "search_capabilities",
-    ],
-    "infrastructure": [
-        # Compute
-        "oci_compute_list_instances",
-        "oci_compute_get_instance",
-        "oci_compute_start_instance",
-        "oci_compute_stop_instance",
-        "oci_compute_restart_instance",
-        # Network
-        "oci_network_list_vcns",
-        "oci_network_get_vcn",
-        "oci_network_list_subnets",
-        "oci_network_list_security_lists",
-        "oci_network_analyze_security",
-        # Identity
-        "oci_list_compartments",
-        "oci_search_compartments",
-        "oci_get_compartment",
-        "oci_get_tenancy",
-        "oci_list_regions",
-    ],
-    "database": [
-        "oci_database_list_autonomous",
-        "oci_database_get_autonomous",
-        "oci_database_start_autonomous",
-        "oci_database_stop_autonomous",
-        "oci_database_list_db_systems",
-        "oci_database_get_db_system",
-        "oci_database_list_mysql",
-        # Database Observatory - SQLcl
-        "oci_database_execute_sql",
-        "oci_database_get_schema",
-        "oci_database_list_connections",
-        "oci_database_get_status",
-        "oci_database_disconnect",
-        "oci_database_check_network",
-        "oci_database_get_ip",
-        "oci_database_ping",
-        "oci_database_health_check",
-        "oci_database_cache_status",
-        "oci_database_clear_cache",
-        # Database Observatory - OPSI
-        "oci_opsi_list_insights",
-        "oci_opsi_search_databases",
-        "oci_opsi_get_fleet_summary",
-        "oci_opsi_get_database",
-        "oci_opsi_get_statistics",
-        "oci_opsi_build_cache",
-        "oci_opsi_refresh_cache",
-        "oci_opsi_analyze_cpu",
-        "oci_opsi_analyze_memory",
-        "oci_opsi_analyze_io",
-        "oci_opsi_get_performance_summary",
-        "oci_opsi_find_cost_opportunities",
-        "oci_opsi_get_savings_summary",
-        "oci_opsi_list_skills",
-        "oci_opsi_get_skill_recommendations",
-        # Database Observatory - Tenancy
-        "oci_tenancy_list_profiles",
-        "oci_tenancy_get_profile",
-        "oci_tenancy_set_profile",
-        "oci_tenancy_list_compartments",
-    ],
-    "security": [
-        # mcp-oci IAM tools
-        "oci_security_list_users",
-        "oci_security_get_user",
-        "oci_security_list_groups",
-        "oci_security_list_policies",
-        "oci_security_list_cloud_guard_problems",
-        "oci_security_audit",
-        # oci-mcp-security Cloud Guard
-        "oci_security_cloudguard_list_problems",
-        "oci_security_cloudguard_get_problem",
-        "oci_security_cloudguard_remediate_problem",
-        "oci_security_cloudguard_list_detectors",
-        "oci_security_cloudguard_list_responders",
-        "oci_security_cloudguard_get_security_score",
-        "oci_security_cloudguard_list_recommendations",
-        # oci-mcp-security VSS
-        "oci_security_vss_list_host_scans",
-        "oci_security_vss_get_host_scan",
-        "oci_security_vss_list_container_scans",
-        "oci_security_vss_list_vulnerabilities",
-        # oci-mcp-security Security Zones
-        "oci_security_zones_list",
-        "oci_security_zones_get",
-        "oci_security_zones_list_policies",
-        # oci-mcp-security Bastion
-        "oci_security_bastion_list",
-        "oci_security_bastion_get",
-        "oci_security_bastion_list_sessions",
-        "oci_security_bastion_terminate_session",
-        # oci-mcp-security Data Safe
-        "oci_security_datasafe_list_targets",
-        "oci_security_datasafe_list_assessments",
-        "oci_security_datasafe_get_assessment",
-        "oci_security_datasafe_list_findings",
-        # oci-mcp-security WAF
-        "oci_security_waf_list_firewalls",
-        "oci_security_waf_get_firewall",
-        "oci_security_waf_list_policies",
-        "oci_security_waf_get_policy",
-        # oci-mcp-security Audit
-        "oci_security_audit_list_events",
-        "oci_security_audit_get_configuration",
-        # oci-mcp-security Access Governance
-        "oci_security_accessgov_list_instances",
-        "oci_security_accessgov_get_instance",
-        # oci-mcp-security KMS
-        "oci_security_kms_list_vaults",
-        "oci_security_kms_get_vault",
-        "oci_security_kms_list_keys",
-        "oci_security_kms_get_key",
-        # oci-mcp-security Skills
-        "oci_security_skill_posture_summary",
-        "oci_security_skill_vulnerability_overview",
-        "oci_security_skill_audit_digest",
-    ],
-    "finops": [
-        "oci_cost_get_summary",
-        "oci_cost_by_service",
-        "oci_cost_by_compartment",
-        "oci_cost_monthly_trend",
-        "oci_cost_detect_anomalies",
-        "oci_cost_service_drilldown",
-        "oci_cost_by_tag",
-        "oci_cost_object_storage",
-        "oci_cost_unit_cost",
-    ],
-    "observability": [
-        "oci_observability_get_instance_metrics",
-        "oci_observability_execute_log_query",
-        "oci_observability_list_alarms",
-        "oci_observability_get_alarm_history",
-        "oci_observability_list_log_sources",
-        "oci_observability_overview",
-        # Database Observatory - Logan
-        "oci_logan_execute_query",
-        "oci_logan_list_sources",
-        "oci_logan_list_entities",
-        "oci_logan_list_parsers",
-        "oci_logan_list_labels",
-        "oci_logan_list_groups",
-        "oci_logan_run_security_query",
-        "oci_logan_detect_anomalies",
-        "oci_logan_get_summary",
-        "oci_logan_suggest_query",
-        "oci_logan_list_active_sources",
-        "oci_logan_get_entity_logs",
-        "oci_logan_list_skills",
-    ],
-    "skills": [
-        "oci_skill_troubleshoot_instance",
-    ],
-    "feedback": [
-        "set_feedback",
-        "append_feedback",
-        "get_feedback",
-    ],
-}
+_CATALOG_CONFIG_DIR = Path(__file__).resolve().parents[2] / "config" / "catalog"
+
+
+def _load_server_domains_config() -> None:
+    """Load MCP server domain mappings from config/catalog if present."""
+    global MCP_SERVER_DOMAINS
+    config_path = _CATALOG_CONFIG_DIR / "server_domains.json"
+    if not config_path.exists():
+        return
+    try:
+        data = json.loads(config_path.read_text())
+        if isinstance(data, dict) and data:
+            MCP_SERVER_DOMAINS = data
+    except Exception as exc:
+        logger.warning(
+            "Failed to load server domains config",
+            path=str(config_path),
+            error=str(exc),
+        )
+
+
+_load_server_domains_config()
+
+# Tool lists are derived dynamically from ToolCatalog and manifests.
+MCP_DOMAIN_TOOLS: dict[str, list[str]] = {}
 
 # Tool aliases for backward compatibility
 TOOL_ALIASES = {
@@ -368,6 +229,9 @@ DOMAIN_PRIORITY = {
     "security": {
         "security-threat-agent": 100,
         "log-analytics-agent": 40,
+    },
+    "cloudguard": {
+        "security-threat-agent": 100,
     },
     "finops": {
         "finops-agent": 100,
@@ -464,7 +328,7 @@ class AgentCatalog:
     _instance: AgentCatalog | None = None
 
     @classmethod
-    def get_instance(cls) -> AgentCatalog:
+    def get_instance(cls, tool_catalog: ToolCatalog | None = None) -> AgentCatalog:
         """
         Get singleton instance of AgentCatalog.
 
@@ -472,7 +336,9 @@ class AgentCatalog:
             The shared AgentCatalog instance
         """
         if cls._instance is None:
-            cls._instance = cls()
+            cls._instance = cls(tool_catalog=tool_catalog)
+        elif tool_catalog is not None:
+            cls._instance.set_tool_catalog(tool_catalog)
         return cls._instance
 
     @classmethod
@@ -480,13 +346,28 @@ class AgentCatalog:
         """Reset singleton instance (useful for testing)."""
         cls._instance = None
 
-    def __init__(self) -> None:
+    def __init__(self, tool_catalog: ToolCatalog | None = None) -> None:
         """Initialize empty catalog."""
         self._agents: dict[str, AgentDefinition] = {}
         self._agent_classes: dict[str, type[BaseAgent]] = {}
         self._agent_metrics: dict[str, AgentMetrics] = {}
         self._domain_index: dict[str, set[str]] = {}  # domain -> set of agent roles
+        self._tool_catalog = tool_catalog
         self._logger = logger.bind(component="AgentCatalog")
+
+    def set_tool_catalog(self, tool_catalog: ToolCatalog | None) -> None:
+        """Attach a tool catalog for dynamic tool resolution."""
+        self._tool_catalog = tool_catalog
+
+    def _resolve_tool_catalog(self) -> ToolCatalog | None:
+        if self._tool_catalog:
+            return self._tool_catalog
+        try:
+            from src.mcp.catalog import ToolCatalog
+        except Exception:
+            return None
+        self._tool_catalog = ToolCatalog.get_instance()
+        return self._tool_catalog
 
     def auto_discover(self, agents_path: str = "src/agents") -> int:
         """
@@ -724,6 +605,7 @@ class AgentCatalog:
         memory_manager: Any = None,
         tool_catalog: Any = None,
         config: dict[str, Any] | None = None,
+        llm: Any = None,
     ) -> BaseAgent | None:
         """
         Create an instance of an agent by role.
@@ -733,6 +615,7 @@ class AgentCatalog:
             memory_manager: SharedMemoryManager instance
             tool_catalog: ToolCatalog instance
             config: Agent configuration
+            llm: LangChain LLM for agent reasoning and analysis
 
         Returns:
             Instantiated agent or None if not found
@@ -746,6 +629,7 @@ class AgentCatalog:
             memory_manager=memory_manager,
             tool_catalog=tool_catalog,
             config=config,
+            llm=llm,
         )
 
     def get_by_capability(self, capability: str) -> list[AgentDefinition]:
@@ -786,7 +670,10 @@ class AgentCatalog:
         Returns:
             List of agents using the tool
         """
-        return [agent for agent in self._agents.values() if tool_name in agent.mcp_tools]
+        domain = self.find_tool_domain(tool_name)
+        if not domain:
+            return []
+        return self.get_by_domain(domain)
 
     def list_all(self) -> list[AgentDefinition]:
         """
@@ -1222,7 +1109,10 @@ class AgentCatalog:
         Returns:
             List of MCP tool names for the domain
         """
-        return MCP_DOMAIN_TOOLS.get(domain, [])
+        tool_catalog = self._resolve_tool_catalog()
+        if not tool_catalog:
+            return []
+        return [tool.name for tool in tool_catalog.get_tools_for_domain(domain)]
 
     def get_all_tools(self) -> dict[str, list[str]]:
         """
@@ -1231,7 +1121,32 @@ class AgentCatalog:
         Returns:
             Dictionary of domain -> list of tool names
         """
-        return dict(MCP_DOMAIN_TOOLS)
+        tool_catalog = self._resolve_tool_catalog()
+        if not tool_catalog:
+            return {}
+        return tool_catalog.get_domain_summary()
+
+    def sync_mcp_tools(self, tool_catalog: ToolCatalog | None = None) -> int:
+        """Refresh agent tool lists from the tool catalog."""
+        tool_catalog = tool_catalog or self._resolve_tool_catalog()
+        if not tool_catalog:
+            return 0
+
+        updated = 0
+        for agent in self._agents.values():
+            domains = self._get_agent_domains(agent)
+            tool_names: set[str] = set()
+            for domain in domains:
+                for tool in tool_catalog.get_tools_for_domain(domain):
+                    tool_names.add(tool.name)
+            new_tools = sorted(tool_names)
+            if new_tools != agent.mcp_tools:
+                agent.mcp_tools = new_tools
+                updated += 1
+
+        if updated:
+            self._logger.info("Agent tools synchronized", updated=updated)
+        return updated
 
     def resolve_tool_alias(self, tool_name: str) -> str:
         """
@@ -1258,10 +1173,9 @@ class AgentCatalog:
         """
         # Resolve alias first
         canonical = self.resolve_tool_alias(tool_name)
-
-        for domain, tools in MCP_DOMAIN_TOOLS.items():
-            if canonical in tools:
-                return domain
+        tool_catalog = self._resolve_tool_catalog()
+        if tool_catalog:
+            return tool_catalog.get_tool_domain(canonical)
         return None
 
     def get_agent_for_tool(self, tool_name: str) -> AgentDefinition | None:
@@ -1321,7 +1235,10 @@ class AgentCatalog:
         }
 
 
-def initialize_agents(agents_path: str = "src/agents") -> AgentCatalog:
+def initialize_agents(
+    agents_path: str = "src/agents",
+    tool_catalog: ToolCatalog | None = None,
+) -> AgentCatalog:
     """
     Initialize agent catalog with auto-discovery.
 
@@ -1333,6 +1250,8 @@ def initialize_agents(agents_path: str = "src/agents") -> AgentCatalog:
     Returns:
         Initialized AgentCatalog
     """
-    catalog = AgentCatalog.get_instance()
+    catalog = AgentCatalog.get_instance(tool_catalog=tool_catalog)
     catalog.auto_discover(agents_path)
+    if tool_catalog:
+        catalog.sync_mcp_tools(tool_catalog)
     return catalog

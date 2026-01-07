@@ -1,7 +1,7 @@
 import logging
 import os
+from datetime import datetime
 
-import structlog
 from fastmcp import FastMCP
 from opentelemetry import trace
 from opentelemetry.sdk.resources import Resource
@@ -118,6 +118,25 @@ DOMAINS = {
         "description": "Autonomous Database and DB Systems management",
         "tools": ["oci_db_list_autonomous", "oci_db_get_metrics"],
     },
+    "dbmgmt": {
+        "description": "Database Management service - AWR reports, SQL performance, fleet health",
+        "tools": [
+            "oci_dbmgmt_list_databases", "oci_dbmgmt_search_databases", "oci_dbmgmt_get_database",
+            "oci_dbmgmt_get_awr_report", "oci_dbmgmt_get_metrics",
+            "oci_dbmgmt_get_top_sql", "oci_dbmgmt_get_wait_events",
+            "oci_dbmgmt_list_sql_plan_baselines", "oci_dbmgmt_get_fleet_health", "oci_dbmgmt_get_sql_report"
+        ],
+    },
+    "opsi": {
+        "description": "Operations Insights - database insights, SQL analytics, ADDM, capacity planning",
+        "tools": [
+            "oci_opsi_list_database_insights", "oci_opsi_get_database_insight",
+            "oci_opsi_summarize_resource_stats", "oci_opsi_summarize_sql_insights",
+            "oci_opsi_summarize_sql_statistics", "oci_opsi_get_addm_findings",
+            "oci_opsi_get_addm_recommendations", "oci_opsi_get_capacity_trend",
+            "oci_opsi_get_capacity_forecast", "oci_opsi_list_awr_hubs"
+        ],
+    },
     "network": {
         "description": "VCN, Subnet, and Security List management",
         "tools": ["oci_network_list_vcns", "oci_network_list_subnets", "oci_network_list_security_lists"],
@@ -137,6 +156,10 @@ DOMAINS = {
     "feedback": {
         "description": "Runtime feedback directives for prompt steering",
         "tools": ["set_feedback", "append_feedback", "get_feedback"],
+    },
+    "system": {
+        "description": "Health checks and low-risk server metadata",
+        "tools": ["oci_ping"],
     },
 }
 
@@ -180,6 +203,16 @@ async def search_capabilities(query: str, domain: str | None = None) -> str:
     return await _search_capabilities_logic(query, domain)
 
 
+@mcp.tool()
+async def oci_ping() -> dict:
+    """Lightweight health check for the unified MCP server."""
+    return {
+        "status": "ok",
+        "server": "oci-unified",
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+    }
+
+
 _feedback_manager = None
 
 
@@ -219,10 +252,12 @@ async def get_feedback(scope: str = "global") -> dict:
 from src.mcp.server.skills.troubleshoot import register_troubleshoot_skills
 from src.mcp.server.tools.compute import register_compute_tools
 from src.mcp.server.tools.cost import register_cost_tools
+from src.mcp.server.tools.database import register_database_tools
 from src.mcp.server.tools.discovery import register_discovery_tools
 from src.mcp.server.tools.identity import register_identity_tools
 from src.mcp.server.tools.network import register_network_tools
 from src.mcp.server.tools.observability import register_observability_tools
+from src.mcp.server.tools.opsi import register_opsi_tools
 from src.mcp.server.tools.security import register_security_tools
 
 # Register tools
@@ -232,6 +267,8 @@ register_network_tools(mcp)
 register_cost_tools(mcp)
 register_security_tools(mcp)
 register_observability_tools(mcp)
+register_database_tools(mcp)  # DB Management tools
+register_opsi_tools(mcp)  # Operations Insights tools
 register_discovery_tools(mcp)  # ShowOCI-style discovery tools
 
 # Register skills

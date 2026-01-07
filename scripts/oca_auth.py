@@ -27,7 +27,6 @@ import json
 import os
 import secrets
 import sys
-import threading
 import urllib.parse
 import webbrowser
 from pathlib import Path
@@ -100,7 +99,7 @@ def save_token(token: dict):
     print(f"[OCA Auth] Token saved to {TOKEN_CACHE_PATH}")
 
 
-def get_auth_url(verifier: str, challenge: str) -> str:
+def get_auth_url(verifier: str, challenge: str, state: str, nonce: str) -> str:
     """Generate OAuth authorization URL."""
     params = {
         "response_type": "code",
@@ -109,6 +108,8 @@ def get_auth_url(verifier: str, challenge: str) -> str:
         "scope": "openid offline_access",
         "code_challenge": challenge,
         "code_challenge_method": "S256",
+        "state": state,
+        "nonce": nonce,
     }
     return f"{AUTHZ_ENDPOINT}?{urllib.parse.urlencode(params)}"
 
@@ -197,14 +198,14 @@ class CallbackHandler(http.server.BaseHTTPRequestHandler):
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html")
                 self.end_headers()
-                self.wfile.write("""
+                self.wfile.write(b"""
                     <html>
                     <body style="font-family: system-ui; text-align: center; padding: 50px;">
                         <h1 style="color: #27ae60;">Authentication Successful!</h1>
                         <p>You can close this window and return to your terminal.</p>
                     </body>
                     </html>
-                """.encode())
+                """)
             else:
                 CallbackHandler.error = "Token exchange failed"
                 self.send_response(400)
@@ -225,15 +226,19 @@ def run_auth_flow():
     verifier, challenge = generate_pkce_pair()
     save_verifier(verifier)
 
+    # Generate state and nonce for CSRF protection and OpenID Connect
+    state = secrets.token_urlsafe(32)
+    nonce = secrets.token_urlsafe(32)
+
     # Get auth URL
-    auth_url = get_auth_url(verifier, challenge)
+    auth_url = get_auth_url(verifier, challenge, state, nonce)
 
     # Start callback server
     server = http.server.HTTPServer((CALLBACK_HOST, CALLBACK_PORT), CallbackHandler)
     server.timeout = 300  # 5 minute timeout
 
-    print(f"\n[OCA Auth] Opening browser for authentication...")
-    print(f"[OCA Auth] If browser doesn't open, visit:")
+    print("\n[OCA Auth] Opening browser for authentication...")
+    print("[OCA Auth] If browser doesn't open, visit:")
     print(f"    {auth_url}\n")
 
     # Open browser
@@ -278,7 +283,7 @@ def check_token_status():
         expires_at = token.get("_expires_at", 0)
         refresh_expires_at = token.get("_refresh_expires_at", 0)
 
-        print(f"[OCA Auth] Token status:")
+        print("[OCA Auth] Token status:")
         print(f"  - Expires in: {max(0, expires_at - now):.0f} seconds")
         print(f"  - Refresh expires in: {max(0, refresh_expires_at - now):.0f} seconds")
         print(f"  - Valid: {now < expires_at - 180}")  # 3 min buffer
