@@ -13,9 +13,25 @@ poetry run python -m src.main     # Start (Slack + API on port 3001)
 
 ## Project Summary
 
-Python LangGraph orchestration for OCI operations. 6 agents, 4 MCP servers (158+ tools), 35+ workflows.
+Python LangGraph orchestration for OCI operations. 6 agents, 4 MCP servers (395+ tools), 35+ workflows.
 
 **Status**: Phase 4 - Production Readiness (Teams, OKE deployment)
+
+## DB Troubleshooting Workflow
+
+The system supports full database performance troubleshooting:
+
+| Step | Intent | Workflow | Primary Tool |
+|------|--------|----------|--------------|
+| Blocking Sessions | `check_blocking` | `db_blocking_sessions_workflow` | `oci_database_execute_sql` |
+| CPU/Wait Events | `wait_events` | `db_wait_events_workflow` | `oci_dbmgmt_get_wait_events` |
+| SQL Monitoring | `sql_monitoring` | `db_sql_monitoring_workflow` | `oci_database_execute_sql` |
+| Long Running Ops | `long_running_ops` | `db_long_running_ops_workflow` | `oci_database_execute_sql` |
+| Parallelism | `parallelism_stats` | `db_parallelism_stats_workflow` | `oci_database_execute_sql` |
+| Full Table Scans | `full_table_scan` | `db_full_table_scan_workflow` | `oci_database_execute_sql` |
+| AWR Report | `awr_report` | `db_awr_report_workflow` | `oci_dbmgmt_get_awr_report` |
+
+See `docs/DB_TROUBLESHOOTING_WORKFLOW.md` for full mapping.
 
 ## Architecture (Simplified)
 
@@ -73,9 +89,19 @@ USE_LANGGRAPH_COORDINATOR=true
 REDIS_URL=redis://localhost:6379
 ```
 
+## MCP Servers
+
+| Server | Tools | Domains | Primary Use |
+|--------|-------|---------|-------------|
+| `oci-unified` | 51 | identity, compute, network, database, dbmgmt, opsi | Core OCI + DB Mgmt |
+| `database-observatory` | 50+ | database, opsi, logan, observability | SQLcl/Logan queries |
+| `oci-infrastructure` | 44 | compute, network, security, database | Full OCI SDK |
+| `finopsai` | 33 | cost, budget, finops, anomaly | FinOps analysis |
+
 ## Reference
 
 For detailed documentation, read Serena memories or see:
 - `docs/OCI_AGENT_REFERENCE.md` - Agent schemas
 - `docs/ARCHITECTURE.md` - Full architecture
 - `docs/FEATURE_MAPPING.md` - Tool mapping
+- `docs/DB_TROUBLESHOOTING_WORKFLOW.md` - DB workflow mapping

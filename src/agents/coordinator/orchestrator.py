@@ -130,7 +130,7 @@ class ParallelOrchestrator:
 
     # Execution limits
     DEFAULT_MAX_AGENTS = 5
-    DEFAULT_TIMEOUT = 60
+    DEFAULT_TIMEOUT = 300  # Match agent timeouts for slow OPSI APIs
 
     # Loop prevention
     MAX_ITERATIONS = 15  # Maximum orchestration iterations

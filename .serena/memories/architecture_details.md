@@ -25,6 +25,8 @@
 | DB Mgmt | `awr_report` | generate_awr, ash_report |
 | OPSI | `addm_findings` | opsi_addm, database_diagnostics |
 | OPSI | `capacity_forecast` | opsi_forecast, growth_forecast |
+| Infra | `provision_instance` | create_vm, launch_instance |
+| Infra | `list_shapes` | available_shapes, list_compute_shapes |
 
 ## Parallel Orchestrator (`src/agents/coordinator/orchestrator.py`)
 

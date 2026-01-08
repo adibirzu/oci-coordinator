@@ -112,7 +112,7 @@ class AgentMessage(BaseModel):
 
     # Metadata
     priority: MessagePriority = Field(default=MessagePriority.NORMAL)
-    timeout_seconds: int = Field(default=60)
+    timeout_seconds: int = Field(default=120)  # 2 min default, agents can override
     created_at: datetime = Field(default_factory=datetime.utcnow)
     retry_count: int = Field(default=0)
     max_retries: int = Field(default=3)
@@ -252,7 +252,7 @@ class TaskSpecification:
 
     # Resource allocation
     estimated_tokens: int = 1000
-    timeout_seconds: int = 60
+    timeout_seconds: int = 120  # 2 min default for subtasks
     max_tool_calls: int = 5
 
     # Boundaries

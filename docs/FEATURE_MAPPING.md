@@ -4,8 +4,8 @@
 
 This document provides a comprehensive mapping of all features, MCP servers, tools, agents, and their interconnections in the OCI AI Agent Coordinator system.
 
-**Last Updated**: 2026-01-03
-**Test Status**: 21/41 tools tested (new DB Mgmt/OPSI tools pending)
+**Last Updated**: 2026-01-08
+**Test Status**: 21/41 tools tested (new DB Mgmt/OPSI/SQLcl tools pending)
 
 ---
 
@@ -20,12 +20,20 @@ This document provides a comprehensive mapping of all features, MCP servers, too
 | **oci-infrastructure** | 44 | Enabled | stdio | Full OCI SDK wrapper |
 | **finopsai-mcp** | 33 | Enabled | stdio | Multicloud FinOps |
 
-**Total Available Tools**: 178+
+**Total Available Tools**: 395+ (with logan MCP server tools)
 
 ### New in v1.3 (2026-01-03)
 - **DB Management Tools (10)**: AWR reports, Top SQL, Wait Events, SQL Plan Baselines, Fleet Health
 - **OPSI Tools (10)**: Database Insights, ADDM, Capacity Planning, SQL Statistics
 - **Workflows (20+)**: Pre-built workflows for all new capabilities
+
+### New in v1.4 (2026-01-08)
+- **SQLcl Workflows (5)**: Real-time DB performance via v$ views
+  - SQL Monitoring (`sql_monitoring`, `sql_monitor`, `active_sql`)
+  - Long Running Operations (`long_running_ops`, `longops`, `session_longops`)
+  - Parallelism Stats (`parallelism_stats`, `px_stats`, `req_degree`)
+  - Full Table Scan Detection (`full_table_scan`, `table_scan`, `full_scan`)
+  - Blocking Sessions (`blocking_sessions`, `check_blocking`, `lock_contention`)
 
 ---
 
@@ -54,6 +62,11 @@ This document provides a comprehensive mapping of all features, MCP servers, too
 | `oci_compute_start_by_name` | oci-unified | Infrastructure | - | - |
 | `oci_compute_stop_by_name` | oci-unified | Infrastructure | - | - |
 | `oci_compute_restart_by_name` | oci-unified | Infrastructure | - | - |
+| `oci_compute_list_shapes` | oci-unified | Infrastructure | `list_shapes` | - |
+| `oci_compute_list_images` | oci-unified | Infrastructure | `list_images` | - |
+| `oci_compute_launch_instance` | oci-unified | Infrastructure | `provision_instance` | - |
+
+**Note**: `oci_compute_launch_instance` requires `ALLOW_MUTATIONS=true` environment variable.
 
 ### Network Domain
 
@@ -106,6 +119,66 @@ This document provides a comprehensive mapping of all features, MCP servers, too
 | `oci_opsi_get_capacity_trend` | oci-unified | DB Troubleshoot | `capacity_trend` | - |
 | `oci_opsi_get_capacity_forecast` | oci-unified | DB Troubleshoot | `capacity_forecast` | - |
 | `oci_opsi_list_awr_hubs` | oci-unified | DB Troubleshoot | - | - |
+
+### SQLcl Domain (Real-time Database Performance)
+
+| Tool | MCP Server | Agent | Workflow | Description |
+|------|------------|-------|----------|-------------|
+| `oci_database_execute_sql` | database-observatory | DB Troubleshoot | `sql_monitoring` | SQL Monitoring (v$sql_monitor) |
+| `oci_database_execute_sql` | database-observatory | DB Troubleshoot | `long_running_ops` | Long-running ops (v$session_longops) |
+| `oci_database_execute_sql` | database-observatory | DB Troubleshoot | `parallelism_stats` | PX degree comparison |
+| `oci_database_execute_sql` | database-observatory | DB Troubleshoot | `full_table_scan` | FTS detection (v$sql_plan) |
+| `oci_database_execute_sql` | database-observatory | DB Troubleshoot | `blocking_sessions` | Lock contention (v$session) |
+
+**SQLcl Workflow Intent Mappings (v1.4)**:
+
+| Workflow | Intent Aliases | SQL View Used |
+|----------|----------------|---------------|
+| `db_sql_monitoring_workflow` | sql_monitoring, sql_monitor, active_sql, running_queries | v$sql_monitor |
+| `db_long_running_ops_workflow` | long_running_ops, longops, session_longops, batch_progress | v$session_longops |
+| `db_parallelism_stats_workflow` | parallelism_stats, px_stats, req_degree, px_downgrade | v$sql |
+| `db_full_table_scan_workflow` | full_table_scan, table_scan, full_scan, missing_index | v$sql_plan |
+| `db_blocking_sessions_workflow` | blocking_sessions, check_blocking, lock_contention | v$session, v$lock |
+
+**Note**: SQLcl workflows require an active database connection configured via `connection_name` parameter.
+
+### DB Troubleshooting RCA Workflow
+
+Complete mapping of the diagnostic runbook workflow (Phase 1-3) to available tools.
+
+**Phase 1: Ingestion & Triage**
+
+| Step | Description | Implementation | Status |
+|------|-------------|----------------|--------|
+| Intent Recognition | Classify user query | LangGraph `classify_intent_node` | ✅ |
+| Entity Extraction | Extract DB_NAME, database_id | `extract_entities` in coordinator | ✅ |
+| Triage | Priority/severity classification | `DBTriageState` in troubleshoot_database.py | ⚠️ Partial |
+
+**Phase 2: Diagnostic Execution (Runbook Loop)**
+
+| Step | Tool | Workflow | Intent Aliases | SQL/API |
+|------|------|----------|----------------|---------|
+| 1. Blocking Sessions | `oci_database_execute_sql` | `db_blocking_sessions_workflow` | blocking_sessions, check_blocking, lock_contention | v$session, v$lock |
+| 2. CPU/Wait Events | `oci_opsi_summarize_resource_stats`, `oci_dbmgmt_get_wait_events` | `db_wait_events_workflow` | wait_events, cpu_usage, db_utilization | OPSI API |
+| 3. SQL Monitoring | `oci_database_execute_sql` | `db_sql_monitoring_workflow` | sql_monitoring, sql_monitor, active_sql | v$sql_monitor |
+| 4. Long Running Ops | `oci_database_execute_sql` | `db_long_running_ops_workflow` | long_running_ops, longops, batch_progress | gv$session_longops |
+| 5. Parallelism Check | `oci_database_execute_sql` | `db_parallelism_stats_workflow` | parallelism_stats, px_stats, req_degree | v$sql |
+| 6. Table Scans/AWR | `oci_database_execute_sql`, `oci_dbmgmt_get_awr_report` | `db_full_table_scan_workflow`, `db_awr_report_workflow` | full_table_scan, awr_report | v$sql_plan, AWR |
+
+**Phase 3: Synthesis & Reporting**
+
+| Step | Implementation | Output Channel |
+|------|----------------|----------------|
+| Aggregate Findings | `DBTroubleshootSkill._generate_report_node()` | Internal |
+| Draft Response | LLM synthesis via agent `invoke()` | Slack/Teams |
+| Format & Send | `SlackMessageHandler` with mrkdwn | Slack threads |
+
+**Interpretation Logic (Built into Workflows)**:
+- `flag_blocking`: IF `blocking_session IS NOT NULL` THEN "Blocking Issue"
+- `flag_cpu_saturation`: IF `CPU_Usage > 64%` AND `Duration > 30mins` THEN "CPU Capacity Issue"
+- `flag_px_downgrade`: IF `actual_degree < requested_degree` THEN "Parallelism Downgrade"
+
+For detailed workflow documentation, see: [DB_TROUBLESHOOTING_WORKFLOW.md](./DB_TROUBLESHOOTING_WORKFLOW.md)
 
 ### Discovery Domain
 

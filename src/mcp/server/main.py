@@ -161,6 +161,14 @@ DOMAINS = {
         "description": "Health checks and low-risk server metadata",
         "tools": ["oci_ping"],
     },
+    "selectai": {
+        "description": "Natural language to SQL, database chat, and AI agent orchestration",
+        "tools": [
+            "oci_selectai_generate", "oci_selectai_list_profiles",
+            "oci_selectai_get_profile_tables", "oci_selectai_run_agent",
+            "oci_selectai_ping"
+        ],
+    },
 }
 
 async def _search_capabilities_logic(query: str, domain: str | None = None) -> str:
@@ -259,6 +267,7 @@ from src.mcp.server.tools.network import register_network_tools
 from src.mcp.server.tools.observability import register_observability_tools
 from src.mcp.server.tools.opsi import register_opsi_tools
 from src.mcp.server.tools.security import register_security_tools
+from src.mcp.server.tools.selectai import register_selectai_tools
 
 # Register tools
 register_identity_tools(mcp)  # Register identity tools first for compartment discovery
@@ -270,6 +279,7 @@ register_observability_tools(mcp)
 register_database_tools(mcp)  # DB Management tools
 register_opsi_tools(mcp)  # Operations Insights tools
 register_discovery_tools(mcp)  # ShowOCI-style discovery tools
+register_selectai_tools(mcp)  # SelectAI NL2SQL tools
 
 # Register skills
 register_troubleshoot_skills(mcp)

@@ -437,6 +437,88 @@ async def _resolve_compartment(
     return root
 
 
+async def _resolve_managed_database(
+    name_or_id: str | None,
+    tool_catalog: ToolCatalog,
+    compartment_id: str | None = None,
+) -> str | None:
+    """
+    Resolve a database name to a managed_database_id.
+
+    Args:
+        name_or_id: Database name or managed_database_id (OCID)
+        tool_catalog: Tool catalog for executing MCP tools
+        compartment_id: Compartment to search in (defaults to root)
+
+    Returns:
+        Managed database OCID if found, or None
+    """
+    if not name_or_id:
+        return None
+
+    # If already an OCID, return as-is
+    if name_or_id.startswith("ocid1."):
+        return name_or_id
+
+    # Search for the database by name
+    try:
+        search_compartment = compartment_id or _get_root_compartment()
+        if not search_compartment:
+            logger.warning("No compartment for database search")
+            return None
+
+        # List managed databases and find the match
+        result = await tool_catalog.execute(
+            "oci_dbmgmt_list_databases",
+            {
+                "compartment_id": search_compartment,
+                "include_subtree": True,
+            },
+        )
+        result_str = _extract_result(result)
+
+        if not result_str:
+            return None
+
+        # Try JSON parsing
+        try:
+            data = json.loads(result_str)
+            databases = []
+
+            if isinstance(data, dict):
+                databases = data.get("databases", data.get("items", []))
+            elif isinstance(data, list):
+                databases = data
+
+            # Search for matching database by name (case-insensitive)
+            name_upper = name_or_id.upper()
+            for db in databases:
+                db_name = db.get("name", db.get("database_name", "")).upper()
+                if db_name == name_upper or name_upper in db_name:
+                    db_id = db.get("id") or db.get("managed_database_id")
+                    if db_id:
+                        logger.info("Resolved database name to ID",
+                                   name=name_or_id, db_id=db_id[:50])
+                        return db_id
+
+        except (json.JSONDecodeError, TypeError):
+            # Try regex extraction from markdown/text output
+            import re
+            # Look for patterns like "FINANCE" followed by an OCID
+            pattern = rf"{re.escape(name_or_id)}.*?(ocid1\.manageddatabase\.[^\s,\]\[\"'`|]+)"
+            match = re.search(pattern, result_str, re.IGNORECASE | re.DOTALL)
+            if match:
+                db_id = match.group(1).rstrip("`|")
+                logger.info("Resolved database name to ID (regex)",
+                           name=name_or_id, db_id=db_id[:50])
+                return db_id
+
+    except Exception as e:
+        logger.warning("Database name resolution failed", name=name_or_id, error=str(e))
+
+    return None
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Identity Workflows
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1708,27 +1790,61 @@ async def compartment_cost_breakdown_workflow(
                 if cost_json.get("type") == "cost_summary":
                     summary = cost_json.get("summary", {})
                     services = cost_json.get("services", [])
-                    results.append(f"**Total Tenancy Spend:** {summary.get('total', 'N/A')}")
-                    results.append(f"**Period:** {summary.get('period', 'N/A')}\n")
+                    results.append(f"*Total Tenancy Spend:* {summary.get('total', 'N/A')}")
+                    results.append(f"*Period:* {summary.get('period', 'N/A')}\n")
 
                     if services:
-                        results.append("### Top Services by Spend")
-                        # Markdown table format
-                        results.append("| Service | Cost | % |")
-                        results.append("|---------|------|---|")
-                        for svc in services[:10]:  # Show top 10
-                            results.append(f"| {svc['service']} | {svc['cost']} | {svc['percent']} |")
+                        results.append("*Top Services by Spend:*")
+                        # Format as Slack-friendly list instead of markdown table
+                        for i, svc in enumerate(services[:10], 1):
+                            # Use mrkdwn formatting that renders well in Slack
+                            results.append(f"  {i}. `{svc['service']}` — {svc['cost']} ({svc['percent']})")
                         results.append("")
                 else:
                     results.append(cost_data + "\n")
             except json.JSONDecodeError:
                 results.append(cost_data + "\n")
 
-        # Add compartment structure
+        # Add compartment structure - clean format for Slack
         if compartments_data:
             results.append("## Compartment Structure")
-            results.append(compartments_data)
-            results.append("\n*Note: To see costs for a specific compartment, ask about costs for that compartment by name.*")
+            # Parse compartments and format cleanly
+            try:
+                compartments_json = json.loads(compartments_data)
+                if isinstance(compartments_json, dict) and "compartments" in compartments_json:
+                    compartment_list = compartments_json["compartments"]
+                elif isinstance(compartments_json, list):
+                    compartment_list = compartments_json
+                else:
+                    compartment_list = []
+
+                if compartment_list:
+                    # Count and show summary
+                    active_count = sum(1 for c in compartment_list if c.get("state") == "ACTIVE" or c.get("lifecycle_state") == "ACTIVE")
+                    results.append(f"Found *{len(compartment_list)}* compartments ({active_count} active)\n")
+
+                    # Show top compartments (by name, alphabetically) - limit to 20 for Slack
+                    sorted_compartments = sorted(
+                        compartment_list,
+                        key=lambda x: x.get("name", x.get("display_name", "")).lower()
+                    )[:20]
+
+                    results.append("*Active Compartments:*")
+                    for comp in sorted_compartments:
+                        name = comp.get("name") or comp.get("display_name", "Unknown")
+                        state = comp.get("state") or comp.get("lifecycle_state", "UNKNOWN")
+                        if state == "ACTIVE":
+                            results.append(f"  • `{name}`")
+
+                    if len(compartment_list) > 20:
+                        results.append(f"\n_... and {len(compartment_list) - 20} more compartments_")
+                else:
+                    results.append(compartments_data)
+            except json.JSONDecodeError:
+                # Fallback: try to clean up raw output
+                results.append(compartments_data)
+
+            results.append("\n_Tip: Ask about costs for a specific compartment by name._")
         else:
             results.append("## Compartments\nUnable to list compartments.\n")
 
@@ -1845,14 +1961,29 @@ async def db_top_sql_workflow(
     Get top SQL statements by CPU activity for a database.
 
     Shows the most resource-intensive SQL statements currently running.
+    Supports resolution from database name (e.g., "top SQL for FINANCE").
 
     Matches intents: top_sql, db_top_sql, high_cpu_sql, expensive_queries,
                      sql_performance, sql_cpu_usage
     """
     try:
+        # First try direct ID, then resolve from name
         managed_database_id = entities.get("managed_database_id") or entities.get("database_id")
+
         if not managed_database_id:
-            return "Error: Please provide a managed_database_id or database_id to analyze SQL performance."
+            db_name = entities.get("database_name")
+            if db_name:
+                logger.info("Resolving database name for top SQL", name=db_name)
+                managed_database_id = await _resolve_managed_database(
+                    db_name, tool_catalog, entities.get("compartment_id")
+                )
+
+        if not managed_database_id:
+            db_name = entities.get("database_name", "")
+            return (
+                f"Error: Could not find database '{db_name}'. "
+                "Please provide a valid database name or managed_database_id."
+            )
 
         hours_back = entities.get("hours_back", 1)
         limit = entities.get("limit", 10)
@@ -1882,14 +2013,29 @@ async def db_wait_events_workflow(
     Get top wait events from AWR data for a database.
 
     Shows what the database is waiting on most - useful for performance tuning.
+    Supports resolution from database name (e.g., "wait events for FINANCE").
 
     Matches intents: wait_events, db_wait_events, awr_wait_events,
                      database_waits, performance_bottlenecks
     """
     try:
+        # First try direct ID, then resolve from name
         managed_database_id = entities.get("managed_database_id") or entities.get("database_id")
+
         if not managed_database_id:
-            return "Error: Please provide a managed_database_id or database_id to analyze wait events."
+            db_name = entities.get("database_name")
+            if db_name:
+                logger.info("Resolving database name for wait events", name=db_name)
+                managed_database_id = await _resolve_managed_database(
+                    db_name, tool_catalog, entities.get("compartment_id")
+                )
+
+        if not managed_database_id:
+            db_name = entities.get("database_name", "")
+            return (
+                f"Error: Could not find database '{db_name}'. "
+                "Please provide a valid database name or managed_database_id."
+            )
 
         hours_back = entities.get("hours_back", 1)
         top_n = entities.get("top_n", 10)
@@ -1919,14 +2065,32 @@ async def db_awr_report_workflow(
     Generate AWR or ASH report for a managed database.
 
     Creates a detailed performance report for the specified time period.
+    Supports resolution from database name (e.g., "AWR report for FINANCE").
 
     Matches intents: awr_report, generate_awr, ash_report, performance_report,
                      db_performance_report, database_report
     """
     try:
+        # First try direct ID, then resolve from name
         managed_database_id = entities.get("managed_database_id") or entities.get("database_id")
+
         if not managed_database_id:
-            return "Error: Please provide a managed_database_id or database_id to generate an AWR report."
+            # Try to resolve from database_name
+            db_name = entities.get("database_name")
+            if db_name:
+                logger.info("Resolving database name to ID", name=db_name)
+                managed_database_id = await _resolve_managed_database(
+                    db_name, tool_catalog, entities.get("compartment_id")
+                )
+
+        if not managed_database_id:
+            # Provide helpful error with available databases
+            db_name = entities.get("database_name", "")
+            return (
+                f"Error: Could not find database '{db_name}'. "
+                "Please provide a valid database name or managed_database_id. "
+                "Use 'list databases' or 'show managed databases' to see available databases."
+            )
 
         hours_back = entities.get("hours_back", 24)
         report_type = entities.get("report_type", "AWR").upper()
@@ -1936,6 +2100,10 @@ async def db_awr_report_workflow(
             report_type = "AWR"
         if report_format not in ("HTML", "TEXT"):
             report_format = "TEXT"
+
+        logger.info("Generating AWR report",
+                   database_id=managed_database_id[:50] if managed_database_id else None,
+                   hours_back=hours_back, report_type=report_type)
 
         result = await tool_catalog.execute(
             "oci_dbmgmt_get_awr_report",
@@ -2025,6 +2193,403 @@ async def db_managed_databases_workflow(
     except Exception as e:
         logger.error("db_managed_databases workflow failed", error=str(e))
         return f"Error listing managed databases: {e}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SQLcl-Based Database Performance Workflows
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+async def _resolve_sqlcl_connection(
+    database_name: str | None,
+    tool_catalog: ToolCatalog,
+) -> tuple[str | None, str | None]:
+    """
+    Resolve database name to an active SQLcl connection.
+
+    Returns:
+        tuple: (connection_name, error_message)
+        - If successful: (connection_name, None)
+        - If failed: (None, error_message)
+    """
+    import json
+
+    if not database_name:
+        return None, "No database name provided. Please specify a database name."
+
+    try:
+        # Get available connections - returns ToolCallResult object
+        result = await tool_catalog.execute("oci_database_list_connections", {})
+
+        # Handle ToolCallResult object (has .success, .result, .error attributes)
+        if isinstance(result, ToolCallResult):
+            if not result.success:
+                return None, (
+                    f"Could not list SQLcl connections. "
+                    f"Error: {result.error or 'Unknown error'}"
+                )
+            raw_result = result.result
+        else:
+            # Fallback for dict-like results
+            raw_result = result
+
+        # Parse result - might be JSON string or dict
+        if isinstance(raw_result, str):
+            try:
+                parsed = json.loads(raw_result)
+            except json.JSONDecodeError:
+                # Result is plain string, try to extract connection names
+                # Format might be "Connections: conn1, conn2" or similar
+                if ":" in raw_result:
+                    parts = raw_result.split(":", 1)
+                    if len(parts) > 1:
+                        conn_list = [c.strip() for c in parts[1].split(",")]
+                        parsed = {"connections": conn_list}
+                    else:
+                        parsed = {"connections": []}
+                else:
+                    parsed = {"connections": []}
+        elif isinstance(raw_result, dict):
+            parsed = raw_result
+        else:
+            parsed = {"connections": []}
+
+        # Extract connections list
+        connections = parsed.get("connections", [])
+        if not connections:
+            return None, (
+                "No SQLcl connections available. "
+                "Please configure a database connection first using SQLcl."
+            )
+
+        # Try to find a matching connection (case-insensitive partial match)
+        db_lower = database_name.lower()
+        for conn in connections:
+            conn_name = conn.get("name", "") if isinstance(conn, dict) else str(conn)
+            if db_lower in conn_name.lower():
+                return conn_name, None
+
+        # List available connections in error message
+        available = [c.get("name", str(c)) if isinstance(c, dict) else str(c) for c in connections]
+        return None, (
+            f"No SQLcl connection found matching '{database_name}'. "
+            f"Available connections: {', '.join(available)}"
+        )
+
+    except Exception as e:
+        logger.error("Failed to resolve SQLcl connection", error=str(e))
+        return None, f"Error resolving database connection: {e}"
+
+
+async def db_sql_monitoring_workflow(
+    query: str,
+    entities: dict[str, Any],
+    tool_catalog: ToolCatalog,
+    memory: SharedMemoryManager,
+) -> str:
+    """
+    Get SQL Monitoring Report for active or recent SQL statements.
+
+    Shows real-time SQL execution monitoring data from v$sql_monitor.
+    Requires SQLcl connection to the target database.
+
+    Matches intents: sql_monitoring, sql_monitor, active_sql, running_queries,
+                     execution_monitoring, real_time_sql
+    """
+    try:
+        # Resolve database name to SQLcl connection
+        database_name = entities.get("connection_name") or entities.get("database_name")
+        connection_name, error = await _resolve_sqlcl_connection(database_name, tool_catalog)
+        if error:
+            return error
+
+        sql_id = entities.get("sql_id")
+        limit = entities.get("limit", 20)
+
+        # Build SQL query for v$sql_monitor
+        if sql_id:
+            sql = f"""
+                SELECT sql_id, status, sql_exec_start,
+                       ROUND(elapsed_time/1000000, 2) as elapsed_sec,
+                       ROUND(cpu_time/1000000, 2) as cpu_sec,
+                       buffer_gets, disk_reads,
+                       px_servers_requested, px_servers_allocated
+                FROM v$sql_monitor
+                WHERE sql_id = '{sql_id}'
+                ORDER BY sql_exec_start DESC
+                FETCH FIRST {limit} ROWS ONLY
+            """
+        else:
+            sql = f"""
+                SELECT sql_id, status, sql_exec_start,
+                       ROUND(elapsed_time/1000000, 2) as elapsed_sec,
+                       ROUND(cpu_time/1000000, 2) as cpu_sec,
+                       buffer_gets, disk_reads,
+                       px_servers_requested, px_servers_allocated
+                FROM v$sql_monitor
+                WHERE status IN ('EXECUTING', 'DONE (ERROR)', 'DONE')
+                ORDER BY elapsed_time DESC
+                FETCH FIRST {limit} ROWS ONLY
+            """
+
+        result = await tool_catalog.execute(
+            "oci_database_execute_sql",
+            {"sql": sql.strip(), "connection_name": connection_name},
+        )
+        return _extract_result(result)
+
+    except Exception as e:
+        logger.error("db_sql_monitoring workflow failed", error=str(e))
+        return f"Error getting SQL monitoring data: {e}"
+
+
+async def db_long_running_ops_workflow(
+    query: str,
+    entities: dict[str, Any],
+    tool_catalog: ToolCatalog,
+    memory: SharedMemoryManager,
+) -> str:
+    """
+    Check long-running operations from v$session_longops.
+
+    Shows operations like table scans, index builds, and backup/recovery
+    that are still in progress or recently completed.
+
+    Matches intents: long_running_ops, longops, long_operations,
+                     running_operations, batch_progress, operation_status
+    """
+    try:
+        # Resolve database name to SQLcl connection
+        database_name = entities.get("connection_name") or entities.get("database_name")
+        connection_name, error = await _resolve_sqlcl_connection(database_name, tool_catalog)
+        if error:
+            return error
+
+        limit = entities.get("limit", 20)
+
+        sql = f"""
+            SELECT sid, serial#, opname, target,
+                   sofar, totalwork,
+                   CASE WHEN totalwork > 0
+                        THEN ROUND(sofar/totalwork*100, 2)
+                        ELSE 0 END as pct_complete,
+                   ROUND(elapsed_seconds/60, 2) as elapsed_min,
+                   ROUND(time_remaining/60, 2) as remaining_min,
+                   message
+            FROM v$session_longops
+            WHERE sofar < totalwork OR time_remaining > 0
+            ORDER BY elapsed_seconds DESC
+            FETCH FIRST {limit} ROWS ONLY
+        """
+
+        result = await tool_catalog.execute(
+            "oci_database_execute_sql",
+            {"sql": sql.strip(), "connection_name": connection_name},
+        )
+
+        extracted = _extract_result(result)
+        # Provide helpful message if no long-running ops found
+        if "No rows" in extracted or (isinstance(extracted, str) and "[]" in extracted):
+            return "✅ No long-running operations in progress. All batch operations have completed."
+        return extracted
+
+    except Exception as e:
+        logger.error("db_long_running_ops workflow failed", error=str(e))
+        return f"Error getting long-running operations: {e}"
+
+
+async def db_parallelism_stats_workflow(
+    query: str,
+    entities: dict[str, Any],
+    tool_catalog: ToolCatalog,
+    memory: SharedMemoryManager,
+) -> str:
+    """
+    Compare requested vs actual parallelism degree for SQL statements.
+
+    Shows SQL statements where parallel execution was requested but may
+    have been downgraded. Useful for diagnosing parallel query issues.
+
+    Matches intents: parallelism_stats, parallel_query, px_stats,
+                     degree_comparison, parallel_execution, px_downgrade
+    """
+    try:
+        # Resolve database name to SQLcl connection
+        database_name = entities.get("connection_name") or entities.get("database_name")
+        connection_name, error = await _resolve_sqlcl_connection(database_name, tool_catalog)
+        if error:
+            return error
+
+        sql_id = entities.get("sql_id")
+        limit = entities.get("limit", 20)
+
+        if sql_id:
+            sql = f"""
+                SELECT sql_id,
+                       px_servers_requested as req_degree,
+                       px_servers_allocated as actual_degree,
+                       CASE WHEN px_servers_requested > px_servers_allocated
+                            THEN 'DOWNGRADED' ELSE 'OK' END as status,
+                       ROUND(elapsed_time/1000000, 2) as elapsed_sec,
+                       executions
+                FROM v$sql
+                WHERE sql_id = '{sql_id}'
+                  AND px_servers_requested > 0
+            """
+        else:
+            sql = f"""
+                SELECT sql_id,
+                       px_servers_requested as req_degree,
+                       px_servers_allocated as actual_degree,
+                       CASE WHEN px_servers_requested > px_servers_allocated
+                            THEN 'DOWNGRADED' ELSE 'OK' END as status,
+                       ROUND(elapsed_time/1000000, 2) as elapsed_sec,
+                       executions
+                FROM v$sql
+                WHERE px_servers_requested > 0
+                  AND px_servers_requested != px_servers_allocated
+                ORDER BY elapsed_time DESC
+                FETCH FIRST {limit} ROWS ONLY
+            """
+
+        result = await tool_catalog.execute(
+            "oci_database_execute_sql",
+            {"sql": sql.strip(), "connection_name": connection_name},
+        )
+
+        extracted = _extract_result(result)
+        # Provide helpful message if no downgraded parallelism found
+        if "No rows" in extracted or (isinstance(extracted, str) and "[]" in extracted):
+            return "✅ No parallel execution downgrade detected. All parallel queries ran with requested degree."
+        return extracted
+
+    except Exception as e:
+        logger.error("db_parallelism_stats workflow failed", error=str(e))
+        return f"Error getting parallelism statistics: {e}"
+
+
+async def db_full_table_scan_workflow(
+    query: str,
+    entities: dict[str, Any],
+    tool_catalog: ToolCatalog,
+    memory: SharedMemoryManager,
+) -> str:
+    """
+    Detect full table scans on large tables.
+
+    Shows SQL statements performing TABLE ACCESS FULL operations,
+    which can indicate missing indexes or suboptimal execution plans.
+
+    Matches intents: full_table_scan, table_scan, fts_detection,
+                     large_table_scan, missing_index, scan_analysis
+    """
+    try:
+        # Resolve database name to SQLcl connection
+        database_name = entities.get("connection_name") or entities.get("database_name")
+        connection_name, error = await _resolve_sqlcl_connection(database_name, tool_catalog)
+        if error:
+            return error
+
+        sql_id = entities.get("sql_id")
+        min_size_gb = entities.get("min_size_gb", 1)  # Default 1 GB threshold
+        limit = entities.get("limit", 20)
+
+        if sql_id:
+            sql = f"""
+                SELECT DISTINCT p.sql_id, p.object_owner, p.object_name,
+                       s.elapsed_time/1000000 as elapsed_sec,
+                       s.buffer_gets, s.disk_reads,
+                       ROUND(seg.bytes/1024/1024/1024, 2) as table_size_gb
+                FROM v$sql_plan p
+                JOIN v$sql s ON p.sql_id = s.sql_id AND p.child_number = s.child_number
+                LEFT JOIN dba_segments seg ON p.object_owner = seg.owner
+                                          AND p.object_name = seg.segment_name
+                WHERE p.sql_id = '{sql_id}'
+                  AND p.operation = 'TABLE ACCESS'
+                  AND p.options = 'FULL'
+                ORDER BY s.elapsed_time DESC
+            """
+        else:
+            sql = f"""
+                SELECT DISTINCT p.sql_id, p.object_owner, p.object_name,
+                       s.elapsed_time/1000000 as elapsed_sec,
+                       s.buffer_gets, s.disk_reads,
+                       ROUND(seg.bytes/1024/1024/1024, 2) as table_size_gb
+                FROM v$sql_plan p
+                JOIN v$sql s ON p.sql_id = s.sql_id AND p.child_number = s.child_number
+                LEFT JOIN dba_segments seg ON p.object_owner = seg.owner
+                                          AND p.object_name = seg.segment_name
+                WHERE p.operation = 'TABLE ACCESS'
+                  AND p.options = 'FULL'
+                  AND (seg.bytes IS NULL OR seg.bytes > {min_size_gb} * 1024 * 1024 * 1024)
+                ORDER BY s.elapsed_time DESC
+                FETCH FIRST {limit} ROWS ONLY
+            """
+
+        result = await tool_catalog.execute(
+            "oci_database_execute_sql",
+            {"sql": sql.strip(), "connection_name": connection_name},
+        )
+
+        extracted = _extract_result(result)
+        # Provide helpful message if no full table scans found
+        if "No rows" in extracted or (isinstance(extracted, str) and "[]" in extracted):
+            return f"✅ No full table scans detected on tables larger than {min_size_gb} GB."
+        return extracted
+
+    except Exception as e:
+        logger.error("db_full_table_scan workflow failed", error=str(e))
+        return f"Error detecting full table scans: {e}"
+
+
+async def db_blocking_sessions_workflow(
+    query: str,
+    entities: dict[str, Any],
+    tool_catalog: ToolCatalog,
+    memory: SharedMemoryManager,
+) -> str:
+    """
+    Check for blocking sessions in the database.
+
+    Shows sessions that are blocking other sessions, causing lock contention.
+    Essential for diagnosing performance issues due to locking.
+
+    Matches intents: blocking_sessions, blocked_sessions, lock_contention,
+                     session_blocking, lock_analysis, database_locks
+    """
+    try:
+        # Resolve database name to SQLcl connection
+        database_name = entities.get("connection_name") or entities.get("database_name")
+        connection_name, error = await _resolve_sqlcl_connection(database_name, tool_catalog)
+        if error:
+            return error
+
+        sql = """
+            SELECT blocking_session,
+                   s.sid, s.serial#, s.username, s.program,
+                   s.sql_id, s.event, s.wait_class,
+                   s.seconds_in_wait,
+                   l.type as lock_type
+            FROM v$session s
+            LEFT JOIN v$lock l ON s.sid = l.sid AND l.block > 0
+            WHERE s.blocking_session IS NOT NULL
+            ORDER BY s.seconds_in_wait DESC
+        """
+
+        result = await tool_catalog.execute(
+            "oci_database_execute_sql",
+            {"sql": sql.strip(), "connection_name": connection_name},
+        )
+
+        # Provide helpful message if no blocking found
+        extracted = _extract_result(result)
+        if "No rows" in extracted or (isinstance(extracted, str) and "[]" in extracted):
+            return "✅ No blocking sessions found. All sessions are running without lock contention."
+        return extracted
+
+    except Exception as e:
+        logger.error("db_blocking_sessions workflow failed", error=str(e))
+        return f"Error checking blocking sessions: {e}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2458,6 +3023,312 @@ async def db_performance_overview_workflow(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Infrastructure Provisioning Workflows
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+# Predefined instance size configurations
+INSTANCE_SIZE_OPTIONS = {
+    "1": {
+        "name": "Small (Dev/Test)",
+        "shape": "VM.Standard.E4.Flex",
+        "ocpus": 1,
+        "memory_gb": 8,
+        "boot_volume_size_gb": 50,
+        "description": "1 OCPU, 8 GB RAM, 50 GB boot volume",
+    },
+    "2": {
+        "name": "Medium (Standard)",
+        "shape": "VM.Standard.E4.Flex",
+        "ocpus": 2,
+        "memory_gb": 16,
+        "boot_volume_size_gb": 100,
+        "description": "2 OCPUs, 16 GB RAM, 100 GB boot volume",
+    },
+    "3": {
+        "name": "Large (Production)",
+        "shape": "VM.Standard.E4.Flex",
+        "ocpus": 4,
+        "memory_gb": 32,
+        "boot_volume_size_gb": 200,
+        "description": "4 OCPUs, 32 GB RAM, 200 GB boot volume",
+    },
+    "4": {
+        "name": "XLarge (High Performance)",
+        "shape": "VM.Standard.E4.Flex",
+        "ocpus": 8,
+        "memory_gb": 64,
+        "boot_volume_size_gb": 500,
+        "description": "8 OCPUs, 64 GB RAM, 500 GB boot volume",
+    },
+}
+
+
+def _get_provisioning_defaults() -> dict[str, str | None]:
+    """Get provisioning defaults from environment variables."""
+    import os
+
+    return {
+        "compartment_id": os.getenv("DEFAULT_COMPARTMENT_ID") or _get_root_compartment(),
+        "availability_domain": os.getenv("DEFAULT_AVAILABILITY_DOMAIN"),
+        "subnet_id": os.getenv("DEFAULT_SUBNET_ID"),
+        "ssh_public_key": os.getenv("SSH_PUBLIC_KEY"),
+    }
+
+
+async def provision_instance_workflow(
+    query: str,
+    entities: dict[str, Any],
+    tool_catalog: ToolCatalog,
+    memory: SharedMemoryManager,
+) -> str:
+    """
+    Interactive instance provisioning workflow with predefined size options.
+
+    Shows users available instance sizes (Small/Medium/Large/XLarge) and allows
+    them to select by number. Supports custom configurations via entities.
+
+    Requires ALLOW_MUTATIONS=true to actually launch instances.
+    """
+    import os
+
+    try:
+        # Check if this is a follow-up with a size selection
+        size_selection = entities.get("size_selection") or entities.get("option")
+        instance_name = entities.get("instance_name") or entities.get("name")
+
+        # If no selection yet, show options
+        if not size_selection:
+            options_text = [
+                "# 🖥️ Instance Provisioning",
+                "",
+                "Select an instance size (reply with number or 'cancel'):",
+                "",
+            ]
+            for num, config in INSTANCE_SIZE_OPTIONS.items():
+                options_text.append(f"**{num}. {config['name']}**")
+                options_text.append(f"   {config['description']}")
+                options_text.append("")
+
+            options_text.extend([
+                "---",
+                "*Reply with the number (1-4) to proceed, or 'cancel' to abort.*",
+                "",
+                "**Note**: You'll be asked to confirm the instance name before creation.",
+            ])
+
+            return "\n".join(options_text)
+
+        # User selected a size
+        if size_selection.lower() in ("cancel", "abort", "no"):
+            return "Instance provisioning cancelled."
+
+        if size_selection not in INSTANCE_SIZE_OPTIONS:
+            return f"Invalid selection '{size_selection}'. Please reply with 1, 2, 3, 4, or 'cancel'."
+
+        config = INSTANCE_SIZE_OPTIONS[size_selection]
+
+        # Get defaults from environment
+        defaults = _get_provisioning_defaults()
+
+        # Check required configuration
+        missing = []
+        if not defaults["availability_domain"]:
+            missing.append("DEFAULT_AVAILABILITY_DOMAIN")
+        if not defaults["subnet_id"]:
+            missing.append("DEFAULT_SUBNET_ID")
+
+        if missing:
+            return (
+                f"**Configuration Required**\n\n"
+                f"Missing environment variables: {', '.join(missing)}\n\n"
+                f"Please set these in your `.env.local` file:\n"
+                f"```\n"
+                f"DEFAULT_AVAILABILITY_DOMAIN=<your-AD>  # e.g., Uocm:EU-FRANKFURT-1-AD-1\n"
+                f"DEFAULT_SUBNET_ID=<your-subnet-ocid>\n"
+                f"DEFAULT_COMPARTMENT_ID=<your-compartment-ocid>\n"
+                f"SSH_PUBLIC_KEY=<your-ssh-public-key>  # Optional\n"
+                f"ALLOW_MUTATIONS=true  # Required to launch instances\n"
+                f"```"
+            )
+
+        # Check if mutations are allowed
+        allow_mutations = os.getenv("ALLOW_MUTATIONS", "").lower() in {"1", "true", "yes"}
+
+        # If no instance name yet, show confirmation
+        if not instance_name:
+            confirmation = [
+                f"# Confirm Instance Creation",
+                "",
+                f"**Size**: {config['name']}",
+                f"**Configuration**: {config['description']}",
+                f"**Shape**: {config['shape']}",
+                f"**Compartment**: {defaults['compartment_id'][:40]}...",
+                f"**Availability Domain**: {defaults['availability_domain']}",
+                "",
+            ]
+
+            if not allow_mutations:
+                confirmation.extend([
+                    "⚠️ **Dry Run Mode**: ALLOW_MUTATIONS is not enabled.",
+                    "Set `ALLOW_MUTATIONS=true` in your environment to actually create instances.",
+                    "",
+                ])
+
+            confirmation.extend([
+                "**Please provide an instance name** to proceed.",
+                "",
+                "*Example: `create instance my-dev-server`*",
+            ])
+
+            return "\n".join(confirmation)
+
+        # Ready to launch - call the MCP tool
+        launch_params = {
+            "display_name": instance_name,
+            "compartment_id": defaults["compartment_id"],
+            "availability_domain": defaults["availability_domain"],
+            "subnet_id": defaults["subnet_id"],
+            "shape": config["shape"],
+            "ocpus": config["ocpus"],
+            "memory_gb": config["memory_gb"],
+            "boot_volume_size_gb": config["boot_volume_size_gb"],
+            "assign_public_ip": True,
+        }
+
+        if defaults["ssh_public_key"]:
+            launch_params["ssh_public_key"] = defaults["ssh_public_key"]
+
+        result = await tool_catalog.execute("oci_compute_launch_instance", launch_params)
+        result_str = _extract_result(result)
+
+        # Parse result and format response
+        try:
+            result_data = json.loads(result_str)
+            if result_data.get("error"):
+                return (
+                    f"**Instance Creation Failed**\n\n"
+                    f"Error: {result_data.get('message', result_data['error'])}\n\n"
+                    f"Suggestion: {result_data.get('suggestion', 'Check your configuration.')}"
+                )
+
+            instance = result_data.get("instance", {})
+            return (
+                f"# ✅ Instance Launched Successfully\n\n"
+                f"**Name**: {instance.get('name', instance_name)}\n"
+                f"**ID**: `{instance.get('id', 'pending')}`\n"
+                f"**State**: {instance.get('state', 'PROVISIONING')}\n"
+                f"**Shape**: {instance.get('shape', config['shape'])}\n"
+                f"**Configuration**: {config['description']}\n\n"
+                f"---\n"
+                f"*Note: Instance provisioning takes 2-5 minutes. "
+                f"Use `get instance {instance_name}` to check status.*"
+            )
+        except json.JSONDecodeError:
+            return f"Instance launch initiated. Response:\n\n{result_str}"
+
+    except Exception as e:
+        logger.error("provision_instance workflow failed", error=str(e))
+        return f"Error in instance provisioning: {e}"
+
+
+async def list_instance_shapes_workflow(
+    query: str,
+    entities: dict[str, Any],
+    tool_catalog: ToolCatalog,
+    memory: SharedMemoryManager,
+) -> str:
+    """
+    List available compute shapes for instance provisioning.
+    """
+    try:
+        compartment_id = entities.get("compartment_id") or _get_root_compartment()
+        if not compartment_id:
+            return "Error: No compartment ID found. Set OCI_COMPARTMENT_ID or DEFAULT_COMPARTMENT_ID."
+
+        result = await tool_catalog.execute(
+            "oci_compute_list_shapes",
+            {"compartment_id": compartment_id},
+        )
+        result_str = _extract_result(result)
+
+        try:
+            shapes = json.loads(result_str)
+            if isinstance(shapes, list):
+                # Format as markdown
+                lines = ["# Available Compute Shapes\n"]
+
+                # Group by type
+                flex_shapes = [s for s in shapes if s.get("is_flexible")]
+                fixed_shapes = [s for s in shapes if not s.get("is_flexible")]
+
+                if flex_shapes:
+                    lines.append("## Flex Shapes (Configurable)")
+                    for s in flex_shapes[:10]:
+                        lines.append(f"- **{s['name']}**: Up to {s.get('max_ocpus', '?')} OCPUs, "
+                                   f"{s.get('max_memory_gb', '?')} GB RAM")
+                    lines.append("")
+
+                if fixed_shapes:
+                    lines.append("## Standard Shapes")
+                    for s in fixed_shapes[:10]:
+                        ocpus = s.get('ocpus', '?')
+                        mem = s.get('memory_gb', '?')
+                        lines.append(f"- **{s['name']}**: {ocpus} OCPUs, {mem} GB RAM")
+
+                return "\n".join(lines)
+            return result_str
+        except json.JSONDecodeError:
+            return result_str
+
+    except Exception as e:
+        logger.error("list_instance_shapes workflow failed", error=str(e))
+        return f"Error listing shapes: {e}"
+
+
+async def list_instance_images_workflow(
+    query: str,
+    entities: dict[str, Any],
+    tool_catalog: ToolCatalog,
+    memory: SharedMemoryManager,
+) -> str:
+    """
+    List available compute images for instance provisioning.
+    """
+    try:
+        compartment_id = entities.get("compartment_id") or _get_root_compartment()
+        if not compartment_id:
+            return "Error: No compartment ID found."
+
+        os_filter = entities.get("operating_system", "Oracle Linux")
+
+        result = await tool_catalog.execute(
+            "oci_compute_list_images",
+            {"compartment_id": compartment_id, "operating_system": os_filter, "limit": 10},
+        )
+        result_str = _extract_result(result)
+
+        try:
+            images = json.loads(result_str)
+            if isinstance(images, list):
+                lines = [f"# Available {os_filter} Images\n"]
+                for img in images[:10]:
+                    lines.append(f"- **{img.get('name', 'Unknown')}**")
+                    lines.append(f"  OS: {img.get('operating_system', '?')} {img.get('operating_system_version', '')}")
+                    if img.get('size_gb'):
+                        lines.append(f"  Size: {img['size_gb']} GB")
+                    lines.append("")
+                return "\n".join(lines)
+            return result_str
+        except json.JSONDecodeError:
+            return result_str
+
+    except Exception as e:
+        logger.error("list_instance_images workflow failed", error=str(e))
+        return f"Error listing images: {e}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Workflow Registry
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -2473,6 +3344,21 @@ WORKFLOW_REGISTRY: dict[str, Any] = {
     # Compute
     "list_instances": list_instances_workflow,
     "get_instance": get_instance_workflow,
+
+    # Infrastructure Provisioning
+    "provision_instance": provision_instance_workflow,
+    "create_instance": provision_instance_workflow,
+    "launch_instance": provision_instance_workflow,
+    "new_instance": provision_instance_workflow,
+    "create_vm": provision_instance_workflow,
+    "launch_vm": provision_instance_workflow,
+    "provision_vm": provision_instance_workflow,
+    "list_shapes": list_instance_shapes_workflow,
+    "list_compute_shapes": list_instance_shapes_workflow,
+    "available_shapes": list_instance_shapes_workflow,
+    "list_images": list_instance_images_workflow,
+    "list_compute_images": list_instance_images_workflow,
+    "available_images": list_instance_images_workflow,
 
     # Network
     "list_vcns": list_vcns_workflow,
@@ -2607,6 +3493,52 @@ WORKFLOW_REGISTRY: dict[str, Any] = {
     "db_baselines": db_sql_plan_baselines_workflow,
     "execution_plans": db_sql_plan_baselines_workflow,
     "plan_stability": db_sql_plan_baselines_workflow,
+
+    # SQLcl - SQL Monitoring (Real-time)
+    "sql_monitoring": db_sql_monitoring_workflow,
+    "sql_monitor": db_sql_monitoring_workflow,
+    "active_sql": db_sql_monitoring_workflow,
+    "running_queries": db_sql_monitoring_workflow,
+    "execution_monitoring": db_sql_monitoring_workflow,
+    "real_time_sql": db_sql_monitoring_workflow,
+    "sql_monitor_report": db_sql_monitoring_workflow,
+
+    # SQLcl - Long Running Operations
+    "long_running_ops": db_long_running_ops_workflow,
+    "longops": db_long_running_ops_workflow,
+    "long_operations": db_long_running_ops_workflow,
+    "running_operations": db_long_running_ops_workflow,
+    "batch_progress": db_long_running_ops_workflow,
+    "operation_status": db_long_running_ops_workflow,
+    "session_longops": db_long_running_ops_workflow,
+
+    # SQLcl - Parallelism Statistics
+    "parallelism_stats": db_parallelism_stats_workflow,
+    "parallel_query": db_parallelism_stats_workflow,
+    "px_stats": db_parallelism_stats_workflow,
+    "degree_comparison": db_parallelism_stats_workflow,
+    "parallel_execution": db_parallelism_stats_workflow,
+    "px_downgrade": db_parallelism_stats_workflow,
+    "req_degree": db_parallelism_stats_workflow,
+    "actual_degree": db_parallelism_stats_workflow,
+
+    # SQLcl - Full Table Scan Detection
+    "full_table_scan": db_full_table_scan_workflow,
+    "table_scan": db_full_table_scan_workflow,
+    "fts_detection": db_full_table_scan_workflow,
+    "large_table_scan": db_full_table_scan_workflow,
+    "missing_index": db_full_table_scan_workflow,
+    "scan_analysis": db_full_table_scan_workflow,
+    "full_scan": db_full_table_scan_workflow,
+
+    # SQLcl - Blocking Sessions
+    "blocking_sessions": db_blocking_sessions_workflow,
+    "blocked_sessions": db_blocking_sessions_workflow,
+    "lock_contention": db_blocking_sessions_workflow,
+    "session_blocking": db_blocking_sessions_workflow,
+    "lock_analysis": db_blocking_sessions_workflow,
+    "database_locks": db_blocking_sessions_workflow,
+    "check_blocking": db_blocking_sessions_workflow,
 
     # OPSI - Database Insights
     "database_insights": opsi_database_insights_workflow,

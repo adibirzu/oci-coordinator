@@ -103,6 +103,15 @@ DOMAIN_CAPABILITIES = {
         "subnet-management",
         "instance-lifecycle",
     ],
+    "selectai": [
+        "nl2sql",
+        "data-chat",
+        "text-summarization",
+        "ai-agent-orchestration",
+        "database-qa",
+        "natural-language-query",
+        "report-generation",
+    ],
 }
 
 # MCP Server to domain mapping
@@ -150,6 +159,13 @@ MCP_SERVER_DOMAINS = {
         "opsi",
         "logan",
         "tenancy",
+    ],
+    # selectai: Natural language to SQL and AI agents
+    "selectai": [
+        "selectai",
+        "nl2sql",
+        "database",
+        "data-chat",
     ],
     # Legacy server names for backward compatibility
     "oci-unified": ["discovery", "infrastructure", "observability", "security", "finops"],
@@ -242,6 +258,10 @@ DOMAIN_PRIORITY = {
     },
     "infrastructure": {
         "infrastructure-agent": 100,
+    },
+    "selectai": {
+        "selectai-agent": 100,
+        "db-troubleshoot-agent": 20,
     },
 }
 

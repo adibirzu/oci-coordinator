@@ -1156,6 +1156,73 @@ async def test_agent_with_mcp_server():
 
 ---
 
+## Database Troubleshoot Agent
+
+The Database Troubleshoot Agent provides comprehensive Oracle Database performance analysis and troubleshooting capabilities.
+
+### Capabilities
+
+| Feature | Description |
+|---------|-------------|
+| Blocking Analysis | Detect session blocking and lock contention |
+| Wait Event Analysis | Analyze CPU, I/O, and wait events |
+| SQL Monitoring | Real-time SQL execution monitoring |
+| Long Running Ops | Track batch and long-running operations |
+| Parallelism Analysis | Detect PX downgrade issues |
+| Full Table Scan Detection | Find missing indexes |
+| AWR/ASH Analysis | Historical performance analysis |
+
+### Workflow Mapping
+
+| Intent | Workflow | Primary Tool |
+|--------|----------|--------------|
+| `check_blocking` | `db_blocking_sessions_workflow` | `oci_database_execute_sql` |
+| `wait_events` | `db_wait_events_workflow` | `oci_dbmgmt_get_wait_events` |
+| `sql_monitoring` | `db_sql_monitoring_workflow` | `oci_database_execute_sql` |
+| `long_running_ops` | `db_long_running_ops_workflow` | `oci_database_execute_sql` |
+| `parallelism_stats` | `db_parallelism_stats_workflow` | `oci_database_execute_sql` |
+| `full_table_scan` | `db_full_table_scan_workflow` | `oci_database_execute_sql` |
+| `awr_report` | `db_awr_report_workflow` | `oci_dbmgmt_get_awr_report` |
+
+### MCP Tools Used
+
+| Tool | Server | Purpose |
+|------|--------|---------|
+| `oci_database_execute_sql` | database-observatory | Real-time v$ queries via SQLcl |
+| `oci_dbmgmt_get_wait_events` | oci-unified | Wait event analysis |
+| `oci_dbmgmt_get_top_sql` | oci-unified | Top SQL by resource |
+| `oci_dbmgmt_get_awr_report` | oci-unified | AWR snapshot report |
+| `oci_opsi_summarize_resource_stats` | oci-unified | CPU/Memory utilization |
+| `oci_opsi_get_addm_findings` | oci-unified | ADDM recommendations |
+
+### Usage Example
+
+```python
+from src.agents.database.troubleshoot import DbTroubleshootAgent
+
+agent = DbTroubleshootAgent(llm=llm, tool_catalog=catalog)
+
+# Full RCA workflow
+result = await agent.invoke("Check database performance for ATPAdi")
+
+# Specific checks
+blocking = await agent.invoke("check blocking sessions on ATPAdi")
+waits = await agent.invoke("show wait events for ATPAdi")
+```
+
+### Slack Commands
+
+```
+@Oracle OCI Ops Agent check database performance for ATPAdi
+@Oracle OCI Ops Agent check blocking sessions on ATPAdi
+@Oracle OCI Ops Agent show long running operations
+@Oracle OCI Ops Agent analyze parallelism for ATPAdi
+```
+
+See `docs/DB_TROUBLESHOOTING_WORKFLOW.md` for complete workflow documentation.
+
+---
+
 ## Error Analysis Agent
 
 The Error Analysis Agent scans OCI logs for errors and creates admin todo items for significant issues.

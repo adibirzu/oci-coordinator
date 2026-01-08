@@ -327,6 +327,18 @@ if any(kw in query_lower for kw in fleet_keywords):
 | `db_awr_report_workflow` | awr_report, generate_awr, ash_report | `oci_dbmgmt_get_awr_report` |
 | `db_sql_plan_baselines_workflow` | sql_plan_baselines, db_baselines | `oci_dbmgmt_list_sql_plan_baselines` |
 
+### SQLcl Performance Workflows (workflows.py) - New in v1.4
+
+| Workflow | Intent Aliases | SQL View Used |
+|----------|----------------|---------------|
+| `db_sql_monitoring_workflow` | sql_monitoring, sql_monitor, active_sql, running_queries | v$sql_monitor |
+| `db_long_running_ops_workflow` | long_running_ops, longops, session_longops, batch_progress | v$session_longops |
+| `db_parallelism_stats_workflow` | parallelism_stats, px_stats, req_degree, px_downgrade | v$sql |
+| `db_full_table_scan_workflow` | full_table_scan, table_scan, full_scan, missing_index | v$sql_plan |
+| `db_blocking_sessions_workflow` | blocking_sessions, check_blocking, lock_contention | v$session, v$lock |
+
+**Note**: SQLcl workflows require an active database connection via the `connection_name` parameter.
+
 ### db_fleet_health_workflow Implementation (workflows.py:1510-1537)
 
 ```python
@@ -350,6 +362,49 @@ async def db_fleet_health_workflow(
     except Exception as e:
         logger.error("db_fleet_health workflow failed", error=str(e))
         return f"Error getting database fleet health: {e}"
+```
+
+### Infrastructure Provisioning Workflows (workflows.py)
+
+| Workflow | Intent Aliases | Tool Called |
+|----------|----------------|-------------|
+| `provision_instance_workflow` | provision_instance, create_instance, launch_instance, new_vm, spin_up_server | `oci_compute_launch_instance` |
+| `list_instance_shapes_workflow` | list_shapes, available_shapes, compute_shapes | `oci_compute_list_shapes` |
+| `list_instance_images_workflow` | list_images, available_images, os_images | `oci_compute_list_images` |
+
+**Note**: Instance provisioning requires `ALLOW_MUTATIONS=true` environment variable.
+
+### provision_instance_workflow Implementation
+
+The provisioning workflow is interactive and presents the user with predefined size options:
+
+```python
+INSTANCE_SIZE_OPTIONS = {
+    "1": {"name": "Small (Dev/Test)", "shape": "VM.Standard.E4.Flex", "ocpus": 1, "memory_gb": 8},
+    "2": {"name": "Medium (Standard)", "ocpus": 2, "memory_gb": 16},
+    "3": {"name": "Large (Production)", "ocpus": 4, "memory_gb": 32},
+    "4": {"name": "XLarge (High Performance)", "ocpus": 8, "memory_gb": 64},
+}
+
+async def provision_instance_workflow(...) -> str:
+    # 1. Validate ALLOW_MUTATIONS is enabled
+    # 2. Get provisioning defaults from environment
+    # 3. Present size options to user
+    # 4. Extract selected option from follow-up query
+    # 5. Build instance configuration
+    # 6. Call oci_compute_launch_instance
+```
+
+### Pre-Classification Pattern (nodes.py)
+
+```python
+def _pre_classify_compute_query(self, query: str) -> IntentClassification | None:
+    """Pre-classify compute/infrastructure queries using keyword matching."""
+    # Provision patterns: "create instance", "launch vm", "spin up server"
+    # List patterns: "list shapes", "available images"
+    provision_keywords = ["provision", "create", "launch", "spin up", "deploy", "new"]
+    instance_keywords = ["instance", "vm", "server", "virtual machine", "compute"]
+    # ...
 ```
 
 ---

@@ -382,58 +382,114 @@ implementation:
           - "src/agents/response.py"
           
       - task: "DB_AGENT"
-        description: "Implement DB Troubleshoot Agent"
+        description: "Implement DB Troubleshoot Agent with comprehensive RCA workflow"
         files:
-          - "src/agents/db_troubleshoot/__init__.py"
-          - "src/agents/db_troubleshoot/agent.py"
-          - "src/agents/db_troubleshoot/queries.py"
-          - "src/agents/db_troubleshoot/analysis.py"
+          - "src/agents/database/__init__.py"
+          - "src/agents/database/troubleshoot.py"
+          - "src/skills/troubleshoot_database.py"
+        workflows:
+          - "db_blocking_sessions_workflow"      # v$session, v$lock queries
+          - "db_wait_events_workflow"            # OPSI wait event analysis
+          - "db_sql_monitoring_workflow"         # v$sql_monitor real-time
+          - "db_long_running_ops_workflow"       # gv$session_longops
+          - "db_parallelism_stats_workflow"      # req_degree vs actual
+          - "db_full_table_scan_workflow"        # v$sql_plan + dba_tables
+          - "db_awr_report_workflow"             # AWR snapshot analysis
+        mcp_tools:
+          - "oci_database_execute_sql"           # SQLcl queries (database-observatory)
+          - "oci_opsi_summarize_resource_stats"  # CPU/Memory metrics (oci-unified)
+          - "oci_dbmgmt_get_wait_events"         # Wait events (oci-unified)
+          - "oci_dbmgmt_get_awr_report"          # AWR reports (oci-unified)
+          - "oci_opsi_search_databases"          # Database discovery (database-observatory)
           
       - task: "LOG_AGENT"
-        description: "Implement Log Analytics Agent"
+        description: "Implement Log Analytics Agent for OCI Logging Analytics"
         files:
           - "src/agents/log_analytics/__init__.py"
           - "src/agents/log_analytics/agent.py"
-          - "src/agents/log_analytics/query_builder.py"
-          - "src/agents/log_analytics/patterns.py"
-          
+        mcp_tools:
+          - "oci_logan_execute_query"            # Logan query execution
+          - "oci_logan_search_security_events"   # Security event search
+          - "oci_logan_get_mitre_techniques"     # MITRE ATT&CK mapping
+          - "oci_logan_analyze_ip_activity"      # IP analysis
+          - "oci_logan_list_log_sources"         # Log source discovery
+
       - task: "SECURITY_AGENT"
-        description: "Implement Security Agent"
+        description: "Implement Security Agent for Cloud Guard, VSS, WAF"
         files:
           - "src/agents/security/__init__.py"
           - "src/agents/security/agent.py"
-          - "src/agents/security/threat_hunt.py"
-          - "src/agents/security/mitre.py"
-          
+        mcp_tools:
+          - "oci_security_cloudguard_list_problems"  # Cloud Guard problems
+          - "oci_security_vss_list_host_scans"       # VSS host scans
+          - "oci_security_waf_list_firewalls"        # WAF policies
+          - "oci_security_bastion_list"              # Bastion sessions
+          - "oci_security_datasafe_list_assessments" # Data Safe
+
       - task: "FINOPS_AGENT"
-        description: "Implement FinOps Agent"
+        description: "Implement FinOps Agent for cost analysis and optimization"
         files:
           - "src/agents/finops/__init__.py"
           - "src/agents/finops/agent.py"
-          - "src/agents/finops/analysis.py"
-          - "src/agents/finops/optimization.py"
-          
+        mcp_tools:
+          - "oci_cost_by_compartment"            # Cost breakdown (finopsai)
+          - "oci_cost_service_drilldown"         # Service costs (finopsai)
+          - "oci_cost_monthly_trend"             # Trends & forecast (finopsai)
+          - "finops_detect_anomalies"            # Cost anomaly detection (finopsai)
+          - "finops_rightsizing"                 # Optimization recommendations (finopsai)
+
       - task: "INFRA_AGENT"
-        description: "Implement Infrastructure Agent"
+        description: "Implement Infrastructure Agent for compute, network, storage"
         files:
           - "src/agents/infrastructure/__init__.py"
           - "src/agents/infrastructure/agent.py"
-          - "src/agents/infrastructure/operations.py"
-          - "src/agents/infrastructure/safety.py"
+        mcp_tools:
+          - "oci_compute_list_instances"         # Compute instances (oci-infrastructure)
+          - "oci_compute_launch_instance"        # Instance provisioning (oci-infrastructure)
+          - "oci_blockstorage_list_volumes"      # Block storage (oci-infrastructure)
+          - "oci_vcn_list_vcns"                  # VCN listing (oci-infrastructure)
+          - "oci_vcn_list_subnets"               # Subnet listing (oci-infrastructure)
+
+      - task: "ERROR_ANALYSIS_AGENT"
+        description: "Implement Error Analysis Agent for self-healing and diagnostics"
+        files:
+          - "src/agents/error_analysis/__init__.py"
+          - "src/agents/error_analysis/agent.py"
+          - "src/agents/self_healing/corrector.py"
+          - "src/agents/self_healing/validator.py"
+        capabilities:
+          - "Tool failure analysis"
+          - "MCP timeout detection"
+          - "Alternative tool suggestion"
+          - "Self-healing retry logic"
+
+      - task: "SELECTAI_AGENT"
+        description: "Implement SelectAI Agent for natural language to SQL"
+        files:
+          - "src/agents/selectai/__init__.py"
+          - "src/agents/selectai/agent.py"
+        capabilities:
+          - "Natural language to SQL via OCI GenAI"
+          - "ATP/ADW database integration"
+          - "Profile-based query routing"
 
   phase3_tasks:
     name: "Channel Integration"
     tasks:
       - task: "SLACK_BOT"
-        description: "Create Slack bot"
+        description: "Create Slack bot with Socket Mode"
         files:
-          - "src/channels/slack/__init__.py"
-          - "src/channels/slack/bot.py"
-          - "src/channels/slack/handlers.py"
-          - "src/channels/slack/formatters.py"
+          - "src/channels/__init__.py"
+          - "src/channels/slack.py"
+          - "src/formatting/slack.py"
         dependencies:
           - "slack-sdk"
           - "slack-bolt"
+        features:
+          - "Socket Mode for real-time events"
+          - "Thread-aware responses"
+          - "mrkdwn formatting"
+          - "Table rendering with limits"
           
       - task: "TEAMS_BOT"
         description: "Create Teams bot"

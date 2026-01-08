@@ -116,3 +116,102 @@ class TestDatabaseNameExtraction:
         """Test queries without database references."""
         assert extract_fn("show me all instances") is None
         assert extract_fn("list compartments") is None
+
+
+class TestProfileExtraction:
+    """Tests for _extract_profiles method patterns."""
+
+    @pytest.fixture
+    def extract_fn(self):
+        """Create a standalone profile extraction function for testing."""
+        import re
+
+        def _extract_profiles(query: str) -> list[str]:
+            """Extract OCI profile names from natural language query."""
+            query_lower = query.lower()
+            profiles: list[str] = []
+            configured_profiles = ["DEFAULT", "EMDEMO"]
+            known_profiles = [
+                "emdemo", "default", "prod", "production", "dev", "development",
+                "test", "testing", "staging", "sandbox", "demo",
+            ]
+
+            # Pattern 0: Check for plural "tenancies" or "profiles" indicating ALL profiles
+            all_profiles_patterns = [
+                r"\b(?:my|all|both|across|multiple)\s+(?:tenancies|profiles)\b",
+                r"\btenancies\b",
+                r"\ball\s+(?:oci\s+)?(?:tenancies|profiles|environments)\b",
+            ]
+            for pattern in all_profiles_patterns:
+                if re.search(pattern, query_lower):
+                    return configured_profiles
+
+            # Pattern 1: "from <profile>" or "in <profile>"
+            from_in_pattern = r"\b(?:from|in|for|using)\s+(\w+)(?:\s+(?:profile|tenancy))?\b"
+            matches = re.findall(from_in_pattern, query_lower)
+            for match in matches:
+                if match in known_profiles or match.upper() in ["EMDEMO", "DEFAULT"]:
+                    profiles.append(match.upper())
+
+            # Pattern 2: "<profile> profile/tenancy"
+            profile_suffix_pattern = r"\b(\w+)\s+(?:profile|tenancy)\b"
+            matches = re.findall(profile_suffix_pattern, query_lower)
+            for match in matches:
+                if match in known_profiles or match.upper() in ["EMDEMO", "DEFAULT"]:
+                    if match.upper() not in profiles:
+                        profiles.append(match.upper())
+
+            # Pattern 3: Standalone known profile names
+            for profile in ["emdemo", "default"]:
+                if profile in query_lower and profile.upper() not in profiles:
+                    if re.search(rf"\b{profile}\b", query_lower):
+                        profiles.append(profile.upper())
+
+            return profiles
+
+        return _extract_profiles
+
+    def test_my_tenancies_plural_returns_all(self, extract_fn):
+        """Test 'in my tenancies' returns all configured profiles."""
+        result = extract_fn("show the 20 DBs monitored in my tenancies")
+        assert result == ["DEFAULT", "EMDEMO"]
+
+    def test_all_tenancies_returns_all(self, extract_fn):
+        """Test 'all tenancies' returns all configured profiles."""
+        result = extract_fn("list databases in all tenancies")
+        assert result == ["DEFAULT", "EMDEMO"]
+
+    def test_across_tenancies_returns_all(self, extract_fn):
+        """Test 'across tenancies' returns all configured profiles."""
+        result = extract_fn("databases across tenancies")
+        assert result == ["DEFAULT", "EMDEMO"]
+
+    def test_both_profiles_returns_all(self, extract_fn):
+        """Test 'both profiles' returns all configured profiles."""
+        result = extract_fn("show dbs from both profiles")
+        assert result == ["DEFAULT", "EMDEMO"]
+
+    def test_tenancies_plural_standalone(self, extract_fn):
+        """Test standalone 'tenancies' (plural) returns all profiles."""
+        result = extract_fn("list all databases from tenancies")
+        assert result == ["DEFAULT", "EMDEMO"]
+
+    def test_explicit_emdemo_profile(self, extract_fn):
+        """Test 'from emdemo' returns only EMDEMO."""
+        result = extract_fn("show databases from emdemo")
+        assert result == ["EMDEMO"]
+
+    def test_explicit_default_profile(self, extract_fn):
+        """Test 'in default profile' returns only DEFAULT."""
+        result = extract_fn("list dbs in default profile")
+        assert result == ["DEFAULT"]
+
+    def test_no_profile_specified(self, extract_fn):
+        """Test query without profile returns empty list."""
+        result = extract_fn("show database health")
+        assert result == []
+
+    def test_single_tenancy_not_plural(self, extract_fn):
+        """Test 'tenancy' (singular) does not trigger all-profiles."""
+        result = extract_fn("show databases in default tenancy")
+        assert result == ["DEFAULT"]  # Single explicit profile

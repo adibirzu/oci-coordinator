@@ -431,6 +431,16 @@ async def prewarm_coordinator() -> None:
 
     The coordinator is stored in the global _coordinator variable and can be
     accessed via get_coordinator() by Slack handlers and other consumers.
+
+    LLM Fallback:
+        Uses automatic fallback if configured provider is unavailable.
+        Priority order (configurable via LLM_PROVIDER_PRIORITY):
+        1. lm_studio (local)
+        2. ollama (local)
+        3. oca (Oracle Code Assist)
+        4. oci_genai (OCI GenAI)
+        5. anthropic
+        6. openai
     """
     global _coordinator
 
@@ -444,12 +454,26 @@ async def prewarm_coordinator() -> None:
         from src.agents.catalog import AgentCatalog
         from src.agents.coordinator.graph import LangGraphCoordinator
         from src.agents.coordinator.workflows import get_workflow_registry
-        from src.llm import get_llm
+        from src.llm import get_llm_with_auto_fallback, print_llm_availability_report
         from src.mcp.catalog import ToolCatalog
         from src.memory.manager import SharedMemoryManager
 
-        # Get LLM (may involve API key validation)
-        llm = get_llm()
+        # Print LLM availability report at startup
+        log.info("Checking LLM provider availability...")
+        await print_llm_availability_report(timeout=5.0)
+
+        # Get LLM with automatic fallback if configured provider is unavailable
+        # Priority: local LLMs first (lowest latency), then cloud providers
+        try:
+            llm = await get_llm_with_auto_fallback()
+        except RuntimeError as e:
+            log.error(
+                "No LLM providers available - coordinator will fail on first request",
+                error=str(e),
+            )
+            # Fall back to non-fallback version for graceful degradation
+            from src.llm import get_llm
+            llm = get_llm()
 
         # Use existing singleton catalogs initialized by MCPConnectionManager
         tool_catalog = ToolCatalog.get_instance()

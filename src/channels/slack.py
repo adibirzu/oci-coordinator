@@ -33,9 +33,11 @@ from src.channels.conversation import get_conversation_manager
 from src.channels.slack_catalog import (
     Category,
     build_catalog_blocks,
+    build_database_name_modal,
     build_error_recovery_blocks,
     build_follow_up_blocks,
     get_follow_up_suggestions,
+    needs_database_name_prompt,
 )
 from src.formatting.parser import ResponseParser
 from src.formatting.slack import SlackFormatter
@@ -1334,8 +1336,10 @@ class SlackHandler:
             if event.get("bot_id") or event.get("subtype"):
                 return
 
-            # Handle DMs
-            if is_dm or thread_ts or self._is_bot_mention(text):
+            # Handle DMs and thread replies
+            # Note: Do NOT check _is_bot_mention here - app_mention handler already handles @mentions
+            # Adding _is_bot_mention causes duplicate processing (both app_mention AND message fire)
+            if is_dm or thread_ts:
                 run_async(self._process_message(event, say, client))
             else:
                 # Skip non-threaded channel messages - app_mention handles @mentions
@@ -1468,8 +1472,10 @@ class SlackHandler:
                 logger.debug(">>> MESSAGE skipped (bot or subtype)", bot_id=bot_id, subtype=subtype)
                 return
 
-            # Handle DMs
-            if is_dm or thread_ts or self._is_bot_mention(text):
+            # Handle DMs and thread replies
+            # Note: Do NOT check _is_bot_mention here - app_mention handler already handles @mentions
+            # Adding _is_bot_mention causes duplicate processing (both app_mention AND message fire)
+            if is_dm or thread_ts:
                 await self._process_message(event, say, client)
             else:
                 # Skip non-threaded channel messages - app_mention handles @mentions
@@ -1527,10 +1533,38 @@ class SlackHandler:
 
         @app.action(re.compile(r"^follow_up_.*"))
         async def handle_follow_up(ack, body: dict, client) -> None:
-            """Handle follow-up suggestion button."""
+            """Handle follow-up suggestion button.
+
+            If the follow-up query requires a database name (e.g., "Check database performance"),
+            opens a modal to collect the database name. Otherwise, executes the query directly.
+            """
             await ack()
             action = body.get("actions", [{}])[0]
             query = action.get("value", "")
+
+            # Check if this follow-up needs a database name
+            if needs_database_name_prompt(query):
+                # Get context for the modal
+                channel_id = body.get("channel", {}).get("id", "")
+                message = body.get("message", {})
+                thread_ts = message.get("thread_ts") or message.get("ts")
+                trigger_id = body.get("trigger_id")
+
+                if trigger_id:
+                    # Open modal to collect database name
+                    modal = build_database_name_modal(query, channel_id, thread_ts)
+                    try:
+                        await client.views_open(trigger_id=trigger_id, view=modal)
+                        logger.info(
+                            "Opened database name modal",
+                            query=query,
+                            channel=channel_id,
+                        )
+                        return
+                    except Exception as e:
+                        logger.error("Failed to open database name modal", error=str(e))
+                        # Fall through to execute without database name
+
             await self._handle_quick_action(body, client, query)
 
         @app.action(re.compile(r"^recovery_.*"))
@@ -1568,6 +1602,95 @@ class SlackHandler:
             """Handle /oci slash command."""
             await ack()
             await self._process_command(body, respond)
+
+        @app.view("database_name_modal")
+        async def handle_database_name_submission(ack, body: dict, client, view) -> None:
+            """Handle database name modal submission.
+
+            Extracts the database name from the modal, combines it with the original
+            query, and executes the enhanced query.
+            """
+            import json  # Import at handler level for exception handler access
+
+            logger.info(
+                "Database name modal submission received",
+                view_id=view.get("id"),
+                callback_id=view.get("callback_id"),
+            )
+            await ack()
+
+            try:
+                # Extract database name from the input
+                values = view.get("state", {}).get("values", {})
+                logger.debug("Modal values", values=values)
+                db_name_block = values.get("database_name_block", {})
+                db_name_input = db_name_block.get("database_name_input", {})
+                database_name = db_name_input.get("value", "").strip()
+
+                if not database_name:
+                    logger.warning("Database name modal submitted without a name")
+                    return
+
+                # Get original context from private_metadata
+                private_metadata = view.get("private_metadata", "{}")
+                context = json.loads(private_metadata)
+                original_query = context.get("query", "")
+                channel_id = context.get("channel_id", "")
+                thread_ts = context.get("thread_ts")
+
+                if not channel_id:
+                    logger.error("No channel_id in modal private_metadata")
+                    return
+
+                # Combine the original query with the database name
+                enhanced_query = f"{original_query} for {database_name}"
+
+                logger.info(
+                    "Processing database query from modal",
+                    original_query=original_query,
+                    database_name=database_name,
+                    enhanced_query=enhanced_query,
+                    channel=channel_id,
+                )
+
+                # Build a synthetic body for _handle_quick_action
+                # This matches the structure expected from button click events
+                user_info = body.get("user", {})
+                synthetic_body = {
+                    "channel": {"id": channel_id},
+                    "message": {"thread_ts": thread_ts, "ts": thread_ts},
+                    "user": user_info,
+                }
+
+                logger.info(
+                    "Executing database query via _handle_quick_action",
+                    channel=channel_id,
+                    thread_ts=thread_ts,
+                    user=user_info.get("id"),
+                    query=enhanced_query,
+                )
+
+                # Process the enhanced query using the standard quick action handler
+                await self._handle_quick_action(
+                    body=synthetic_body,
+                    client=client,
+                    query=enhanced_query,
+                )
+
+                logger.info("Database query execution completed", query=enhanced_query)
+
+            except Exception as e:
+                logger.error("Error processing database name modal", error=str(e))
+                # Try to notify the user of the error
+                try:
+                    channel_id = json.loads(view.get("private_metadata", "{}")).get("channel_id")
+                    if channel_id:
+                        await client.chat_postMessage(
+                            channel=channel_id,
+                            text=f":warning: Error processing request: {str(e)}",
+                        )
+                except Exception:
+                    pass
 
         logger.info("Slack async handlers registered")
 

@@ -389,9 +389,12 @@ PARALLEL_DOMAIN_THRESHOLD = 2  # Use parallel if 2+ domains involved
 
 # Query complexity indicators that should trigger agent routing
 COMPLEXITY_KEYWORDS = [
-    # Temporal reasoning
-    "november", "december", "january", "last month", "this month", "previous",
-    "yesterday", "last week", "this week", "year to date", "ytd", "quarter",
+    # Temporal reasoning - ALL month names for consistent routing
+    "january", "february", "march", "april", "may", "june",
+    "july", "august", "september", "october", "november", "december",
+    "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
+    "last month", "this month", "previous", "yesterday", "last week", "this week",
+    "year to date", "ytd", "quarter", "q1", "q2", "q3", "q4",
     "compared to", "comparison", "trend", "change", "growth", "decline",
     # Analysis keywords
     "why", "explain", "analyze", "analysis", "understand", "investigate",

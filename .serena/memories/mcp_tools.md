@@ -4,7 +4,7 @@
 
 | Server | Tools | Purpose |
 |--------|-------|---------|
-| **oci-unified** | 31 | Identity, compute, network, security, cost, discovery |
+| **oci-unified** | 34 | Identity, compute, network, security, cost, discovery |
 | **database-observatory** | 50+ | OPSI, SQLcl, Logan for database observability |
 | **oci-infrastructure** | 44 | Full OCI SDK wrapper |
 | **finopsai** | 33 | Multicloud cost, anomaly detection, rightsizing |
@@ -37,6 +37,9 @@ DOMAIN_PREFIXES = {
 
 **Compute**
 - `oci_compute_list_instances` - List instances
+- `oci_compute_list_shapes` - List available shapes
+- `oci_compute_list_images` - List available images
+- `oci_compute_launch_instance` - Launch instance (requires ALLOW_MUTATIONS=true)
 
 **Cost**
 - `oci_cost_get_summary` - Get cost summary

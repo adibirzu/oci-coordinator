@@ -728,3 +728,114 @@ def build_error_recovery_blocks(
         })
 
     return blocks
+
+
+# Follow-up suggestions that require a database name to be specified
+DATABASE_NAME_REQUIRED_PATTERNS = [
+    "check database performance",
+    "analyze slow queries",
+    "show slow queries",
+    "analyze cpu utilization",
+    "check storage usage",
+    "database health",
+    "troubleshoot",
+]
+
+
+def needs_database_name_prompt(query: str) -> bool:
+    """
+    Check if a follow-up query needs a database name to be specified.
+
+    Some follow-up suggestions like "Check database performance" need
+    a specific database name to work. This function identifies those queries.
+
+    Args:
+        query: The follow-up query text
+
+    Returns:
+        True if the query needs a database name prompt
+    """
+    query_lower = query.lower()
+
+    # Check against known patterns that need database names
+    for pattern in DATABASE_NAME_REQUIRED_PATTERNS:
+        if pattern in query_lower:
+            return True
+
+    return False
+
+
+def build_database_name_modal(
+    original_query: str,
+    channel_id: str,
+    thread_ts: str | None = None,
+) -> dict[str, Any]:
+    """
+    Build a Slack modal to collect a database name for follow-up queries.
+
+    Args:
+        original_query: The follow-up query that needs a database name
+        channel_id: Channel ID to post the result to
+        thread_ts: Optional thread timestamp
+
+    Returns:
+        Slack modal view definition
+    """
+    # Store context in private_metadata for the submission handler
+    import json
+    private_metadata = json.dumps({
+        "query": original_query,
+        "channel_id": channel_id,
+        "thread_ts": thread_ts,
+    })
+
+    return {
+        "type": "modal",
+        "callback_id": "database_name_modal",
+        "title": {
+            "type": "plain_text",
+            "text": "Database Name",
+            "emoji": True,
+        },
+        "submit": {
+            "type": "plain_text",
+            "text": "Run Query",
+            "emoji": True,
+        },
+        "close": {
+            "type": "plain_text",
+            "text": "Cancel",
+            "emoji": True,
+        },
+        "private_metadata": private_metadata,
+        "blocks": [
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f":database: *Query:* _{original_query}_\n\nPlease specify which database you want to analyze:",
+                },
+            },
+            {
+                "type": "input",
+                "block_id": "database_name_block",
+                "element": {
+                    "type": "plain_text_input",
+                    "action_id": "database_name_input",
+                    "placeholder": {
+                        "type": "plain_text",
+                        "text": "e.g., FINANCE, HR_DB, prod-db-1",
+                    },
+                },
+                "label": {
+                    "type": "plain_text",
+                    "text": "Database Name",
+                    "emoji": True,
+                },
+                "hint": {
+                    "type": "plain_text",
+                    "text": "Enter the database name as shown in OCI Console",
+                },
+            },
+        ],
+    }

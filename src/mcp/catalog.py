@@ -131,6 +131,18 @@ TOOL_ALIASES: dict[str, str] = {
     # Agent-referenced names (from DOMAIN_PROMPTS)
     "list_autonomous_databases": "oci_database_list_autonomous",
     "analyze_performance": "oci_opsi_get_performance_summary",
+    # finopsai MCP server tool aliases
+    # finopsai exposes `get_cost_summary` but agents may look for `oci_cost_get_summary`
+    "oci_cost_get_summary": "get_cost_summary",
+    "oci_cost_summary": "get_cost_summary",
+    "cost_summary": "get_cost_summary",
+    "finops_get_cost_summary": "get_cost_summary",
+    # finopsai multicloud tools
+    "finops_cost_summary": "finops_cost_summary",
+    "finops_anomalies": "finops_detect_anomalies",
+    "cost_anomalies": "finops_detect_anomalies",
+    "finops_commitments": "finops_list_commitments",
+    "finops_optimization": "finops_rightsizing",
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════

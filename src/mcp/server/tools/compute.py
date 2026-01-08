@@ -245,6 +245,187 @@ async def _instance_action_by_name(
     return await _instance_action_logic(instance["id"], action)
 
 
+async def _list_shapes_logic(
+    compartment_id: str,
+    availability_domain: str | None = None,
+) -> str:
+    """List available compute shapes."""
+    client = get_compute_client()
+
+    try:
+        kwargs = {"compartment_id": compartment_id}
+        if availability_domain:
+            kwargs["availability_domain"] = availability_domain
+
+        response = client.list_shapes(**kwargs)
+        shapes = response.data
+
+        # Filter to common shapes and format nicely
+        result = []
+        for s in shapes[:30]:  # Limit to avoid too much output
+            shape_info = {
+                "name": s.shape,
+                "ocpus": s.ocpus if hasattr(s, "ocpus") else None,
+                "memory_gb": s.memory_in_gbs if hasattr(s, "memory_in_gbs") else None,
+                "is_flexible": s.is_flexible if hasattr(s, "is_flexible") else False,
+            }
+            if shape_info["is_flexible"]:
+                shape_info["max_ocpus"] = s.ocpu_options.max if hasattr(s, "ocpu_options") else None
+                shape_info["max_memory_gb"] = s.memory_options.max_in_gbs if hasattr(s, "memory_options") else None
+            result.append(shape_info)
+
+        return json.dumps(result, indent=2)
+
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+
+async def _list_images_logic(
+    compartment_id: str,
+    operating_system: str = "Oracle Linux",
+    limit: int = 10,
+) -> str:
+    """List available compute images."""
+    client = get_compute_client()
+
+    try:
+        response = client.list_images(
+            compartment_id=compartment_id,
+            operating_system=operating_system,
+            limit=limit,
+            sort_by="TIMECREATED",
+            sort_order="DESC",
+        )
+        images = response.data
+
+        result = []
+        for img in images:
+            result.append({
+                "id": img.id,
+                "name": img.display_name,
+                "operating_system": img.operating_system,
+                "operating_system_version": img.operating_system_version,
+                "size_gb": round(img.size_in_mbs / 1024, 1) if img.size_in_mbs else None,
+                "time_created": str(img.time_created) if img.time_created else None,
+            })
+
+        return json.dumps(result, indent=2)
+
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+
+async def _launch_instance_logic(
+    display_name: str,
+    compartment_id: str,
+    availability_domain: str,
+    subnet_id: str,
+    shape: str = "VM.Standard.E4.Flex",
+    ocpus: int = 1,
+    memory_gb: int = 8,
+    image_id: str | None = None,
+    ssh_public_key: str | None = None,
+    boot_volume_size_gb: int = 50,
+    assign_public_ip: bool = True,
+) -> str:
+    """Launch a new compute instance."""
+    import os
+
+    import oci
+
+    # Check if mutations are allowed
+    allow_mutations = os.getenv("ALLOW_MUTATIONS", "").lower() in {"1", "true", "yes"}
+    if not allow_mutations:
+        return json.dumps({
+            "error": "Write operations are disabled",
+            "message": "Set ALLOW_MUTATIONS=true in environment to enable instance creation",
+            "suggestion": "This is a safety feature. Enable mutations only in controlled environments.",
+        })
+
+    client = get_compute_client()
+
+    try:
+        # If no image_id provided, find the latest Oracle Linux 8 image
+        if not image_id:
+            images_response = client.list_images(
+                compartment_id=compartment_id,
+                operating_system="Oracle Linux",
+                operating_system_version="8",
+                sort_by="TIMECREATED",
+                sort_order="DESC",
+                limit=1,
+            )
+            if images_response.data:
+                image_id = images_response.data[0].id
+            else:
+                return json.dumps({"error": "No Oracle Linux 8 image found. Please provide an image_id."})
+
+        # Build shape config for flex shapes
+        shape_config = None
+        if "Flex" in shape:
+            shape_config = oci.core.models.LaunchInstanceShapeConfigDetails(
+                ocpus=float(ocpus),
+                memory_in_gbs=float(memory_gb),
+            )
+
+        # Build source details
+        source_details = oci.core.models.InstanceSourceViaImageDetails(
+            image_id=image_id,
+            boot_volume_size_in_gbs=boot_volume_size_gb,
+        )
+
+        # Build VNIC details
+        vnic_details = oci.core.models.CreateVnicDetails(
+            subnet_id=subnet_id,
+            assign_public_ip=assign_public_ip,
+            display_name=f"{display_name}-vnic",
+        )
+
+        # Build metadata (SSH key if provided)
+        metadata = {}
+        if ssh_public_key:
+            metadata["ssh_authorized_keys"] = ssh_public_key
+
+        # Build launch details
+        launch_details = oci.core.models.LaunchInstanceDetails(
+            compartment_id=compartment_id,
+            availability_domain=availability_domain,
+            display_name=display_name,
+            shape=shape,
+            shape_config=shape_config,
+            source_details=source_details,
+            create_vnic_details=vnic_details,
+            metadata=metadata if metadata else None,
+        )
+
+        # Launch the instance
+        response = client.launch_instance(launch_details)
+        instance = response.data
+
+        return json.dumps({
+            "success": True,
+            "message": f"Instance '{display_name}' is being launched",
+            "instance": {
+                "id": instance.id,
+                "name": instance.display_name,
+                "state": instance.lifecycle_state,
+                "shape": instance.shape,
+                "availability_domain": instance.availability_domain,
+                "image_id": image_id,
+            },
+            "note": "Instance provisioning may take 2-5 minutes. Use oci_compute_get_instance to check status.",
+        }, indent=2)
+
+    except oci.exceptions.ServiceError as e:
+        return json.dumps({
+            "error": f"OCI API error: {e.message}",
+            "code": e.code,
+            "status": e.status,
+        })
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+
 def register_compute_tools(mcp: Any) -> None:
     """Register compute tools with the MCP server."""
 
@@ -394,3 +575,92 @@ def register_compute_tools(mcp: Any) -> None:
             Action result with new state, or error if name is ambiguous
         """
         return await _instance_action_by_name(instance_name, compartment_id, "SOFTRESET")
+
+    @mcp.tool()
+    async def oci_compute_list_shapes(
+        compartment_id: str,
+        availability_domain: str | None = None,
+    ) -> str:
+        """List available compute shapes in a compartment.
+
+        Returns shapes with their OCPU, memory, and type information.
+        Useful for selecting a shape before launching an instance.
+
+        Args:
+            compartment_id: OCID of the compartment
+            availability_domain: Optional AD to filter shapes by availability
+
+        Returns:
+            List of available shapes with their specifications
+        """
+        return await _list_shapes_logic(compartment_id, availability_domain)
+
+    @mcp.tool()
+    async def oci_compute_list_images(
+        compartment_id: str,
+        operating_system: str = "Oracle Linux",
+        limit: int = 10,
+    ) -> str:
+        """List available compute images for launching instances.
+
+        Returns images with their OS, version, and type information.
+        Useful for selecting an image before launching an instance.
+
+        Args:
+            compartment_id: OCID of the compartment
+            operating_system: Filter by OS (e.g., "Oracle Linux", "CentOS", "Windows")
+            limit: Maximum number of images to return
+
+        Returns:
+            List of available images with their specifications
+        """
+        return await _list_images_logic(compartment_id, operating_system, limit)
+
+    @mcp.tool()
+    async def oci_compute_launch_instance(
+        display_name: str,
+        compartment_id: str,
+        availability_domain: str,
+        subnet_id: str,
+        shape: str = "VM.Standard.E4.Flex",
+        ocpus: int = 1,
+        memory_gb: int = 8,
+        image_id: str | None = None,
+        ssh_public_key: str | None = None,
+        boot_volume_size_gb: int = 50,
+        assign_public_ip: bool = True,
+    ) -> str:
+        """Launch a new compute instance (requires ALLOW_MUTATIONS=true).
+
+        Creates a new VM instance with the specified configuration.
+        Uses Oracle Linux 8 by default if no image_id is provided.
+
+        Args:
+            display_name: Name for the new instance
+            compartment_id: OCID of the compartment to create instance in
+            availability_domain: Full AD name (e.g., "Uocm:EU-FRANKFURT-1-AD-1")
+            subnet_id: OCID of the subnet for the instance's VNIC
+            shape: Compute shape (default: VM.Standard.E4.Flex)
+            ocpus: Number of OCPUs for flex shapes (default: 1)
+            memory_gb: Memory in GB for flex shapes (default: 8)
+            image_id: OCID of the image to use (defaults to latest Oracle Linux 8)
+            ssh_public_key: SSH public key for instance access
+            boot_volume_size_gb: Boot volume size in GB (default: 50)
+            assign_public_ip: Whether to assign a public IP (default: True)
+
+        Returns:
+            Details of the launched instance or error message
+        """
+        return await _launch_instance_logic(
+            display_name=display_name,
+            compartment_id=compartment_id,
+            availability_domain=availability_domain,
+            subnet_id=subnet_id,
+            shape=shape,
+            ocpus=ocpus,
+            memory_gb=memory_gb,
+            image_id=image_id,
+            ssh_public_key=ssh_public_key,
+            boot_volume_size_gb=boot_volume_size_gb,
+            assign_public_ip=assign_public_ip,
+        )

@@ -804,7 +804,7 @@ async def create_coordinator(
     # Create components
     memory = SharedMemoryManager(redis_url=redis_url)
 
-    tool_catalog = ToolCatalog(memory_manager=memory)
+    tool_catalog = ToolCatalog.get_instance(memory_manager=memory)
     agent_catalog = AgentCatalog.get_instance()
 
     # Load pre-built workflows if enabled

@@ -63,6 +63,12 @@ USE_LANGGRAPH_COORDINATOR=true
 # Observability
 OCI_APM_ENDPOINT=https://xxx.apm-agt.region.oci.oraclecloud.com
 OCI_APM_PRIVATE_DATA_KEY=xxx
+
+# Infrastructure Provisioning (requires ALLOW_MUTATIONS=true)
+# DEFAULT_COMPARTMENT_ID=ocid1.compartment.oc1..xxx
+# DEFAULT_AVAILABILITY_DOMAIN=Uocm:EU-FRANKFURT-1-AD-1
+# DEFAULT_SUBNET_ID=ocid1.subnet.oc1.xxx
+ALLOW_MUTATIONS=false  # Safety flag for write operations
 ```
 
 ## Slack Integration
@@ -80,5 +86,5 @@ OCI_APM_PRIVATE_DATA_KEY=xxx
 | Log Analytics | Pattern detection, anomaly detection |
 | Security | MITRE ATT&CK mapping (T1078, T1098, T1562) |
 | FinOps | Cost analysis (30s timeout), rightsizing |
-| Infrastructure | Compute, network, VCN management |
+| Infrastructure | Compute, network, VCN, instance provisioning |
 | Error Analysis | ORA- patterns, OOM detection |

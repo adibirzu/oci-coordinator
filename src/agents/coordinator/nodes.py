@@ -362,6 +362,50 @@ class CoordinatorNodes:
                     )
                 return {"intent": self._enrich_intent(pre_classified, state)}
 
+            # 7. Check compute/infrastructure queries (create instance, list shapes)
+            pre_classified = self._pre_classify_compute_query(state.query)
+            if pre_classified:
+                span.set_attribute("pre_classification", "compute")
+                self._logger.info(
+                    "Pre-classified compute query",
+                    intent=pre_classified.intent,
+                    workflow=pre_classified.suggested_workflow,
+                )
+                if thinking_trace:
+                    thinking_trace.add_step(
+                        ThinkingPhase.CLASSIFIED,
+                        f"Detected compute query → Intent: {pre_classified.intent}",
+                        {
+                            "method": "pre-classification",
+                            "intent": pre_classified.intent,
+                            "confidence": pre_classified.confidence,
+                            "domains": pre_classified.domains,
+                        },
+                    )
+                return {"intent": self._enrich_intent(pre_classified, state)}
+
+            # 8. Check security queries (cloudguard, vulnerabilities, threats)
+            pre_classified = self._pre_classify_security_query(state.query)
+            if pre_classified:
+                span.set_attribute("pre_classification", "security")
+                self._logger.info(
+                    "Pre-classified security query",
+                    intent=pre_classified.intent,
+                    workflow=pre_classified.suggested_workflow,
+                )
+                if thinking_trace:
+                    thinking_trace.add_step(
+                        ThinkingPhase.CLASSIFIED,
+                        f"Detected security query → Intent: {pre_classified.intent}",
+                        {
+                            "method": "pre-classification",
+                            "intent": pre_classified.intent,
+                            "confidence": pre_classified.confidence,
+                            "domains": pre_classified.domains,
+                        },
+                    )
+                return {"intent": self._enrich_intent(pre_classified, state)}
+
             # No pre-classification match - use LLM
             if thinking_trace:
                 thinking_trace.add_step(
@@ -514,6 +558,9 @@ class CoordinatorNodes:
         - "in Default profile" → ["DEFAULT"]
         - "databases from emdemo and default" → ["EMDEMO", "DEFAULT"]
         - "show dbs for EMDEMO tenancy" → ["EMDEMO"]
+        - "in my tenancies" → ["DEFAULT", "EMDEMO"] (all configured profiles)
+        - "all tenancies" → ["DEFAULT", "EMDEMO"]
+        - "both profiles" → ["DEFAULT", "EMDEMO"]
 
         Returns:
             List of profile names (uppercase) found in query, or empty list
@@ -523,12 +570,33 @@ class CoordinatorNodes:
         query_lower = query.lower()
         profiles: list[str] = []
 
+        # Configured profiles that exist in this environment
+        # These are the actual profiles we can query
+        configured_profiles = ["DEFAULT", "EMDEMO"]
+
         # Common OCI profile names - add more as needed
         # These are case-insensitive patterns that might appear in queries
         known_profiles = [
             "emdemo", "default", "prod", "production", "dev", "development",
             "test", "testing", "staging", "sandbox", "demo",
         ]
+
+        # Pattern 0: Check for plural "tenancies" or "profiles" indicating ALL profiles
+        # e.g., "in my tenancies", "all tenancies", "both profiles", "across tenancies"
+        all_profiles_patterns = [
+            r"\b(?:my|all|both|across|multiple)\s+(?:tenancies|profiles)\b",
+            r"\btenancies\b",  # Plural "tenancies" alone implies all
+            r"\ball\s+(?:oci\s+)?(?:tenancies|profiles|environments)\b",
+        ]
+        for pattern in all_profiles_patterns:
+            if re.search(pattern, query_lower):
+                logger.debug(
+                    "Detected all-profiles pattern",
+                    pattern=pattern,
+                    query=query_lower[:50],
+                    profiles=configured_profiles,
+                )
+                return configured_profiles
 
         # Pattern 1: "from <profile>" or "in <profile>"
         # e.g., "from emdemo", "in default profile"
@@ -556,6 +624,57 @@ class CoordinatorNodes:
                     profiles.append(profile.upper())
 
         return profiles
+
+    def _extract_database_name(self, query: str) -> str | None:
+        """
+        Extract database name from natural language queries.
+
+        Handles patterns like:
+        - "AWR report for FINANCE" → "FINANCE"
+        - "top SQL for PROD_DB" → "PROD_DB"
+        - "wait events on SALESDB database" → "SALESDB"
+        - "FINANCE database performance" → "FINANCE"
+        - "database FINANCE health" → "FINANCE"
+
+        Returns:
+            Database name (uppercase) found in query, or None
+        """
+        import re
+
+        query_upper = query.upper()
+
+        # Pattern 1: "for <database>" - most common
+        # e.g., "AWR report for FINANCE", "top SQL for PROD"
+        for_pattern = r"\bFOR\s+([A-Z][A-Z0-9_-]*)\b"
+        match = re.search(for_pattern, query_upper)
+        if match:
+            db_name = match.group(1)
+            # Filter out common non-database words
+            skip_words = {"THE", "A", "AN", "ALL", "MY", "OUR", "THIS", "THAT", "LAST", "NEXT"}
+            if db_name not in skip_words:
+                return db_name
+
+        # Pattern 2: "<database> database" or "database <database>"
+        # e.g., "FINANCE database", "database FINANCE"
+        db_pattern = r"\b([A-Z][A-Z0-9_-]*)\s+DATABASE\b|\bDATABASE\s+([A-Z][A-Z0-9_-]*)\b"
+        match = re.search(db_pattern, query_upper)
+        if match:
+            db_name = match.group(1) or match.group(2)
+            skip_words = {"THE", "A", "AN", "ALL", "MY", "OUR", "THIS", "THAT", "MANAGED", "EXTERNAL"}
+            if db_name not in skip_words:
+                return db_name
+
+        # Pattern 3: "on <database>" or "of <database>"
+        # e.g., "wait events on SALESDB", "performance of PROD"
+        on_of_pattern = r"\b(?:ON|OF)\s+([A-Z][A-Z0-9_-]*)\b"
+        match = re.search(on_of_pattern, query_upper)
+        if match:
+            db_name = match.group(1)
+            skip_words = {"THE", "A", "AN", "ALL", "MY", "OUR", "THIS", "THAT"}
+            if db_name not in skip_words:
+                return db_name
+
+        return None
 
     def _pre_classify_cost_query(self, query: str) -> IntentClassification | None:
         """
@@ -942,12 +1061,22 @@ class CoordinatorNodes:
         # AWR/ASH report patterns
         awr_keywords = ["awr report", "awr", "ash report", "performance report", "workload report"]
         if any(kw in query_lower for kw in awr_keywords):
+            # Extract database name from query (e.g., "AWR report for FINANCE")
+            entities: dict[str, Any] = {}
+            db_name = self._extract_database_name(query)
+            if db_name:
+                entities["database_name"] = db_name
+            profiles = self._extract_profiles(query)
+            if profiles:
+                entities["profiles"] = profiles
+                if len(profiles) == 1:
+                    entities["oci_profile"] = profiles[0]
             return IntentClassification(
                 intent="awr_report",
                 category=IntentCategory.ANALYSIS,
                 confidence=0.95,
                 domains=["database"],  # Single domain to avoid parallel routing
-                entities={},
+                entities=entities,
                 suggested_workflow="awr_report",
                 suggested_agent="db-troubleshoot-agent",  # Route to DB agent
             )
@@ -955,12 +1084,22 @@ class CoordinatorNodes:
         # Top SQL / SQL performance patterns
         sql_perf_keywords = ["top sql", "expensive queries", "sql cpu", "high cpu sql", "slow queries", "sql performance", "analyze slow", "analyze query", "query analysis"]
         if any(kw in query_lower for kw in sql_perf_keywords):
+            # Extract database name from query
+            entities = {}
+            db_name = self._extract_database_name(query)
+            if db_name:
+                entities["database_name"] = db_name
+            profiles = self._extract_profiles(query)
+            if profiles:
+                entities["profiles"] = profiles
+                if len(profiles) == 1:
+                    entities["oci_profile"] = profiles[0]
             return IntentClassification(
                 intent="top_sql",
                 category=IntentCategory.ANALYSIS,
                 confidence=0.95,
                 domains=["database"],  # Single domain to avoid parallel routing
-                entities={},
+                entities=entities,
                 suggested_workflow="top_sql",
                 suggested_agent="db-troubleshoot-agent",  # Route to DB agent
             )
@@ -968,12 +1107,22 @@ class CoordinatorNodes:
         # Wait events patterns
         wait_keywords = ["wait event", "wait events", "database waits", "performance bottleneck"]
         if any(kw in query_lower for kw in wait_keywords):
+            # Extract database name from query
+            entities = {}
+            db_name = self._extract_database_name(query)
+            if db_name:
+                entities["database_name"] = db_name
+            profiles = self._extract_profiles(query)
+            if profiles:
+                entities["profiles"] = profiles
+                if len(profiles) == 1:
+                    entities["oci_profile"] = profiles[0]
             return IntentClassification(
                 intent="wait_events",
                 category=IntentCategory.ANALYSIS,
                 confidence=0.95,
                 domains=["database"],  # Single domain to avoid parallel routing
-                entities={},
+                entities=entities,
                 suggested_workflow="wait_events",
                 suggested_agent="db-troubleshoot-agent",  # Route to DB agent
             )
@@ -1191,69 +1340,234 @@ class CoordinatorNodes:
 
         return None
 
-    def _build_classification_prompt(self, query: str) -> str:
-        """Build the intent classification prompt."""
-        # Get available workflows and agents for context
-        available_workflows = list(self.workflow_registry.keys())
-        available_agents = [
-            agent.role for agent in self.agent_catalog.list_all()
-        ]
+    def _pre_classify_compute_query(self, query: str) -> IntentClassification | None:
+        """
+        Pre-classify compute/infrastructure queries using keyword matching.
 
-        # Build agent-to-domain mapping for better routing decisions
+        Catches queries like:
+        - "create instance" → provision_instance
+        - "launch vm" → provision_instance
+        - "provision server" → provision_instance
+        - "list shapes" → list_shapes
+        - "available images" → list_images
+        - "list instances" → list_instances
+        - "get instance" → get_instance
+
+        This avoids LLM classification for common compute operations.
+        """
+        query_lower = query.lower()
+
+        # Provision/create instance patterns
+        provision_keywords = ["provision", "create", "launch", "spin up", "deploy", "new"]
+        instance_keywords = ["instance", "vm", "server", "virtual machine", "compute"]
+
+        has_provision = any(kw in query_lower for kw in provision_keywords)
+        has_instance = any(kw in query_lower for kw in instance_keywords)
+
+        if has_provision and has_instance:
+            # Extract instance name if provided (e.g., "create instance my-server")
+            entities: dict[str, Any] = {}
+            # Simple name extraction: look for words after the instance keyword
+            import re
+            name_match = re.search(
+                r'(?:instance|vm|server)\s+named?\s*([a-zA-Z][a-zA-Z0-9_-]*)',
+                query_lower,
+            )
+            if name_match:
+                entities["instance_name"] = name_match.group(1)
+
+            # Check for size selection (1, 2, 3, 4)
+            size_match = re.search(r'\b([1-4])\b', query)
+            if size_match:
+                entities["size_selection"] = size_match.group(1)
+
+            return IntentClassification(
+                intent="provision_instance",
+                category=IntentCategory.ACTION,
+                confidence=0.95,
+                domains=["compute", "infrastructure"],
+                entities=entities,
+                suggested_workflow="provision_instance",
+                suggested_agent="infrastructure-agent",
+            )
+
+        # List shapes patterns
+        shape_keywords = ["shape", "shapes", "instance type", "instance types"]
+        listing_keywords = ["list", "show", "get", "available", "what"]
+
+        has_listing = any(kw in query_lower for kw in listing_keywords)
+        has_shape = any(kw in query_lower for kw in shape_keywords)
+
+        if has_listing and has_shape:
+            return IntentClassification(
+                intent="list_shapes",
+                category=IntentCategory.QUERY,
+                confidence=0.95,
+                domains=["compute"],
+                entities={},
+                suggested_workflow="list_shapes",
+                suggested_agent=None,
+            )
+
+        # List images patterns
+        image_keywords = ["image", "images", "os image", "operating system"]
+        has_image = any(kw in query_lower for kw in image_keywords)
+
+        if has_listing and has_image:
+            return IntentClassification(
+                intent="list_images",
+                category=IntentCategory.QUERY,
+                confidence=0.95,
+                domains=["compute"],
+                entities={},
+                suggested_workflow="list_images",
+                suggested_agent=None,
+            )
+
+        # List instances patterns
+        if has_listing and has_instance:
+            return IntentClassification(
+                intent="list_instances",
+                category=IntentCategory.QUERY,
+                confidence=0.95,
+                domains=["compute"],
+                entities={},
+                suggested_workflow="list_instances",
+                suggested_agent=None,
+            )
+
+        # Get/describe specific instance
+        get_keywords = ["get", "describe", "show", "details", "info"]
+        has_get = any(kw in query_lower for kw in get_keywords)
+
+        if has_get and has_instance and not has_listing:
+            return IntentClassification(
+                intent="get_instance",
+                category=IntentCategory.QUERY,
+                confidence=0.90,
+                domains=["compute"],
+                entities={},
+                suggested_workflow="get_instance",
+                suggested_agent=None,
+            )
+
+        return None
+
+    def _pre_classify_security_query(self, query: str) -> IntentClassification | None:
+        """
+        Pre-classify security queries using keyword matching.
+
+        Catches queries like:
+        - "show security problems" → security_problems
+        - "list vulnerabilities" → vulnerability_scan
+        - "security threats" → security_threats
+        - "cloud guard findings" → security_problems
+        - "security score" → security_score
+
+        This avoids LLM classification for common security queries,
+        reducing token usage and response time.
+        """
+        query_lower = query.lower()
+
+        # Cloud Guard / Security Problems patterns
+        security_problem_keywords = [
+            "security problem", "security problems", "security issue", "security issues",
+            "cloud guard", "cloudguard", "findings", "security finding",
+        ]
+        if any(kw in query_lower for kw in security_problem_keywords):
+            return IntentClassification(
+                intent="security_problems",
+                category=IntentCategory.QUERY,
+                confidence=0.95,
+                domains=["security"],
+                entities={},
+                suggested_workflow="security_problems",
+                suggested_agent="security-agent",
+            )
+
+        # Vulnerability scanning patterns
+        vuln_keywords = [
+            "vulnerability", "vulnerabilities", "vuln", "cve",
+            "scan result", "security scan", "host scan", "container scan",
+        ]
+        if any(kw in query_lower for kw in vuln_keywords):
+            return IntentClassification(
+                intent="vulnerability_scan",
+                category=IntentCategory.QUERY,
+                confidence=0.95,
+                domains=["security"],
+                entities={},
+                suggested_workflow="vulnerability_scan",
+                suggested_agent="security-agent",
+            )
+
+        # Security score/posture patterns
+        score_keywords = ["security score", "security posture", "security rating"]
+        if any(kw in query_lower for kw in score_keywords):
+            return IntentClassification(
+                intent="security_score",
+                category=IntentCategory.QUERY,
+                confidence=0.95,
+                domains=["security"],
+                entities={},
+                suggested_workflow="security_score",
+                suggested_agent="security-agent",
+            )
+
+        # Threat detection patterns
+        threat_keywords = ["threat", "threats", "attack", "intrusion", "breach"]
+        listing_keywords = ["list", "show", "get", "detect", "find"]
+        has_threat = any(kw in query_lower for kw in threat_keywords)
+        has_listing = any(kw in query_lower for kw in listing_keywords)
+
+        if has_threat and has_listing:
+            return IntentClassification(
+                intent="security_threats",
+                category=IntentCategory.QUERY,
+                confidence=0.90,
+                domains=["security"],
+                entities={},
+                suggested_workflow="security_threats",
+                suggested_agent="security-agent",
+            )
+
+        # Bastion/secure access patterns
+        bastion_keywords = ["bastion", "secure access", "ssh session"]
+        if any(kw in query_lower for kw in bastion_keywords):
+            return IntentClassification(
+                intent="bastion_sessions",
+                category=IntentCategory.QUERY,
+                confidence=0.95,
+                domains=["security"],
+                entities={},
+                suggested_workflow="bastion_sessions",
+                suggested_agent="security-agent",
+            )
+
+        return None
+
+    def _build_classification_prompt(self, query: str) -> str:
+        """Build the intent classification prompt (optimized for token efficiency)."""
+        # Agent-to-domain mapping for routing decisions
         agent_domains = self._get_agent_domain_mapping()
 
-        return f"""Classify the following user query for an OCI (Oracle Cloud Infrastructure) management system.
+        # Token-optimized prompt: removed full workflow list, condensed instructions
+        return f"""Classify this OCI query. Query: "{query}"
 
-Query: "{query}"
-
-Available Workflows: {available_workflows}
-
-Agent Capabilities (use suggested_agent based on query domain):
+Agents:
 {agent_domains}
 
-IMPORTANT: For cost-related queries:
-- If query mentions specific services (database, DB, compute, storage, network), use domain-specific workflows:
-  - "database_costs" or "db_costs" for database/DB cost queries
-  - "compute_costs" for compute/instance cost queries
-  - "storage_costs" for storage cost queries
-- Only use "cost_summary" or "show_spending" for general tenancy-wide cost queries
-- Extract the domain (database, compute, storage, network) into the domains array
+Workflow naming: list_{{resource}}, get_{{resource}}, {{resource}}_costs, {{action}}_{{resource}}
+Common: list_databases, list_instances, cost_summary, database_costs, compute_costs, awr_report, top_sql
 
-Examples:
-- "show me DB costs" → intent: "database_costs", domains: ["database", "cost"]
-- "how much am I spending on databases" → intent: "database_costs", domains: ["database", "cost"]
-- "what's my total spending" → intent: "cost_summary", domains: ["cost"]
-- "tenancy costs" → intent: "cost_summary", domains: ["cost"]
+Respond JSON only:
+{{"intent":"<action_resource>","category":"<query|action|analysis|troubleshoot>","confidence":<0-1>,"domains":["<domain>"],"entities":{{}},"suggested_workflow":"<name>","suggested_agent":"<role>"}}
 
-Respond with a JSON object:
-{{
-    "intent": "<specific intent like list_instances, database_costs, compute_costs>",
-    "category": "<query|action|analysis|troubleshoot|unknown>",
-    "confidence": <0.0 to 1.0>,
-    "domains": ["<domain1>", "<domain2>"],
-    "entities": {{"entity_name": "value"}},
-    "suggested_workflow": "<workflow name or null>",
-    "suggested_agent": "<agent role or null>"
-}}
-
-Categories:
-- query: Information retrieval (list, get, describe, show costs)
-- action: Perform operation (start, stop, create, delete)
-- analysis: Complex analysis (deep cost analysis, performance review)
-- troubleshoot: Diagnose issues (why is X slow, fix Y)
-- unknown: Cannot determine
-
+Categories: query=info, action=mutate, analysis=complex reasoning, troubleshoot=diagnose
 Domains: compute, network, database, dbmgmt, opsi, security, cost, observability, storage
 
-IMPORTANT: For database management/performance queries:
-- "fleet health" → intent: "db_fleet_health", domains: ["dbmgmt", "database"]
-- "AWR report" → intent: "awr_report", domains: ["dbmgmt", "database"]
-- "top SQL" → intent: "top_sql", domains: ["dbmgmt", "database"]
-- "wait events" → intent: "wait_events", domains: ["dbmgmt", "database"]
-- "ADDM findings" → intent: "addm_findings", domains: ["opsi", "database"]
-- "capacity forecast" → intent: "capacity_forecast", domains: ["opsi", "database"]
-
-Return only the JSON object, no other text."""
+Cost routing: database/DB→database_costs, compute/VM→compute_costs, general→cost_summary
+DB perf: fleet health→db_fleet_health, AWR→awr_report, top SQL→top_sql, ADDM→addm_findings"""
 
     def _parse_classification(
         self, response: str, query: str

@@ -184,18 +184,39 @@ class FinOpsAgent(BaseAgent, SelfHealingMixin):
     async def _build_cost_summary_params(
         self, state: FinOpsState, days: int
     ) -> tuple[str, dict[str, Any], str, str]:
-        tool_name = "oci_cost_get_summary"
+        tool_name = "get_cost_summary"
         tool_def = None
         if self.tools:
+            # Try multiple tool name variants - finopsai uses get_cost_summary
+            # while oci-unified uses oci_cost_get_summary
             for candidate in (
-                "finopsai:get_cost_summary",
-                "oci-unified:oci_cost_get_summary",
-                "oci_cost_get_summary",
+                "get_cost_summary",  # finopsai primary tool
+                "finops_cost_summary",  # finopsai multicloud summary
+                "finopsai:get_cost_summary",  # Explicit server prefix
+                "oci_cost_get_summary",  # oci-unified variant
+                "oci-unified:oci_cost_get_summary",  # Explicit server prefix
+                "oci-infrastructure:oci_cost_get_summary",  # Fallback
             ):
                 tool_def = self.tools.get_tool(candidate)
                 if tool_def:
-                    tool_name = candidate
+                    tool_name = tool_def.name  # Use actual tool name from definition
+                    self._logger.debug(
+                        "Found cost tool",
+                        candidate=candidate,
+                        actual_name=tool_name,
+                        server_id=tool_def.server_id,
+                    )
                     break
+
+            if not tool_def:
+                self._logger.warning(
+                    "No cost summary tool found",
+                    tried_candidates=[
+                        "get_cost_summary", "finops_cost_summary",
+                        "oci_cost_get_summary"
+                    ],
+                )
+
         schema_props = self._schema_properties(tool_def.input_schema if tool_def else None)
         server_id = tool_def.server_id if tool_def else ""
 
@@ -233,6 +254,110 @@ class FinOpsAgent(BaseAgent, SelfHealingMixin):
                 params["format"] = "json"
 
         return tool_name, params, start_date, end_date
+
+    async def _enrich_with_finops_tools(
+        self,
+        state: FinOpsState,
+        summary_data: dict[str, Any],
+        cost_by_service: list[dict],
+        reasoning_update: list[str],
+    ) -> None:
+        """
+        Enrich cost analysis using additional finopsai MCP tools.
+
+        Based on analysis_type, calls specialized tools:
+        - anomaly: finops_detect_anomalies
+        - optimization: finops_rightsizing
+        - compare_services: oci_cost_service_drilldown
+        - database costs: oci_cost_database_drilldown
+        """
+        if not self.tools:
+            return
+
+        try:
+            tenancy = await self._resolve_tenancy_ocid(state.oci_profile)
+
+            # Anomaly detection
+            if state.analysis_type == "anomaly":
+                anomaly_result = await self.call_tool(
+                    "finops_detect_anomalies",
+                    {
+                        "days_back": 30,
+                        "method": "z_score",
+                        "threshold": 2,
+                        "response_format": "json",
+                    },
+                )
+                success, payload, _ = self._extract_tool_payload(anomaly_result)
+                if success and payload:
+                    anomalies = payload.get("anomalies", [])
+                    if anomalies:
+                        reasoning_update.append(f"🔍 **Anomaly scan:** Found {len(anomalies)} cost anomalies")
+                        summary_data["anomalies"] = anomalies
+
+            # Rightsizing / Optimization
+            elif state.analysis_type == "optimization":
+                rightsizing_result = await self.call_tool(
+                    "finops_rightsizing",
+                    {"resource_type": "compute", "min_savings": 10, "response_format": "json"},
+                )
+                success, payload, _ = self._extract_tool_payload(rightsizing_result)
+                if success and payload:
+                    recommendations = payload.get("recommendations", [])
+                    if recommendations:
+                        reasoning_update.append(f"💡 **Rightsizing:** Found {len(recommendations)} optimization opportunities")
+                        summary_data["rightsizing"] = recommendations
+
+            # Service drilldown
+            elif state.analysis_type == "compare_services" and tenancy:
+                drilldown_result = await self.call_tool(
+                    "oci_cost_service_drilldown",
+                    {
+                        "tenancy_ocid": tenancy,
+                        "time_start": state.start_date or (date.today() - timedelta(days=30)).isoformat(),
+                        "time_end": state.end_date or date.today().isoformat(),
+                        "top_n": 10,
+                        "response_format": "json",
+                    },
+                )
+                success, payload, _ = self._extract_tool_payload(drilldown_result)
+                if success and payload:
+                    services = payload.get("services", [])
+                    if services:
+                        reasoning_update.append(f"📊 **Service drilldown:** Analyzed top {len(services)} services")
+                        # Merge into cost_by_service if we have better data
+                        if len(services) > len(cost_by_service):
+                            cost_by_service.clear()
+                            for svc in services:
+                                cost_by_service.append({
+                                    "name": svc.get("service", "Unknown"),
+                                    "cost": self._parse_amount(svc.get("cost", 0)),
+                                    "percent": svc.get("percent", "0%"),
+                                })
+
+            # Database-specific cost analysis
+            query_lower = state.query.lower()
+            if any(kw in query_lower for kw in ["database", "db", "autonomous", "atp", "adw"]) and tenancy:
+                db_result = await self.call_tool(
+                    "oci_cost_database_drilldown",
+                    {
+                        "tenancy_ocid": tenancy,
+                        "time_start": state.start_date or (date.today() - timedelta(days=30)).isoformat(),
+                        "time_end": state.end_date or date.today().isoformat(),
+                        "drilldown_level": "summary",
+                        "response_format": "json",
+                    },
+                )
+                success, payload, _ = self._extract_tool_payload(db_result)
+                if success and payload:
+                    db_cost = payload.get("total_cost", 0)
+                    if db_cost:
+                        reasoning_update.append(f"🗄️ **Database costs:** ${db_cost:,.2f} total")
+                        summary_data["database_costs"] = payload
+
+        except Exception as e:
+            self._logger.debug("Enrichment with finops tools failed", error=str(e))
+            # Don't fail the whole analysis, just skip enrichment
 
     @classmethod
     def get_definition(cls) -> AgentDefinition:
@@ -468,14 +593,15 @@ class FinOpsAgent(BaseAgent, SelfHealingMixin):
         }
 
     async def _get_costs_node(self, state: FinOpsState) -> dict[str, Any]:
-        """Get cost data from OCI."""
+        """Get cost data from OCI using finopsai MCP tools."""
 
-        self._logger.info("Getting cost data", time_range=state.time_range)
+        self._logger.info("Getting cost data", time_range=state.time_range, analysis_type=state.analysis_type)
 
         cost_summary = {}
         cost_by_service = []
         total_cost = 0.0
         summary_data: dict[str, Any] = {}
+        reasoning_update = list(state.reasoning_chain)  # Initialize early to avoid undefined reference
 
         if self.tools:
             # Parse days from time_range (e.g., "30d" -> 30)
@@ -504,13 +630,16 @@ class FinOpsAgent(BaseAgent, SelfHealingMixin):
                     if "last month" in state.query.lower():
                         months_back = 2  # Current + Previous
 
-                    trend_params = {
+                    # Resolve tenancy OCID (required by finopsai MCP tool)
+                    tenancy = await self._resolve_tenancy_ocid(state.oci_profile)
+
+                    trend_params: dict[str, Any] = {
                         "months_back": months_back,
                         "include_forecast": True,
                     }
-                    if state.oci_profile:
-                        trend_params["profile"] = state.oci_profile
-                     # Clean up params for trend tool
+                    if tenancy:
+                        trend_params["tenancy_ocid"] = tenancy
+                    # Note: finopsai uses tenancy_ocid, not profile
                     summary_result = await self.healing_call_tool(
                         "oci_cost_monthly_trend",
                         trend_params,
@@ -592,29 +721,27 @@ class FinOpsAgent(BaseAgent, SelfHealingMixin):
             except ValueError as e:
                 # Tool not found - this is expected if only built-in tools available
                 self._logger.warning("Cost tool not available", error=str(e))
+                reasoning_update.append(f"⚠️ **Tool unavailable:** {e}")
             except Exception as e:
                 self._logger.warning("Cost retrieval failed", error=str(e))
+                reasoning_update.append(f"⚠️ **Cost retrieval error:** {str(e)[:100]}")
 
-        # Handle forecast specifically if requested (part of trend tool usually, but ensures visibility)
+            # Try additional finopsai tools based on analysis type
+            await self._enrich_with_finops_tools(state, summary_data, cost_by_service, reasoning_update)
+
+        # Handle forecast specifically if requested
         if "forecast" in state.query.lower() and state.analysis_type == "trend":
-             reasoning_update.append("🔮 **Forecast:** Generating future spend predictions based on historical trends.")
+            reasoning_update.append("🔮 **Forecast:** Generating future spend predictions based on historical trends.")
 
-        # Handle Service Comparison (Q7)
-        if state.analysis_type == "compare_services":
-             # Logic to compare two services if identified, or just top ones
-             # For now, we reuse the cost_by_service data
-             pass
-
-        # Add to reasoning chain
-
-        # Add to reasoning chain
-        reasoning_update = list(state.reasoning_chain)
+        # Add final reasoning update
         if summary_data.get("error"):
             reasoning_update.append(f"⚠️ **Cost API error:** {summary_data['error']}")
-        else:
+        elif total_cost > 0 or cost_by_service:
             reasoning_update.append(
                 f"💰 **Data retrieved:** Total cost ${total_cost:,.2f} across {len(cost_by_service)} services"
             )
+        else:
+            reasoning_update.append("ℹ️ **Note:** No cost data returned. Check tenancy/compartment configuration.")
 
         return {
             "cost_summary": cost_summary,
