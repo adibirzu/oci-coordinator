@@ -31,11 +31,11 @@ servers:
   # This is the primary server - no external dependencies
   oci-unified:
     transport: stdio
-    command: /Users/abirzu/dev/oci-coordinator/.venv/bin/python
+    command: python
     args:
       - "-m"
       - "src.mcp.server.main"
-    working_dir: /Users/abirzu/dev/oci-coordinator
+    working_dir: .
     env:
       OCI_CONFIG_FILE: "~/.oci/config"
       OCI_CLI_PROFILE: "DEFAULT"
@@ -57,17 +57,17 @@ servers:
   # Replace path with your local installation
   database-observatory:
     transport: stdio
-    command: /Users/abirzu/dev/MCP/mcp-oci-database-observatory/.venv/bin/python
+    command: python
     args:
       - "-m"
       - "src.mcp_server"
-    working_dir: /Users/abirzu/dev/MCP/mcp-oci-database-observatory
+    working_dir: /path/to/mcp-oci-database-observatory
     env:
       OCI_CONFIG_FILE: "~/.oci/config"
       OCI_CLI_PROFILE: "DEFAULT"
-      SQLCL_PATH: "/Applications/sqlcl/bin/sql"
+      SQLCL_PATH: "/usr/bin/sql"
       MCP_OTEL_SDK_DISABLED: "true"  # Disable OTEL to speed up init
-    enabled: true
+    enabled: false
     domains:
       - database
       - opsi
@@ -80,19 +80,17 @@ servers:
   # Full OCI management capabilities via mcp-oci
   oci-infrastructure:
     transport: stdio
-    command: uv
+    command: python
     args:
-      - "run"
-      - "python"
       - "-m"
       - "mcp_server_oci.server"
-    working_dir: /Users/abirzu/dev/MCP/mcp-oci
+    working_dir: /path/to/mcp-oci
     env:
       OCI_CONFIG_FILE: "~/.oci/config"
       OCI_CLI_PROFILE: "DEFAULT"
       ALLOW_MUTATIONS: "false"  # Set to "true" to enable write operations
       MCP_SERVER_ID: "oci-infrastructure"
-    enabled: true
+    enabled: false
     domains:
       - compute
       - network
@@ -110,11 +108,11 @@ servers:
     args:
       - "-m"
       - "oci_mcp_security.server"
-    working_dir: /Users/abirzu/dev/MCP/oci-mcp-security
+    working_dir: /path/to/oci-mcp-security
     env:
       OCI_CONFIG_FILE: "~/.oci/config"
       OCI_CLI_PROFILE: "DEFAULT"
-      PYTHONPATH: "/Users/abirzu/dev/MCP/oci-mcp-security/src"
+      PYTHONPATH: "src"
     enabled: false
     domains:
       - security
@@ -154,16 +152,16 @@ servers:
   # FinOps AI MCP Server - Multicloud cost management
   finopsai:
     transport: stdio
-    command: /Users/abirzu/dev/MCP/finopsai-mcp/.venv/bin/python
+    command: python
     args:
       - "-m"
       - "finopsai_mcp.server"
-    working_dir: /Users/abirzu/dev/MCP/finopsai-mcp
+    working_dir: /path/to/finopsai-mcp
     env:
       OCI_CONFIG_FILE: "~/.oci/config"
       OCI_CLI_PROFILE: "DEFAULT"
-      PYTHONPATH: "/Users/abirzu/dev/MCP/finopsai-mcp/src"
-    enabled: true
+      PYTHONPATH: "src"
+    enabled: false
     domains:
       - cost
       - budget
