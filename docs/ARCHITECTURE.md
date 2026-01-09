@@ -4,6 +4,14 @@
 
 The OCI AI Agent Coordinator is a LangGraph-based orchestration system implementing a **Workflow-First** architecture. It prioritizes deterministic workflows for known tasks (target: 70%+ of requests) while providing agentic fallback for complex or novel queries.
 
+**Current Capabilities:**
+- **395+ MCP Tools** across 4 servers
+- **35+ Pre-built Workflows** with 100+ intent aliases
+- **6 Specialized Agents** (DB Troubleshoot, Log Analytics, Security, FinOps, Infrastructure, Error Analysis)
+- **281+ Tests** passing (80%+ coverage target)
+
+See `docs/DEMO_PLAN.md` for 30 production-ready Slack commands demonstrating end-to-end capabilities.
+
 ## 2. System Context
 
 ```
@@ -327,13 +335,14 @@ class ConversationContext:
 │                          │                │                 │           │
 │                          ▼                ▼                 │           │
 │                   ┌────────────────────────────┐            │           │
-│                   │  SPECIALIZED AGENTS        │            │           │
+│                   │  SPECIALIZED AGENTS (6)    │            │           │
 │                   │  ┌──────────────────────┐ │            │           │
 │                   │  │ • DB Troubleshoot    │ │            │           │
 │                   │  │ • Log Analytics      │ │            │           │
 │                   │  │ • Security Threat    │ │            │           │
 │                   │  │ • FinOps             │ │            │           │
 │                   │  │ • Infrastructure     │ │            │           │
+│                   │  │ • Error Analysis     │ │            │           │
 │                   │  └──────────────────────┘ │            │           │
 │                   └──────────────┬────────────┘            │           │
 │                                  │                          │           │
@@ -368,22 +377,22 @@ class ConversationContext:
 ├──────────────────────────────────────────────────────────────────────────┤
 │                                                                           │
 │   ┌─────────────────────────────────────────────────────────────────────┐│
-│   │  oci-unified (Built-in)                                             ││
+│   │  oci-unified (Built-in) — 51 tools                                  ││
 │   │  └── Identity, Compute, Network, Cost, Security, Observability      ││
 │   └─────────────────────────────────────────────────────────────────────┘│
 │                           │                                               │
 │   ┌─────────────────────────────────────────────────────────────────────┐│
-│   │  database-observatory (External)                                     ││
-│   │  └── OPSI, SQLcl, Logan Analytics                                   ││
+│   │  database-observatory (External) — 50+ tools                         ││
+│   │  └── OPSI, SQLcl, Logan Analytics, DB Management                    ││
 │   └─────────────────────────────────────────────────────────────────────┘│
 │                           │                                               │
 │   ┌─────────────────────────────────────────────────────────────────────┐│
-│   │  oci-infrastructure (External)                                       ││
+│   │  oci-infrastructure (External) — 44 tools                            ││
 │   │  └── Compute, Network, Security (via mcp-oci)                       ││
 │   └─────────────────────────────────────────────────────────────────────┘│
 │                           │                                               │
 │   ┌─────────────────────────────────────────────────────────────────────┐│
-│   │  finopsai (External)                                                 ││
+│   │  finopsai (External) — 33 tools                                      ││
 │   │  └── Multicloud Cost, Anomaly Detection, Rightsizing                ││
 │   └─────────────────────────────────────────────────────────────────────┘│
 │                           │                                               │
@@ -825,8 +834,10 @@ APPROVAL_REQUIRED = [
 - [x] Security Threat agent (`src/agents/security/`)
 - [x] FinOps agent (`src/agents/finops/`)
 - [x] Infrastructure agent (`src/agents/infrastructure/`)
+- [x] Error Analysis agent (`src/agents/error_analysis/`)
 - [x] Channel-aware formatting (`src/formatting/`)
 - [x] Instance operations by name (`oci_compute_*_by_name`)
+- [x] DB Troubleshooting workflows (see `docs/DB_TROUBLESHOOTING_WORKFLOW.md`)
 
 ### Phase 4: Evaluation & Production 🔄
 - [x] FastAPI endpoints (`src/api/`)
@@ -1033,3 +1044,15 @@ async def initialize_coordinator() -> None:
         # ... initialization code ...
         _initialized = True
 ```
+
+---
+
+## 16. Related Documentation
+
+| Document | Purpose |
+|----------|---------|
+| `DEMO_PLAN.md` | 30 production-ready Slack commands with API examples |
+| `DB_TROUBLESHOOTING_WORKFLOW.md` | Database diagnostic workflow mapping |
+| `FEATURE_MAPPING.md` | Complete tool-to-workflow mapping |
+| `OCI_AGENT_REFERENCE.md` | Agent configurations and schemas |
+| `SLACK_WORKFLOW_AUDIT.md` | Slack integration patterns |

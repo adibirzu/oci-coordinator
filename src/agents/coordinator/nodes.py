@@ -894,6 +894,32 @@ class CoordinatorNodes:
             if any(kw in query_lower for kw in perf_keywords):
                 return None  # Let LLM route to appropriate agent
 
+            # Make sure this isn't a DB management query (SQL monitoring, blocking, etc.)
+            # These should be routed to db_troubleshoot agent via _pre_classify_dbmgmt_query
+            dbmgmt_keywords = [
+                # SQL monitoring
+                "running sql", "active sql", "sql monitor", "executing sql", "current sql",
+                "active queries", "running queries",
+                # Blocking sessions
+                "blocking", "blocked", "lock contention", "deadlock",
+                # Wait events
+                "wait event", "wait events", "wait class",
+                # Parallelism
+                "parallelism", "parallel query", "px_servers", "degree of parallelism",
+                # Long running operations
+                "longops", "long running", "long-running", "time remaining",
+                # Full table scans
+                "table scan", "full scan", "full table",
+                # AWR reports
+                "awr report", "awr", "workload report", "snapshot",
+                # Health checks
+                "health check", "database health", "db health", "check health",
+                # Top SQL
+                "top sql", "top queries", "cpu time", "elapsed time",
+            ]
+            if any(kw in query_lower for kw in dbmgmt_keywords):
+                return None  # Let _pre_classify_dbmgmt_query handle it
+
             # Extract profile names from query (e.g., "from emdemo", "in Default profile")
             profiles = self._extract_profiles(query)
             entities: dict[str, Any] = {}
@@ -1127,6 +1153,116 @@ class CoordinatorNodes:
                 suggested_agent="db-troubleshoot-agent",  # Route to DB agent
             )
 
+        # Blocking sessions patterns
+        blocking_keywords = ["blocking session", "check blocking", "lock contention", "session blocking", "blocked session", "blocking locks"]
+        if any(kw in query_lower for kw in blocking_keywords):
+            entities = {}
+            db_name = self._extract_database_name(query)
+            if db_name:
+                entities["database_name"] = db_name
+            profiles = self._extract_profiles(query)
+            if profiles:
+                entities["profiles"] = profiles
+                if len(profiles) == 1:
+                    entities["oci_profile"] = profiles[0]
+            return IntentClassification(
+                intent="blocking_sessions",
+                category=IntentCategory.ANALYSIS,
+                confidence=0.95,
+                domains=["database"],
+                entities=entities,
+                suggested_workflow="blocking_sessions",
+                suggested_agent="db-troubleshoot-agent",
+            )
+
+        # SQL monitoring patterns (running/active SQL)
+        sql_monitor_keywords = ["running sql", "show running sql", "active sql", "sql monitor", "executing sql", "current sql", "active queries"]
+        if any(kw in query_lower for kw in sql_monitor_keywords):
+            entities = {}
+            db_name = self._extract_database_name(query)
+            if db_name:
+                entities["database_name"] = db_name
+            profiles = self._extract_profiles(query)
+            if profiles:
+                entities["profiles"] = profiles
+                if len(profiles) == 1:
+                    entities["oci_profile"] = profiles[0]
+            return IntentClassification(
+                intent="sql_monitoring",
+                category=IntentCategory.ANALYSIS,
+                confidence=0.95,
+                domains=["database"],
+                entities=entities,
+                suggested_workflow="sql_monitoring",
+                suggested_agent="db-troubleshoot-agent",
+            )
+
+        # Parallelism check patterns
+        parallelism_keywords = ["check parallelism", "parallelism", "px stats", "parallel query", "px downgrade", "parallel execution", "degree of parallelism"]
+        if any(kw in query_lower for kw in parallelism_keywords):
+            entities = {}
+            db_name = self._extract_database_name(query)
+            if db_name:
+                entities["database_name"] = db_name
+            profiles = self._extract_profiles(query)
+            if profiles:
+                entities["profiles"] = profiles
+                if len(profiles) == 1:
+                    entities["oci_profile"] = profiles[0]
+            return IntentClassification(
+                intent="parallelism_stats",
+                category=IntentCategory.ANALYSIS,
+                confidence=0.95,
+                domains=["database"],
+                entities=entities,
+                suggested_workflow="parallelism_stats",
+                suggested_agent="db-troubleshoot-agent",
+            )
+
+        # Long running operations patterns
+        longops_keywords = ["long running", "longops", "long operation", "batch progress", "session longops", "long running operations"]
+        if any(kw in query_lower for kw in longops_keywords):
+            entities = {}
+            db_name = self._extract_database_name(query)
+            if db_name:
+                entities["database_name"] = db_name
+            profiles = self._extract_profiles(query)
+            if profiles:
+                entities["profiles"] = profiles
+                if len(profiles) == 1:
+                    entities["oci_profile"] = profiles[0]
+            return IntentClassification(
+                intent="long_running_ops",
+                category=IntentCategory.ANALYSIS,
+                confidence=0.95,
+                domains=["database"],
+                entities=entities,
+                suggested_workflow="long_running_ops",
+                suggested_agent="db-troubleshoot-agent",
+            )
+
+        # Full table scan detection patterns
+        fts_keywords = ["full table scan", "table scan", "full scan", "fts detection"]
+        if any(kw in query_lower for kw in fts_keywords):
+            entities = {}
+            db_name = self._extract_database_name(query)
+            if db_name:
+                entities["database_name"] = db_name
+            profiles = self._extract_profiles(query)
+            if profiles:
+                entities["profiles"] = profiles
+                if len(profiles) == 1:
+                    entities["oci_profile"] = profiles[0]
+            return IntentClassification(
+                intent="full_table_scan",
+                category=IntentCategory.ANALYSIS,
+                confidence=0.95,
+                domains=["database"],
+                entities=entities,
+                suggested_workflow="full_table_scan",
+                suggested_agent="db-troubleshoot-agent",
+            )
+
         # SQL Plan Baselines patterns
         baseline_keywords = ["sql plan baseline", "plan baseline", "execution plan", "plan stability"]
         if any(kw in query_lower for kw in baseline_keywords):
@@ -1151,6 +1287,28 @@ class CoordinatorNodes:
                 entities={},
                 suggested_workflow="managed_databases",
                 suggested_agent=None,
+            )
+
+        # Database health check patterns
+        health_keywords = ["database health", "db health", "check health", "health check", "check database health"]
+        if any(kw in query_lower for kw in health_keywords):
+            entities = {}
+            db_name = self._extract_database_name(query)
+            if db_name:
+                entities["database_name"] = db_name
+            profiles = self._extract_profiles(query)
+            if profiles:
+                entities["profiles"] = profiles
+                if len(profiles) == 1:
+                    entities["oci_profile"] = profiles[0]
+            return IntentClassification(
+                intent="db_performance_overview",  # Health check maps to performance overview
+                category=IntentCategory.ANALYSIS,
+                confidence=0.95,
+                domains=["database"],
+                entities=entities,
+                suggested_workflow="db_performance_overview",
+                suggested_agent="db-troubleshoot-agent",
             )
 
         # DB performance overview (combined analysis)
@@ -1351,7 +1509,11 @@ class CoordinatorNodes:
         - "list shapes" → list_shapes
         - "available images" → list_images
         - "list instances" → list_instances
+        - "list stopped instances" → list_instances (listing takes precedence)
         - "get instance" → get_instance
+        - "start instance web-server-01" → start_instance
+        - "stop instance web-server-01" → stop_instance
+        - "restart instance web-server-01" → restart_instance
 
         This avoids LLM classification for common compute operations.
         """
@@ -1450,6 +1612,83 @@ class CoordinatorNodes:
                 suggested_workflow="get_instance",
                 suggested_agent=None,
             )
+
+        # Instance lifecycle actions (start, stop, restart)
+        # Only match if NOT a listing query (e.g., "list stopped instances" should match list_instances)
+        if not has_listing:
+            import re
+
+            # Check restart first (since "restart" contains "start")
+            restart_keywords = ["restart", "reboot", "reset"]
+            has_restart = any(kw in query_lower for kw in restart_keywords)
+
+            if has_restart and has_instance:
+                # Extract instance name
+                entities: dict[str, Any] = {}
+                name_match = re.search(
+                    r'(?:instance|vm|server)\s+([a-zA-Z][a-zA-Z0-9_-]*)',
+                    query_lower,
+                )
+                if name_match:
+                    entities["instance_name"] = name_match.group(1)
+
+                return IntentClassification(
+                    intent="restart_instance",
+                    category=IntentCategory.ACTION,
+                    confidence=0.95,
+                    domains=["compute"],
+                    entities=entities,
+                    suggested_workflow="restart_instance_by_name",
+                    suggested_agent="infrastructure-agent",
+                )
+
+            # Check stop (but not if already matched restart)
+            stop_keywords = ["stop", "shutdown", "shut down", "power off", "turn off", "halt"]
+            has_stop = any(kw in query_lower for kw in stop_keywords)
+
+            if has_stop and has_instance:
+                # Extract instance name
+                entities = {}
+                name_match = re.search(
+                    r'(?:instance|vm|server)\s+([a-zA-Z][a-zA-Z0-9_-]*)',
+                    query_lower,
+                )
+                if name_match:
+                    entities["instance_name"] = name_match.group(1)
+
+                return IntentClassification(
+                    intent="stop_instance",
+                    category=IntentCategory.ACTION,
+                    confidence=0.95,
+                    domains=["compute"],
+                    entities=entities,
+                    suggested_workflow="stop_instance_by_name",
+                    suggested_agent="infrastructure-agent",
+                )
+
+            # Check start
+            start_keywords = ["start", "boot", "power on", "turn on"]
+            has_start = any(kw in query_lower for kw in start_keywords)
+
+            if has_start and has_instance:
+                # Extract instance name
+                entities = {}
+                name_match = re.search(
+                    r'(?:instance|vm|server)\s+([a-zA-Z][a-zA-Z0-9_-]*)',
+                    query_lower,
+                )
+                if name_match:
+                    entities["instance_name"] = name_match.group(1)
+
+                return IntentClassification(
+                    intent="start_instance",
+                    category=IntentCategory.ACTION,
+                    confidence=0.95,
+                    domains=["compute"],
+                    entities=entities,
+                    suggested_workflow="start_instance_by_name",
+                    suggested_agent="infrastructure-agent",
+                )
 
         return None
 
