@@ -17,6 +17,7 @@ from typing import Any
 from fastmcp import FastMCP
 
 from src.mcp.server.auth import (
+    get_database_client,
     get_database_management_client,
 )
 
@@ -51,6 +52,93 @@ async def _get_compartments_recursive(
         pass
 
     return compartments
+
+
+async def _list_autonomous_databases_logic(
+    compartment_id: str | None = None,
+    workload_type: str | None = None,
+    lifecycle_state: str | None = None,
+    limit: int = 50,
+    profile: str | None = None,
+    region: str | None = None,
+) -> str:
+    """Internal logic for listing autonomous databases.
+
+    Uses the OCI Database service API to list autonomous databases.
+    """
+    import oci
+
+    try:
+        client = get_database_client(profile=profile, region=region)
+        config = client.base_client.config
+        comp_id = compartment_id or config.get("tenancy")
+
+        # Build list parameters
+        list_params = {
+            "compartment_id": comp_id,
+            "limit": limit,
+        }
+
+        # Add optional filters
+        if lifecycle_state:
+            list_params["lifecycle_state"] = lifecycle_state.upper()
+        if workload_type:
+            # Map common workload type names to OCI API values
+            workload_map = {
+                "atp": "OLTP",
+                "adw": "DW",
+                "oltp": "OLTP",
+                "dw": "DW",
+                "apex": "APEX",
+                "ajd": "AJD",
+            }
+            list_params["db_workload"] = workload_map.get(
+                workload_type.lower(), workload_type.upper()
+            )
+
+        # Call OCI API
+        response = await _call_oci(
+            client.list_autonomous_databases,
+            **list_params,
+        )
+
+        # Format response
+        databases = []
+        for db in response.data:
+            db_info = {
+                "name": db.display_name,
+                "id": db.id,
+                "workload_type": db.db_workload,
+                "lifecycle_state": db.lifecycle_state,
+                "cpu_core_count": db.cpu_core_count,
+                "data_storage_size_tb": db.data_storage_size_in_tbs,
+                "is_free_tier": db.is_free_tier,
+                "db_version": db.db_version,
+                "time_created": db.time_created.isoformat() if db.time_created else None,
+            }
+            # Add compute model info if available
+            if hasattr(db, "compute_model"):
+                db_info["compute_model"] = db.compute_model
+            databases.append(db_info)
+
+        return json.dumps({
+            "type": "autonomous_databases",
+            "databases": databases,
+            "count": len(databases),
+            "compartment_id": comp_id,
+        })
+
+    except oci.exceptions.ServiceError as e:
+        return json.dumps({
+            "type": "autonomous_databases",
+            "error": f"OCI service error: {e.message}",
+            "status_code": e.status,
+        })
+    except Exception as e:
+        return json.dumps({
+            "type": "autonomous_databases",
+            "error": str(e),
+        })
 
 
 async def _list_managed_databases_logic(
@@ -1111,4 +1199,33 @@ def register_database_tools(mcp: FastMCP) -> None:
         """
         return await _get_awr_sql_report_logic(
             managed_database_id, sql_id, hours_back, profile, region
+        )
+
+    @mcp.tool()
+    async def oci_db_list_autonomous(
+        compartment_id: str | None = None,
+        workload_type: str | None = None,
+        lifecycle_state: str | None = None,
+        limit: int = 50,
+        profile: str | None = None,
+        region: str | None = None,
+    ) -> str:
+        """List Autonomous Databases in a compartment.
+
+        Lists all autonomous databases (ATP, ADW, AJD, APEX) using
+        the OCI Database service API.
+
+        Args:
+            compartment_id: Filter by compartment (defaults to tenancy root)
+            workload_type: Filter by workload type (ATP, ADW, APEX, AJD, OLTP, DW)
+            lifecycle_state: Filter by state (AVAILABLE, PROVISIONING, STOPPED, etc.)
+            limit: Maximum databases to return (default 50)
+            profile: OCI profile name
+            region: OCI region override
+
+        Returns:
+            List of autonomous databases with details
+        """
+        return await _list_autonomous_databases_logic(
+            compartment_id, workload_type, lifecycle_state, limit, profile, region
         )

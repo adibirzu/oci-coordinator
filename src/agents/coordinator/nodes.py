@@ -228,8 +228,54 @@ class CoordinatorNodes:
 
             # Pre-classification: Check for domain-specific queries
             # This is more reliable than LLM for specific patterns
+            # ORDER MATTERS: More specific queries should be checked BEFORE generic ones
 
-            # 1. Check database listing queries (highest priority for common requests)
+            # 1. Check DB Management queries FIRST (troubleshooting: AWR, SQL, blocking, wait events)
+            # These are more specific than database listing and should take priority
+            pre_classified = self._pre_classify_dbmgmt_query(state.query)
+            if pre_classified:
+                span.set_attribute("pre_classification", "dbmgmt")
+                self._logger.info(
+                    "Pre-classified DB Management/Troubleshooting query",
+                    intent=pre_classified.intent,
+                    workflow=pre_classified.suggested_workflow,
+                )
+                if thinking_trace:
+                    thinking_trace.add_step(
+                        ThinkingPhase.CLASSIFIED,
+                        f"Detected DB Troubleshooting query → Intent: {pre_classified.intent}",
+                        {
+                            "method": "pre-classification",
+                            "intent": pre_classified.intent,
+                            "confidence": pre_classified.confidence,
+                            "domains": pre_classified.domains,
+                        },
+                    )
+                return {"intent": self._enrich_intent(pre_classified, state)}
+
+            # 2. Check OPSI queries (ADDM, capacity, insights) - also more specific
+            pre_classified = self._pre_classify_opsi_query(state.query)
+            if pre_classified:
+                span.set_attribute("pre_classification", "opsi")
+                self._logger.info(
+                    "Pre-classified OPSI query",
+                    intent=pre_classified.intent,
+                    workflow=pre_classified.suggested_workflow,
+                )
+                if thinking_trace:
+                    thinking_trace.add_step(
+                        ThinkingPhase.CLASSIFIED,
+                        f"Detected OPSI query → Intent: {pre_classified.intent}",
+                        {
+                            "method": "pre-classification",
+                            "intent": pre_classified.intent,
+                            "confidence": pre_classified.confidence,
+                            "domains": pre_classified.domains,
+                        },
+                    )
+                return {"intent": self._enrich_intent(pre_classified, state)}
+
+            # 3. Check database listing queries (generic database queries)
             pre_classified = self._pre_classify_database_query(state.query)
             if pre_classified:
                 span.set_attribute("pre_classification", "database_listing")
@@ -252,7 +298,7 @@ class CoordinatorNodes:
                     )
                 return {"intent": self._enrich_intent(pre_classified, state)}
 
-            # 2. Check resource-cost mapping queries (e.g., "what's costing me the most")
+            # 4. Check resource-cost mapping queries (e.g., "what's costing me the most")
             pre_classified = self._pre_classify_resource_cost_query(state.query)
             if pre_classified:
                 span.set_attribute("pre_classification", "resource_cost_mapping")
@@ -274,7 +320,7 @@ class CoordinatorNodes:
                     )
                 return {"intent": self._enrich_intent(pre_classified, state)}
 
-            # 3. Check domain-specific cost queries
+            # 5. Check domain-specific cost queries
             pre_classified = self._pre_classify_cost_query(state.query)
             if pre_classified:
                 span.set_attribute("pre_classification", "cost_domain_specific")
@@ -287,50 +333,6 @@ class CoordinatorNodes:
                     thinking_trace.add_step(
                         ThinkingPhase.CLASSIFIED,
                         f"Detected cost query → Intent: {pre_classified.intent}",
-                        {
-                            "method": "pre-classification",
-                            "intent": pre_classified.intent,
-                            "confidence": pre_classified.confidence,
-                            "domains": pre_classified.domains,
-                        },
-                    )
-                return {"intent": self._enrich_intent(pre_classified, state)}
-
-            # 4. Check DB Management queries (fleet health, AWR, SQL performance)
-            pre_classified = self._pre_classify_dbmgmt_query(state.query)
-            if pre_classified:
-                span.set_attribute("pre_classification", "dbmgmt")
-                self._logger.info(
-                    "Pre-classified DB Management query",
-                    intent=pre_classified.intent,
-                    workflow=pre_classified.suggested_workflow,
-                )
-                if thinking_trace:
-                    thinking_trace.add_step(
-                        ThinkingPhase.CLASSIFIED,
-                        f"Detected DB Management query → Intent: {pre_classified.intent}",
-                        {
-                            "method": "pre-classification",
-                            "intent": pre_classified.intent,
-                            "confidence": pre_classified.confidence,
-                            "domains": pre_classified.domains,
-                        },
-                    )
-                return {"intent": self._enrich_intent(pre_classified, state)}
-
-            # 5. Check OPSI queries (ADDM, capacity, insights)
-            pre_classified = self._pre_classify_opsi_query(state.query)
-            if pre_classified:
-                span.set_attribute("pre_classification", "opsi")
-                self._logger.info(
-                    "Pre-classified OPSI query",
-                    intent=pre_classified.intent,
-                    workflow=pre_classified.suggested_workflow,
-                )
-                if thinking_trace:
-                    thinking_trace.add_step(
-                        ThinkingPhase.CLASSIFIED,
-                        f"Detected OPSI query → Intent: {pre_classified.intent}",
                         {
                             "method": "pre-classification",
                             "intent": pre_classified.intent,
@@ -1130,8 +1132,11 @@ class CoordinatorNodes:
                 suggested_agent="db-troubleshoot-agent",  # Route to DB agent
             )
 
-        # Wait events patterns
-        wait_keywords = ["wait event", "wait events", "database waits", "performance bottleneck"]
+        # Wait events patterns (including variations)
+        wait_keywords = [
+            "wait event", "wait events", "show wait events", "database waits",
+            "performance bottleneck", "wait class", "wait statistics", "event waits"
+        ]
         if any(kw in query_lower for kw in wait_keywords):
             # Extract database name from query
             entities = {}
@@ -1153,8 +1158,12 @@ class CoordinatorNodes:
                 suggested_agent="db-troubleshoot-agent",  # Route to DB agent
             )
 
-        # Blocking sessions patterns
-        blocking_keywords = ["blocking session", "check blocking", "lock contention", "session blocking", "blocked session", "blocking locks"]
+        # Blocking sessions patterns (including plurals and variations)
+        blocking_keywords = [
+            "blocking session", "blocking sessions", "check blocking", "lock contention",
+            "session blocking", "blocked session", "blocked sessions", "blocking locks",
+            "database locks", "session lock", "lock wait"
+        ]
         if any(kw in query_lower for kw in blocking_keywords):
             entities = {}
             db_name = self._extract_database_name(query)
@@ -1241,8 +1250,11 @@ class CoordinatorNodes:
                 suggested_agent="db-troubleshoot-agent",
             )
 
-        # Full table scan detection patterns
-        fts_keywords = ["full table scan", "table scan", "full scan", "fts detection"]
+        # Full table scan detection patterns (including plurals)
+        fts_keywords = [
+            "full table scan", "full table scans", "table scan", "table scans",
+            "full scan", "full scans", "fts detection", "find full table", "find table scan"
+        ]
         if any(kw in query_lower for kw in fts_keywords):
             entities = {}
             db_name = self._extract_database_name(query)

@@ -1223,8 +1223,8 @@ async def list_databases_workflow(
             if opsi_region:
                 opsi_params["region"] = opsi_region
 
-            tasks.append(safe_execute("oci_opsi_search_databases", opsi_params))
-            task_metadata.append(("oci_opsi_search_databases", profile_label))
+            tasks.append(safe_execute("oci_opsi_list_database_insights", opsi_params))
+            task_metadata.append(("oci_opsi_list_database_insights", profile_label))
 
             # ── Autonomous Databases ─────────────────────────────────────────
             adb_compartment = dbmgmt_compartment or compartment_id or _get_root_compartment(profile)
@@ -1232,8 +1232,8 @@ async def list_databases_workflow(
                 adb_params: dict[str, Any] = {"compartment_id": adb_compartment}
                 if profile:
                     adb_params["profile"] = profile
-                tasks.append(safe_execute("oci_database_list_autonomous", adb_params))
-                task_metadata.append(("oci_database_list_autonomous", profile_label))
+                tasks.append(safe_execute("oci_db_list_autonomous", adb_params))
+                task_metadata.append(("oci_db_list_autonomous", profile_label))
 
         # Database connections (profile-agnostic - SQLcl connections)
         tasks.append(safe_execute("oci_database_list_connections", {}))
@@ -1252,8 +1252,8 @@ async def list_databases_workflow(
         errors: list[str] = []
         source_priority = {
             "oci_dbmgmt_list_databases": ("Managed Databases", 1),
-            "oci_opsi_search_databases": ("OPSI Databases", 2),
-            "oci_database_list_autonomous": ("Autonomous Databases", 3),
+            "oci_opsi_list_database_insights": ("OPSI Databases", 2),
+            "oci_db_list_autonomous": ("Autonomous Databases", 3),
             "oci_database_list_connections": ("Database Connections", 4),
         }
 
@@ -1650,7 +1650,7 @@ async def database_with_costs_workflow(
                 if compartment_id:
                     opsi_params["compartment_id"] = compartment_id
                 result = await tool_catalog.execute(
-                    "oci_opsi_search_databases",
+                    "oci_opsi_list_database_insights",
                     opsi_params,
                 )
                 result_str = _extract_result(result)
@@ -1664,7 +1664,7 @@ async def database_with_costs_workflow(
             if compartment_id:
                 try:
                     result = await tool_catalog.execute(
-                        "oci_database_list_autonomous",
+                        "oci_db_list_autonomous",
                         {"compartment_id": compartment_id},
                     )
                     result_str = _extract_result(result)

@@ -117,6 +117,31 @@ def get_logging_search_client():
     return oci.loggingsearch.LogSearchClient(config)
 
 
+def get_database_client(
+    profile: str | None = None,
+    region: str | None = None,
+) -> oci.database.DatabaseClient:
+    """Get OCI Database client for Autonomous Database operations.
+
+    Args:
+        profile: OCI config profile name (default: from env or DEFAULT)
+        region: OCI region override
+
+    Returns:
+        DatabaseClient instance
+    """
+    cache_key = f"database:{profile or 'default'}:{region or 'default'}"
+    if cache_key in _client_cache:
+        return _client_cache[cache_key]
+
+    config = get_oci_config(profile)
+    if region:
+        config["region"] = region
+    client = oci.database.DatabaseClient(config)
+    _client_cache[cache_key] = client
+    return client
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Database Observability Clients (DB Management, OpsInsights, Log Analytics)
 # ─────────────────────────────────────────────────────────────────────────────

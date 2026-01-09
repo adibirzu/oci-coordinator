@@ -353,6 +353,69 @@ FOLLOW_UP_SUGGESTIONS: dict[str, list[str]] = {
         "Check specific resources",
         "Show available capabilities",
     ],
+    # DB Troubleshooting - SQL Monitoring
+    "sql_monitoring": [
+        "Check blocking sessions",
+        "Show wait events",
+        "Show top SQL by CPU",
+        "Generate AWR report",
+    ],
+    # DB Troubleshooting - Blocking Sessions
+    "blocking_sessions": [
+        "Show wait events",
+        "Show running SQL",
+        "Check long running operations",
+        "Generate AWR report",
+    ],
+    # DB Troubleshooting - Wait Events
+    "wait_events": [
+        "Check blocking sessions",
+        "Show running SQL",
+        "Show top SQL by CPU",
+        "Generate AWR report",
+    ],
+    # DB Troubleshooting - Parallelism
+    "parallelism_stats": [
+        "Show running SQL",
+        "Check long running operations",
+        "Show top SQL by CPU",
+        "Check full table scans",
+    ],
+    # DB Troubleshooting - Long Running Ops
+    "long_running_ops": [
+        "Show running SQL",
+        "Check parallelism",
+        "Show wait events",
+        "Check blocking sessions",
+    ],
+    # DB Troubleshooting - Full Table Scan
+    "full_table_scan": [
+        "Show top SQL by CPU",
+        "Check parallelism",
+        "Show running SQL",
+        "Generate AWR report",
+    ],
+    # DB Troubleshooting - AWR Report
+    "awr_report": [
+        "Show wait events",
+        "Show top SQL by CPU",
+        "Check blocking sessions",
+        "Check long running operations",
+    ],
+    # DB Troubleshooting - Top SQL
+    "top_sql": [
+        "Show running SQL",
+        "Show wait events",
+        "Check full table scans",
+        "Generate AWR report",
+    ],
+    # DB Performance Overview
+    "db_performance_overview": [
+        "Show wait events",
+        "Show top SQL by CPU",
+        "Check blocking sessions",
+        "Generate AWR report",
+    ],
 }
 
 
@@ -587,6 +650,38 @@ def get_follow_up_suggestions(
     # Map common query patterns to suggestion keys
     query_type_lower = query_type.lower()
 
+    # First, check for exact matches in FOLLOW_UP_SUGGESTIONS
+    # This catches specific DB troubleshooting workflows like sql_monitoring, blocking_sessions, etc.
+    if query_type_lower in FOLLOW_UP_SUGGESTIONS:
+        return FOLLOW_UP_SUGGESTIONS[query_type_lower][:3]
+
+    # DB Troubleshooting workflows - check for specific patterns BEFORE generic "database"
+    db_troubleshoot_mappings = {
+        "sql_monitor": "sql_monitoring",
+        "running_sql": "sql_monitoring",
+        "active_sql": "sql_monitoring",
+        "blocking": "blocking_sessions",
+        "lock_contention": "blocking_sessions",
+        "wait_event": "wait_events",
+        "parallelism": "parallelism_stats",
+        "parallel": "parallelism_stats",
+        "long_running": "long_running_ops",
+        "longops": "long_running_ops",
+        "full_table": "full_table_scan",
+        "table_scan": "full_table_scan",
+        "awr": "awr_report",
+        "top_sql": "top_sql",
+        "cpu_sql": "top_sql",
+        "expensive_queries": "top_sql",
+        "performance_overview": "db_performance_overview",
+        "health_check": "db_performance_overview",
+    }
+
+    for pattern, suggestion_key in db_troubleshoot_mappings.items():
+        if pattern in query_type_lower:
+            return FOLLOW_UP_SUGGESTIONS.get(suggestion_key, [])[:3]
+
+    # General category-based suggestions
     if "cost" in query_type_lower:
         return FOLLOW_UP_SUGGESTIONS.get("cost_summary", [])[:3]
     elif "compartment" in query_type_lower:
@@ -594,6 +689,7 @@ def get_follow_up_suggestions(
     elif "instance" in query_type_lower:
         return FOLLOW_UP_SUGGESTIONS.get("list_instances", [])[:3]
     elif "database" in query_type_lower or "db" in query_type_lower:
+        # Generic database queries - fallback to list_databases suggestions
         return FOLLOW_UP_SUGGESTIONS.get("list_databases", [])[:3]
     elif "security" in query_type_lower or "threat" in query_type_lower:
         return FOLLOW_UP_SUGGESTIONS.get("security_overview", [])[:3]
