@@ -115,9 +115,9 @@ class AppState:
             async with self._coordinator_lock:
                 if self._coordinator is None:
                     from src.agents.coordinator.graph import create_coordinator
-                    from src.llm import get_llm
+                    from src.llm import get_llm_with_auto_fallback
 
-                    llm = get_llm(channel_type="api")
+                    llm = await get_llm_with_auto_fallback()
                     self._coordinator = await create_coordinator(llm=llm)
                     logger.info("Coordinator initialized for API")
         return self._coordinator
@@ -135,8 +135,37 @@ app_state = AppState()
 async def lifespan(app: FastAPI):
     """Manage application lifecycle."""
     logger.info("API server starting up")
+
+    # Initialize MCP infrastructure for standalone API mode
+    registry = None
+    try:
+        from src.mcp.config import initialize_mcp_from_config, load_mcp_config
+
+        config = load_mcp_config()
+        enabled_servers = config.get_enabled_servers()
+
+        if enabled_servers:
+            registry, catalog = await initialize_mcp_from_config(config)
+            # Start health checks
+            await registry.start_health_checks(interval_seconds=30)
+            logger.info(
+                "MCP servers initialized",
+                servers=len(registry.list_servers()),
+                tools=len(catalog.list_tools()),
+            )
+    except Exception as e:
+        logger.warning("MCP initialization skipped", error=str(e))
+
     yield
+
+    # Cleanup
     logger.info("API server shutting down")
+    if registry:
+        try:
+            await registry.stop_health_checks()
+            await registry.disconnect_all()
+        except Exception as e:
+            logger.warning("MCP cleanup error", error=str(e))
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -423,11 +452,19 @@ async def chat(request: ChatRequest):
             # Get cached coordinator
             coordinator = await app_state.get_coordinator()
 
-            # Invoke with thread context
+            # Build metadata with OCI profile context (like Slack does)
+            # This ensures workflows get profile info for multi-tenancy
+            invoke_metadata = dict(request.metadata) if request.metadata else {}
+            if "oci_profile" not in invoke_metadata:
+                # Default to DEFAULT profile if not specified
+                invoke_metadata["oci_profile"] = invoke_metadata.get("profile", "DEFAULT")
+
+            # Invoke with thread context and metadata
             result = await coordinator.invoke(
                 query=request.message,
                 thread_id=thread_id,
                 user_id=request.user_id,
+                metadata=invoke_metadata,
             )
 
             response_text = result.get("response") if isinstance(result, dict) else str(result)
@@ -437,8 +474,14 @@ async def chat(request: ChatRequest):
         except Exception as e:
             logger.warning("LangGraph coordinator failed, using fallback", error=str(e))
 
-            # Fallback to simple orchestrator
-            orchestrator = ParallelOrchestrator(agent_catalog=agent_catalog)
+            # Fallback to simple orchestrator - need to get LLM for initialization
+            from src.llm import get_llm_with_auto_fallback
+            llm = await get_llm_with_auto_fallback()
+            orchestrator = ParallelOrchestrator(
+                agent_catalog=agent_catalog,
+                tool_catalog=tool_catalog,
+                llm=llm,
+            )
             result = await orchestrator.execute(
                 query=request.message,
                 context={"thread_id": thread_id, "user_id": request.user_id},
@@ -497,10 +540,16 @@ async def chat_stream(request: ChatRequest):
             # Get cached coordinator
             coordinator = await app_state.get_coordinator()
 
-            # Stream response
+            # Build metadata with OCI profile context (like Slack does)
+            invoke_metadata = dict(request.metadata) if request.metadata else {}
+            if "oci_profile" not in invoke_metadata:
+                invoke_metadata["oci_profile"] = invoke_metadata.get("profile", "DEFAULT")
+
+            # Stream response with metadata
             async for chunk in coordinator.invoke_stream(
                 query=request.message,
                 thread_id=thread_id,
+                metadata=invoke_metadata,
             ):
                 yield f"data: {chunk}\n\n"
 

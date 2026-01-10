@@ -3171,7 +3171,7 @@ class SlackHandler:
         llm_tracer = get_tracer(agent_def.agent_id)
 
         with llm_tracer.start_as_current_span(f"llm.invoke.{agent_def.agent_id}") as span:
-            span.set_attribute("llm.model", "oca/gpt5")
+            span.set_attribute("llm.model", "oca/gpt-4.1")
             span.set_attribute("llm.agent", agent_def.agent_id)
             span.set_attribute("llm.query_length", len(query))
 

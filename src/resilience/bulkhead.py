@@ -65,6 +65,31 @@ TOOL_TO_PARTITION = {
     "oci_list_": BulkheadPartition.DISCOVERY,
 }
 
+# Partition-specific acquire timeouts (seconds)
+# Slow operations (cost, database) need longer waits as their slots are held longer
+# Fast operations should fail fast to avoid cascading delays
+PARTITION_ACQUIRE_TIMEOUTS = {
+    BulkheadPartition.DATABASE: 30.0,      # SQL ops can take 30-60s, need patience
+    BulkheadPartition.INFRASTRUCTURE: 15.0,  # Compute/network are fairly quick
+    BulkheadPartition.COST: 45.0,          # Usage API is notoriously slow (60s+)
+    BulkheadPartition.SECURITY: 20.0,      # Cloud Guard queries are moderate
+    BulkheadPartition.DISCOVERY: 15.0,     # List/search are usually quick
+    BulkheadPartition.LLM: 60.0,           # LLM calls can be very slow
+    BulkheadPartition.DEFAULT: 10.0,       # Default: fail fast
+}
+
+
+def get_partition_timeout(partition: BulkheadPartition) -> float:
+    """Get recommended acquire timeout for a partition.
+
+    Args:
+        partition: The bulkhead partition
+
+    Returns:
+        Recommended timeout in seconds
+    """
+    return PARTITION_ACQUIRE_TIMEOUTS.get(partition, 10.0)
+
 
 @dataclass
 class PartitionMetrics:

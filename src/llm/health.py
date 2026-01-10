@@ -327,9 +327,13 @@ async def check_provider_health(
     config = config or {}
     provider = provider.lower()
 
-    if provider == "oca":
+    # Handle provider aliases
+    if provider in ("oca", "oracle_code_assist"):
         from src.llm.oca import get_oca_health
-        return await get_oca_health()
+        result = await get_oca_health()
+        # Ensure 'connected' field is set based on status
+        result["connected"] = result.get("status") == "healthy" or result.get("authentication", {}).get("verified", False)
+        return result
 
     elif provider == "anthropic":
         return await check_anthropic_health(
@@ -545,10 +549,11 @@ async def validate_llm_startup(
 
 # Default LLM provider priority order (lower number = higher priority)
 # Users can override by setting LLM_PROVIDER_PRIORITY env var as comma-separated list
+# Note: 'oracle_code_assist' is an alias for 'oca'
 DEFAULT_LLM_PRIORITY = [
     "lm_studio",   # 1. Local LM Studio (lowest latency, no cost)
     "ollama",      # 2. Local Ollama (lowest latency, no cost)
-    "oca",         # 3. Oracle Code Assist (enterprise)
+    "oca",         # 3. Oracle Code Assist (enterprise) - alias: oracle_code_assist
     "oci_genai",   # 4. OCI GenAI (enterprise)
     "anthropic",   # 5. Anthropic Claude (cloud)
     "openai",      # 6. OpenAI (cloud)

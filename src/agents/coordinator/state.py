@@ -436,6 +436,34 @@ def determine_routing(
     Returns:
         Routing decision
     """
+    # PRIORITY 1: Pre-classified workflows with very high confidence (>=0.95)
+    # These are deterministic matches from keyword pre-classification
+    # They should ALWAYS use the workflow, even if complexity indicators exist
+    # Example: "show cost trend" → monthly_trend workflow (even though "trend" is complex)
+    #
+    # Includes DB-specific workflows that need to run the workflow directly
+    # instead of going through the agent's generic health check analysis
+    DB_SPECIFIC_WORKFLOWS = {
+        "full_table_scan", "top_sql", "sql_monitoring", "long_running_ops",
+        "parallelism_stats", "awr_report", "blocking_sessions", "wait_events",
+        "sql_plan_baselines", "addm_findings", "addm_report",
+    }
+
+    if (
+        intent.confidence >= 0.95
+        and intent.suggested_workflow
+        and (
+            intent.suggested_agent is None  # Pre-classified workflows without agents
+            or intent.suggested_workflow in DB_SPECIFIC_WORKFLOWS  # DB workflows should run directly
+        )
+    ):
+        return RoutingDecision(
+            routing_type=RoutingType.WORKFLOW,
+            target=intent.suggested_workflow,
+            confidence=intent.confidence,
+            reasoning=f"Pre-classified workflow match ({intent.confidence:.2f}) - using workflow '{intent.suggested_workflow}'",
+        )
+
     # Check if query requires LLM reasoning (temporal, analytical, etc.)
     needs_llm_reasoning = False
     if original_query and has_complexity_indicators(original_query):
@@ -462,7 +490,7 @@ def determine_routing(
             else None,
         )
 
-    # Check for workflow match with very high confidence (simple queries only)
+    # Check for workflow match with high confidence (simple queries only)
     if (
         intent.confidence >= WORKFLOW_CONFIDENCE_THRESHOLD
         and intent.suggested_workflow

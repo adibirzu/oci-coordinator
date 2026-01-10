@@ -21,8 +21,13 @@ async def _list_instances_logic(
     limit: int = 50,
     lifecycle_state: str | None = None,
     format: str = "json",
+    include_subtree: bool = False,
 ) -> str:
-    """Internal logic for listing instances."""
+    """Internal logic for listing instances.
+
+    Note: include_subtree defaults to False for instances since users typically
+    want instances in a specific compartment, not all descendant compartments.
+    """
     with _tracer.start_as_current_span("mcp.compute.list_instances") as span:
         span.set_attribute("compartment_id", compartment_id)
         span.set_attribute("limit", limit)
@@ -35,27 +40,33 @@ async def _list_instances_logic(
             kwargs = {"compartment_id": compartment_id, "limit": limit}
             if lifecycle_state:
                 kwargs["lifecycle_state"] = lifecycle_state
+            if include_subtree:
+                kwargs["compartment_id_in_subtree"] = True
 
             response = client.list_instances(**kwargs)
             instances = response.data
             span.set_attribute("instance_count", len(instances))
 
             if format == "json":
-                return json.dumps(
-                    [
-                        {
-                            "name": i.display_name,
-                            "id": i.id,
-                            "state": i.lifecycle_state,
-                            "shape": i.shape,
-                            "availability_domain": i.availability_domain,
-                            "fault_domain": i.fault_domain,
-                            "time_created": str(i.time_created) if i.time_created else None,
-                        }
-                        for i in instances
-                    ],
-                    indent=2,
-                )
+                # Return typed JSON for ResponseParser to format properly
+                instance_list = [
+                    {
+                        "name": i.display_name,
+                        "id": i.id,
+                        "state": i.lifecycle_state,
+                        "shape": i.shape,
+                        "availability_domain": i.availability_domain.split(":")[-1] if i.availability_domain else "N/A",
+                        "fault_domain": i.fault_domain,
+                        "time_created": str(i.time_created) if i.time_created else None,
+                    }
+                    for i in instances
+                ]
+                return json.dumps({
+                    "type": "compute_instances",
+                    "count": len(instance_list),
+                    "lifecycle_state": lifecycle_state,  # Include filter context
+                    "instances": instance_list,
+                })
 
             # Markdown table for display
             if not instances:
@@ -435,6 +446,7 @@ def register_compute_tools(mcp: Any) -> None:
         limit: int = 50,
         lifecycle_state: str | None = None,
         format: str = "json",
+        include_subtree: bool = False,
     ) -> str:
         """List OCI compute instances in a compartment.
 
@@ -443,11 +455,12 @@ def register_compute_tools(mcp: Any) -> None:
             limit: Maximum number of instances to return (default 50)
             lifecycle_state: Filter by state (RUNNING, STOPPED, TERMINATED, etc.)
             format: Output format ('json' or 'markdown')
+            include_subtree: Search child compartments too (default False)
 
         Returns:
             List of compute instances with name, state, shape, and availability domain
         """
-        return await _list_instances_logic(compartment_id, limit, lifecycle_state, format)
+        return await _list_instances_logic(compartment_id, limit, lifecycle_state, format, include_subtree)
 
     @mcp.tool()
     async def oci_compute_get_instance(instance_id: str, format: str = "json") -> str:

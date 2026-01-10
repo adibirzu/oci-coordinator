@@ -45,6 +45,7 @@ AGENT_LOG_ENV_VARS = {
     "infrastructure-agent": "OCI_LOG_ID_INFRASTRUCTURE",
     "slack-handler": "OCI_LOG_ID_COORDINATOR",  # Use coordinator log
     "mcp-executor": "OCI_LOG_ID_COORDINATOR",  # Use coordinator log
+    "mcp-server": "OCI_MCP_LOG_ID",  # MCP server uses separate log group
 }
 
 # Agent service names for log identification
@@ -57,6 +58,7 @@ AGENT_LOG_IDS = {
     "infrastructure-agent": "oci-infrastructure-agent",
     "slack-handler": "oci-slack-handler",
     "mcp-executor": "oci-mcp-executor",
+    "mcp-server": "oci-mcp-server",  # MCP server service name
 }
 
 

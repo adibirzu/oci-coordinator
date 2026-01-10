@@ -455,10 +455,15 @@ class LangGraphCoordinator:
             oci_profile = metadata.get("oci_profile", "DEFAULT")
             self._logger.debug("Using OCI profile", profile=oci_profile)
 
+        # Ensure thread_id is in metadata for conversation context tracking
+        effective_metadata = metadata.copy() if metadata else {}
+        if effective_thread_id and "thread_id" not in effective_metadata:
+            effective_metadata["thread_id"] = effective_thread_id
+
         initial_state = CoordinatorState(
             messages=[HumanMessage(content=full_query)],
             max_iterations=self.max_iterations,
-            metadata=metadata or {},
+            metadata=effective_metadata,
             # Explicitly reset transient state for new turn
             final_response=None,
             error=None,
@@ -694,6 +699,7 @@ class LangGraphCoordinator:
         self,
         query: str,
         thread_id: str | None = None,
+        metadata: dict | None = None,
     ):
         """
         Stream the coordinator's processing.
@@ -703,6 +709,7 @@ class LangGraphCoordinator:
         Args:
             query: User query
             thread_id: Optional thread ID
+            metadata: Optional metadata dict (e.g., oci_profile)
 
         Yields:
             State updates from each node
@@ -713,17 +720,25 @@ class LangGraphCoordinator:
         if not self._compiled_graph:
             await self.initialize()
 
-        initial_state = CoordinatorState(
-            messages=[HumanMessage(content=query)],
-            max_iterations=self.max_iterations,
-        )
-
         # Create unique thread_id per query to avoid stale checkpoints
         query_hash = hashlib.md5(query.encode()).hexdigest()[:8]
         if thread_id:
             effective_thread_id = f"{thread_id}_{query_hash}"
         else:
             effective_thread_id = str(uuid.uuid4())
+
+        # Include thread_id in metadata for conversation context tracking
+        # Merge with any provided metadata (e.g., oci_profile for multi-tenancy)
+        effective_metadata = {"thread_id": effective_thread_id}
+        if metadata:
+            effective_metadata.update(metadata)
+
+        initial_state = CoordinatorState(
+            messages=[HumanMessage(content=query)],
+            max_iterations=self.max_iterations,
+            metadata=effective_metadata,
+        )
+
         config = {"configurable": {"thread_id": effective_thread_id}}
 
         async for event in self._compiled_graph.astream(initial_state, config):

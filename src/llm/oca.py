@@ -4,14 +4,20 @@ Oracle Code Assist (OCA) LLM Provider.
 Implements OCA integration via LiteLLM endpoint with PKCE OAuth authentication.
 Token caching and refresh is handled automatically.
 
+Available Models (as of 2026-01):
+    - oca/gpt-4.1 (default, supports vision)
+    - oca/gpt-oss-120b (Oracle's 120B model)
+    - oca/llama4
+    - oca/openai-o3
+
 Usage:
     from src.llm.oca import ChatOCA, get_oca_llm
 
     # Create LLM instance
-    llm = get_oca_llm(model="oca/gpt5")
+    llm = get_oca_llm(model="oca/gpt-4.1")
 
     # Or use directly
-    llm = ChatOCA(model="oca/gpt5")
+    llm = ChatOCA(model="oca/gpt-4.1")
     response = await llm.ainvoke([HumanMessage(content="Hello!")])
 """
 
@@ -70,11 +76,12 @@ class OCAConfig:
     # Token refresh buffer (3 minutes)
     RENEW_BUFFER_SEC = 3 * 60
 
-    # Default model
-    DEFAULT_MODEL = os.getenv("OCA_MODEL", "oca/gpt5")
+    # Default model - use oca/gpt-4.1 (most capable, supports vision)
+    # Available models: oca/gpt-4.1, oca/gpt-oss-120b, oca/llama4, oca/openai-o3
+    DEFAULT_MODEL = os.getenv("OCA_MODEL", "oca/gpt-4.1")
 
-    # Fallback models
-    FALLBACK_MODELS = ["oca/gpt5", "oca/sonnet", "oca/llama4", "oca/grok4"]
+    # Fallback models (in order of preference)
+    FALLBACK_MODELS = ["oca/gpt-4.1", "oca/gpt-oss-120b", "oca/llama4", "oca/openai-o3"]
 
 
 OCA_CONFIG = OCAConfig()
@@ -461,42 +468,46 @@ class ChatOCA(BaseChatModel):
         run_manager: CallbackManagerForLLMRun | None = None,
         **kwargs: Any,
     ) -> ChatResult:
-        """Generate chat completion from OCA."""
-        import time
+        """Generate chat completion from OCA with full GenAI semantic conventions.
 
-        from opentelemetry.trace import SpanKind
+        Uses OracleCodeAssistInstrumentor for comprehensive tracing compatible
+        with OCI APM, viewapp LLM Observability, and DataDog.
+        """
+        # Import the enhanced instrumentor
+        from src.observability import OracleCodeAssistInstrumentor
 
-        # Get tracer for LLM operations - use observability module for consistency
-        from src.observability import get_tracer
-        tracer = get_tracer("coordinator")  # Use coordinator tracer for LLM calls
+        # Use the OracleCodeAssistInstrumentor for comprehensive GenAI tracing
+        with OracleCodeAssistInstrumentor.chat_span(
+            model=self.model,
+            endpoint=OCA_CONFIG.OCA_ENDPOINT,
+        ) as llm_ctx:
+            # Set request parameters for observability
+            llm_ctx.set_request_params(
+                temperature=self.temperature,
+                max_tokens=self.max_tokens,
+            )
 
-        # Create span with CLIENT kind for external API call
-        with tracer.start_as_current_span("llm.oca.chat_completion", kind=SpanKind.CLIENT) as span:
-            start_time = time.time()
-
-            # OpenTelemetry semantic conventions for LLM
-            span.set_attribute("gen_ai.system", "oca")
-            span.set_attribute("gen_ai.request.model", self.model)
-            span.set_attribute("gen_ai.request.temperature", self.temperature)
-            span.set_attribute("gen_ai.request.max_tokens", self.max_tokens)
-
-            # Additional LLM context
-            span.set_attribute("llm.provider", "oracle_code_assist")
-            span.set_attribute("llm.model", self.model)
-            span.set_attribute("llm.message_count", len(messages))
-            span.set_attribute("llm.endpoint", OCA_CONFIG.litellm_url)
-
-            # Get parent trace context
-            ctx = span.get_span_context()
-            trace_id = format(ctx.trace_id, "032x")
-            span_id = format(ctx.span_id, "016x")
-            span.set_attribute("trace_id", trace_id)
-            span.set_attribute("span_id", span_id)
-
-            # Log input preview (truncated for privacy)
+            # Record the prompt (last user message for context)
             if messages:
-                last_msg = str(messages[-1].content)[:100]
-                span.set_attribute("llm.input_preview", last_msg)
+                # Combine all messages for prompt context
+                for msg in messages:
+                    if isinstance(msg, SystemMessage):
+                        llm_ctx.set_prompt(str(msg.content), role="system")
+                    elif isinstance(msg, HumanMessage):
+                        llm_ctx.set_prompt(str(msg.content), role="user")
+                    elif isinstance(msg, AIMessage):
+                        llm_ctx.set_prompt(str(msg.content), role="assistant")
+
+            # Get trace context for logging
+            trace_id = ""
+            try:
+                from opentelemetry import trace
+                current_span = trace.get_current_span()
+                if current_span:
+                    ctx = current_span.get_span_context()
+                    trace_id = format(ctx.trace_id, "032x")
+            except Exception:
+                pass
 
             try:
                 access_token = await self._get_access_token()
@@ -530,17 +541,20 @@ class ChatOCA(BaseChatModel):
                     )
 
                     logger.debug("OCA response status", status=response.status_code)
-                    span.set_attribute("llm.http_status", response.status_code)
 
                     if response.status_code == 401:
                         oca_token_manager.clear_token()
-                        span.set_attribute("llm.error", True)
-                        span.set_attribute("llm.error_type", "auth_expired")
+                        llm_ctx.set_error(
+                            ValueError("OCA authentication expired"),
+                            error_type="auth_expired",
+                        )
                         raise ValueError("OCA authentication expired. Please log in again.")
 
                     if response.status_code != 200:
-                        span.set_attribute("llm.error", True)
-                        span.set_attribute("llm.error_type", "api_error")
+                        llm_ctx.set_error(
+                            ValueError(f"OCA API error: {response.status_code}"),
+                            error_type="api_error",
+                        )
                         raise ValueError(f"OCA API error: {response.status_code} - {response.text[:500]}")
 
                     response_text = response.text
@@ -554,40 +568,33 @@ class ChatOCA(BaseChatModel):
 
                     content, token_usage = parsed if parsed else ("", {})
 
-                    # Record token usage in span using semantic conventions
-                    duration_ms = (time.time() - start_time) * 1000
-                    span.set_attribute("llm.duration_ms", duration_ms)
-                    span.set_attribute("llm.response_length", len(content))
-                    span.set_attribute("llm.success", True)
+                    # Record completion content (for viewapp LLM observability)
+                    llm_ctx.set_completion(content)
+                    llm_ctx.set_response_model(self.model)
+                    llm_ctx.set_finish_reason("stop")
 
-                    # OpenTelemetry GenAI semantic conventions for response
+                    # Record token usage using GenAI semantic conventions
                     if token_usage:
                         prompt_tokens = token_usage.get("prompt_tokens", 0)
                         completion_tokens = token_usage.get("completion_tokens", 0)
-                        total_tokens = token_usage.get("total_tokens", 0)
 
-                        span.set_attribute("gen_ai.usage.prompt_tokens", prompt_tokens)
-                        span.set_attribute("gen_ai.usage.completion_tokens", completion_tokens)
-                        span.set_attribute("gen_ai.response.model", self.model)
+                        llm_ctx.set_tokens(
+                            input=prompt_tokens,
+                            output=completion_tokens,
+                        )
 
-                        # Legacy attributes for backward compatibility
-                        span.set_attribute("llm.tokens.prompt", prompt_tokens)
-                        span.set_attribute("llm.tokens.completion", completion_tokens)
-                        span.set_attribute("llm.tokens.total", total_tokens)
-
-                        # Calculate tokens per second for performance analysis
-                        if duration_ms > 0 and total_tokens > 0:
-                            tps = (total_tokens / duration_ms) * 1000
-                            span.set_attribute("llm.tokens_per_second", round(tps, 2))
-
-                    # Response preview (truncated)
-                    span.set_attribute("llm.output_preview", content[:100] if content else "")
+                        # Estimate cost
+                        from src.observability import LLMInstrumentor
+                        cost = LLMInstrumentor.estimate_cost(
+                            self.model, prompt_tokens, completion_tokens
+                        )
+                        llm_ctx.set_cost_estimate(cost)
 
                     logger.info(
                         "OCA response received",
                         chars=len(content),
                         tokens=token_usage.get("total_tokens"),
-                        duration_ms=duration_ms,
+                        trace_id=trace_id,
                     )
 
                     return ChatResult(
@@ -604,21 +611,24 @@ class ChatOCA(BaseChatModel):
                     )
 
             except Exception as e:
-                duration_ms = (time.time() - start_time) * 1000
-                span.set_attribute("llm.duration_ms", duration_ms)
-                span.set_attribute("llm.success", False)
-                span.set_attribute("llm.error", True)
-                span.set_attribute("llm.error_message", str(e)[:200])
-                span.set_attribute("error.type", type(e).__name__)
+                # Record error with GenAI semantic conventions
+                error_type = "unknown"
+                if "authentication" in str(e).lower():
+                    error_type = "auth_error"
+                elif "timeout" in str(e).lower():
+                    error_type = "timeout"
+                elif "connection" in str(e).lower():
+                    error_type = "connection_error"
+                elif "rate" in str(e).lower():
+                    error_type = "rate_limit"
 
-                # Record exception for APM error tracking
-                span.record_exception(e)
+                llm_ctx.set_error(e, error_type=error_type)
 
                 logger.error(
                     "OCA LLM call failed",
                     model=self.model,
                     error=str(e)[:200],
-                    duration_ms=duration_ms,
+                    error_type=error_type,
                     trace_id=trace_id,
                 )
                 raise
@@ -632,7 +642,8 @@ def get_oca_llm(
     """Create an OCA LLM instance.
 
     Args:
-        model: Model to use (default: oca/gpt5)
+        model: Model to use (default: oca/gpt-4.1). Available models:
+               oca/gpt-4.1, oca/gpt-oss-120b, oca/llama4, oca/openai-o3
         temperature: Sampling temperature
         max_tokens: Maximum tokens in response
 
@@ -654,6 +665,8 @@ async def get_oca_health() -> dict:
 
     Returns:
         Dictionary with health status including:
+        - provider: Provider name ('oca' or 'oracle_code_assist')
+        - connected: Whether the provider is available
         - authentication: Token status
         - endpoint: API connectivity
         - models: Available models (if authenticated)
@@ -662,7 +675,9 @@ async def get_oca_health() -> dict:
     from opentelemetry import trace
 
     health = {
+        "provider": "oracle_code_assist",
         "status": "unknown",
+        "connected": False,  # Will be set based on checks
         "authentication": {},
         "endpoint": {},
         "models": [],
@@ -694,6 +709,12 @@ async def get_oca_health() -> dict:
         "can_refresh": token_info["can_refresh"],
         "expires_in_minutes": round(token_info["expires_in_seconds"] / 60, 1),
     }
+
+    # Add helpful error message if not authenticated
+    if not token_info["has_token"]:
+        health["error"] = "OCA not authenticated. Run 'oca-login' or authenticate via browser."
+    elif not token_info["is_valid"] and not token_info["can_refresh"]:
+        health["error"] = "OCA token expired and cannot be refreshed. Please re-authenticate."
 
     # Verify with endpoint if we have a token
     if token_info["is_valid"]:
@@ -744,10 +765,14 @@ async def get_oca_health() -> dict:
         and health["endpoint"].get("reachable", False)
     ):
         health["status"] = "healthy"
+        health["connected"] = True
     elif health["endpoint"].get("reachable", False):
         health["status"] = "degraded"
+        # Still connected but auth may be expired
+        health["connected"] = health["authentication"].get("is_valid", False)
     else:
         health["status"] = "unhealthy"
+        health["connected"] = False
 
     return health
 
@@ -815,7 +840,7 @@ async def verify_oca_integration() -> tuple[bool, str, dict]:
             try:
                 from langchain_core.messages import HumanMessage
 
-                llm = ChatOCA(model="oca/gpt5", max_tokens=10, temperature=0)
+                llm = ChatOCA(model="oca/gpt-4.1", max_tokens=10, temperature=0)
                 response = await llm.ainvoke([HumanMessage(content="Say 'ok'")])
 
                 llm_ok = len(response.content) > 0

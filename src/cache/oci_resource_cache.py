@@ -67,10 +67,14 @@ CACHE_KEYS = {
 
 # Default TTLs
 DEFAULT_TTL = timedelta(hours=1)
-COMPARTMENT_TTL = timedelta(hours=4)  # Compartments change rarely
+COMPARTMENT_TTL = timedelta(hours=24)  # Compartments cached for 24 hours (daily refresh)
 RESOURCE_TTL = timedelta(minutes=30)  # Resources change more frequently
 # Soft TTL for stale-while-revalidate pattern
 SOFT_TTL_RATIO = 0.8  # Return stale data after 80% of TTL, trigger background refresh
+
+# Scheduled refresh intervals
+COMPARTMENT_REFRESH_INTERVAL = timedelta(hours=24)  # Daily refresh
+RESOURCE_REFRESH_INTERVAL = timedelta(hours=4)  # Refresh resources every 4 hours
 
 
 class OCIResourceCache:
@@ -110,6 +114,9 @@ class OCIResourceCache:
         # Pub/sub subscriber
         self._pubsub = None
         self._subscriber_task = None
+        # Scheduled refresh task
+        self._scheduler_task: asyncio.Task | None = None
+        self._scheduler_running = False
 
     @classmethod
     def get_instance(
@@ -148,7 +155,9 @@ class OCIResourceCache:
             self._logger.warning("Using in-memory fallback cache")
 
     async def close(self) -> None:
-        """Close Redis connection."""
+        """Close Redis connection and stop background tasks."""
+        # Stop scheduled refresh
+        await self.stop_scheduled_refresh()
         # Stop subscriber
         if self._subscriber_task:
             self._subscriber_task.cancel()
@@ -1079,3 +1088,202 @@ class OCIResourceCache:
             health["warning"] = "Using in-memory fallback (not persistent)"
 
         return health
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Scheduled Refresh (Daily Cache Updates)
+    # ─────────────────────────────────────────────────────────────────────────
+
+    async def start_scheduled_refresh(
+        self,
+        compartment_interval: timedelta | None = None,
+        resource_interval: timedelta | None = None,
+    ) -> None:
+        """
+        Start the scheduled cache refresh background task.
+
+        This runs a background loop that:
+        - Refreshes compartments daily (or at specified interval)
+        - Refreshes resources every 4 hours (or at specified interval)
+
+        Args:
+            compartment_interval: Override interval for compartment refresh
+            resource_interval: Override interval for resource refresh
+        """
+        if self._scheduler_running:
+            self._logger.warning("Scheduler already running")
+            return
+
+        comp_interval = compartment_interval or COMPARTMENT_REFRESH_INTERVAL
+        res_interval = resource_interval or RESOURCE_REFRESH_INTERVAL
+
+        self._scheduler_running = True
+        self._scheduler_task = asyncio.create_task(
+            self._scheduled_refresh_loop(comp_interval, res_interval)
+        )
+        self._logger.info(
+            "Cache scheduler started",
+            compartment_interval_hours=comp_interval.total_seconds() / 3600,
+            resource_interval_hours=res_interval.total_seconds() / 3600,
+        )
+
+    async def stop_scheduled_refresh(self) -> None:
+        """Stop the scheduled cache refresh background task."""
+        if not self._scheduler_running:
+            return
+
+        self._scheduler_running = False
+        if self._scheduler_task:
+            self._scheduler_task.cancel()
+            try:
+                await self._scheduler_task
+            except asyncio.CancelledError:
+                pass
+            self._scheduler_task = None
+        self._logger.info("Cache scheduler stopped")
+
+    async def _scheduled_refresh_loop(
+        self,
+        compartment_interval: timedelta,
+        resource_interval: timedelta,
+    ) -> None:
+        """
+        Background loop for scheduled cache refreshes.
+
+        Uses a smart scheduling approach:
+        - Checks if it's time for compartment refresh
+        - Checks if it's time for resource refresh
+        - Sleeps until next scheduled refresh
+        """
+        last_compartment_refresh = datetime.min.replace(tzinfo=UTC)
+        last_resource_refresh = datetime.min.replace(tzinfo=UTC)
+
+        # Do initial refresh on startup (if cache is empty or stale)
+        await self._initial_cache_warmup()
+
+        while self._scheduler_running:
+            try:
+                now = datetime.now(UTC)
+
+                # Check compartment refresh
+                if now - last_compartment_refresh >= compartment_interval:
+                    self._logger.info("Scheduled compartment refresh starting")
+                    try:
+                        count = await self.discover_compartments()
+                        last_compartment_refresh = now
+                        self._logger.info(
+                            "Scheduled compartment refresh complete",
+                            compartments=count,
+                        )
+                    except Exception as e:
+                        self._logger.error(
+                            "Scheduled compartment refresh failed",
+                            error=str(e),
+                        )
+
+                # Check resource refresh
+                if now - last_resource_refresh >= resource_interval:
+                    self._logger.info("Scheduled resource refresh starting")
+                    try:
+                        stats = await self.full_discovery(incremental=True)
+                        last_resource_refresh = now
+                        self._logger.info(
+                            "Scheduled resource refresh complete",
+                            stats=stats,
+                        )
+                    except Exception as e:
+                        self._logger.error(
+                            "Scheduled resource refresh failed",
+                            error=str(e),
+                        )
+
+                # Calculate sleep until next refresh
+                next_compartment = last_compartment_refresh + compartment_interval
+                next_resource = last_resource_refresh + resource_interval
+                next_refresh = min(next_compartment, next_resource)
+                sleep_seconds = max((next_refresh - now).total_seconds(), 60)
+
+                self._logger.debug(
+                    "Scheduler sleeping",
+                    sleep_seconds=sleep_seconds,
+                    next_compartment_refresh=next_compartment.isoformat(),
+                    next_resource_refresh=next_resource.isoformat(),
+                )
+                await asyncio.sleep(sleep_seconds)
+
+            except asyncio.CancelledError:
+                self._logger.info("Scheduler cancelled")
+                break
+            except Exception as e:
+                self._logger.error("Scheduler loop error", error=str(e))
+                await asyncio.sleep(60)  # Sleep 1 minute on error
+
+    async def _initial_cache_warmup(self) -> None:
+        """
+        Warm up the cache on startup if needed.
+
+        Checks if cache is empty or stale and does initial population.
+        """
+        # Check if compartments are cached
+        compartments = await self.get_compartments()
+        if not compartments:
+            self._logger.info("Cache empty, performing initial warmup")
+            await self.discover_compartments()
+            return
+
+        # Check if cache is stale (older than TTL)
+        last_discovery = await self._get(CACHE_KEYS["last_discovery"])
+        if last_discovery:
+            try:
+                last_dt = datetime.fromisoformat(last_discovery)
+                age = datetime.now(UTC) - last_dt
+                if age > COMPARTMENT_TTL:
+                    self._logger.info(
+                        "Cache stale, performing refresh",
+                        age_hours=age.total_seconds() / 3600,
+                    )
+                    await self.discover_compartments()
+            except Exception:
+                pass
+
+    async def force_refresh(
+        self,
+        compartments: bool = True,
+        resources: bool = False,
+    ) -> dict[str, Any]:
+        """
+        Force an immediate cache refresh (bypass scheduled intervals).
+
+        Use this when user explicitly requests latest data with keywords like
+        "latest", "refresh", "current", "real-time".
+
+        Args:
+            compartments: Refresh compartments
+            resources: Also refresh all resources
+
+        Returns:
+            Refresh statistics
+        """
+        self._logger.info(
+            "Force refresh requested",
+            compartments=compartments,
+            resources=resources,
+        )
+
+        stats: dict[str, Any] = {
+            "forced": True,
+            "timestamp": datetime.now(UTC).isoformat(),
+        }
+
+        if compartments:
+            stats["compartments"] = await self.discover_compartments()
+
+        if resources:
+            full_stats = await self.full_discovery(incremental=False)
+            stats["resources"] = full_stats.get("resources", {})
+
+        self._logger.info("Force refresh complete", stats=stats)
+        return stats
+
+    def is_scheduler_running(self) -> bool:
+        """Check if the scheduled refresh task is running."""
+        return self._scheduler_running and self._scheduler_task is not None

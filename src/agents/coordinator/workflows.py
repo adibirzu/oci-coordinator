@@ -41,6 +41,49 @@ logger = structlog.get_logger(__name__)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Utility Functions
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _safe_str_value(value: Any, default: str = "") -> str:
+    """
+    Safely extract a string value from potentially nested dict structures.
+
+    OCI APIs sometimes return nested dict structures for what should be simple
+    string fields. This function handles these cases to prevent AttributeError
+    when calling string methods like .upper() on dict objects.
+
+    Args:
+        value: The value to convert (string, dict, or None)
+        default: Default value if extraction fails
+
+    Returns:
+        String value suitable for string operations
+
+    Examples:
+        >>> _safe_str_value("FINANCE")
+        'FINANCE'
+        >>> _safe_str_value({"name": "FINANCE"})
+        'FINANCE'
+        >>> _safe_str_value(None)
+        ''
+    """
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        # Try common nested field names
+        for key in ("name", "value", "display_name", "id"):
+            nested = value.get(key)
+            if nested and isinstance(nested, str):
+                return nested
+        # Fallback to string representation of dict
+        return str(value)
+    return str(value)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # OCI CLI Fallback Support
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -243,6 +286,44 @@ def _get_profile_compartment(
     return compartment_id, region
 
 
+def _auto_select_db_profile(profile: str | None) -> str | None:
+    """
+    Auto-select the best profile for database operations.
+
+    If no profile is specified, checks which profiles have DB Management
+    compartments configured and returns the best one.
+
+    Priority:
+    1. If profile is explicitly provided, use it
+    2. If EMDEMO has DBMGMT config, use EMDEMO (typically has managed databases)
+    3. If DEFAULT has DBMGMT config, use None (DEFAULT)
+    4. Otherwise return None
+
+    Args:
+        profile: Explicitly provided profile name, or None
+
+    Returns:
+        Profile name to use (None means DEFAULT)
+    """
+    import os
+
+    if profile:
+        return profile
+
+    default_dbmgmt = os.getenv("OCI_DEFAULT_DBMGMT_COMPARTMENT_ID")
+    emdemo_dbmgmt = os.getenv("OCI_EMDEMO_DBMGMT_COMPARTMENT_ID")
+
+    if emdemo_dbmgmt:
+        # EMDEMO typically has more managed databases
+        logger.debug("Auto-selecting EMDEMO profile for DB operations")
+        return "EMDEMO"
+    elif default_dbmgmt:
+        logger.debug("Using DEFAULT profile for DB operations")
+        return None
+
+    return None
+
+
 def _extract_result(result: ToolCallResult | str | Any) -> str:
     """Extract string result from ToolCallResult or return string directly."""
     if isinstance(result, ToolCallResult):
@@ -306,7 +387,11 @@ def _format_database_connections(raw_result: str) -> str:
             if isinstance(connections_str, str) and connections_str:
                 connection_names = [c.strip() for c in connections_str.split(",") if c.strip()]
             elif isinstance(connections_str, list):
-                connection_names = connections_str
+                # Handle list of strings or list of dicts
+                connection_names = [
+                    _safe_str_value(c) if isinstance(c, dict) else str(c)
+                    for c in connections_str
+                ]
             else:
                 connection_names = []
 
@@ -321,9 +406,11 @@ def _format_database_connections(raw_result: str) -> str:
             # Build structured connection list
             connections = []
             for name in connection_names:
+                # Ensure name is a string (handle any remaining dict values)
+                name_str = _safe_str_value(name) if isinstance(name, dict) else str(name)
                 connections.append({
-                    "name": name,
-                    "connection_type": _detect_connection_type(name),
+                    "name": name_str,
+                    "connection_type": _detect_connection_type(name_str),
                 })
 
             return json.dumps({
@@ -354,10 +441,89 @@ def _format_database_connections(raw_result: str) -> str:
         })
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Conversation Context Helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Thread-local storage for last used compartment (simple in-memory fallback)
+_last_compartment_cache: dict[str, tuple[str, str]] = {}  # thread_id -> (name, ocid)
+
+
+async def _store_last_compartment(
+    memory: SharedMemoryManager,
+    thread_id: str,
+    compartment_name: str | None,
+    compartment_id: str,
+) -> None:
+    """Store the last used compartment in conversation context."""
+    try:
+        # Store in memory cache for quick retrieval
+        _last_compartment_cache[thread_id] = (compartment_name or "unknown", compartment_id)
+
+        # Also try to store in the shared memory manager if available
+        if memory and hasattr(memory, "set_session_state"):
+            await memory.set_session_state(
+                thread_id,
+                {
+                    "last_compartment_name": compartment_name,
+                    "last_compartment_id": compartment_id,
+                },
+            )
+        logger.debug("Stored last compartment in context",
+                    thread_id=thread_id,
+                    compartment_name=compartment_name,
+                    compartment_id=compartment_id[:30] if compartment_id else None)
+    except Exception as e:
+        logger.debug("Failed to store compartment context", error=str(e))
+
+
+async def _get_last_compartment(
+    memory: SharedMemoryManager,
+    thread_id: str | None,
+) -> tuple[str | None, str | None]:
+    """Get the last used compartment from conversation context.
+
+    Returns:
+        Tuple of (compartment_name, compartment_id) or (None, None) if not found
+    """
+    # If no thread_id, can't look up context
+    if not thread_id:
+        logger.debug("No thread_id provided for context lookup")
+        return None, None
+
+    logger.debug("Looking up compartment context",
+                thread_id=thread_id,
+                cache_keys=list(_last_compartment_cache.keys())[:5],
+                cache_size=len(_last_compartment_cache))
+
+    try:
+        # Try local cache first
+        if thread_id in _last_compartment_cache:
+            name, ocid = _last_compartment_cache[thread_id]
+            logger.debug("Retrieved last compartment from cache", thread_id=thread_id, name=name)
+            return name, ocid
+
+        # Try shared memory manager
+        if memory and hasattr(memory, "get_session_state"):
+            state = await memory.get_session_state(thread_id)
+            if state:
+                name = state.get("last_compartment_name")
+                ocid = state.get("last_compartment_id")
+                if ocid:
+                    logger.debug("Retrieved last compartment from memory", thread_id=thread_id, name=name)
+                    return name, ocid
+
+    except Exception as e:
+        logger.debug("Failed to get compartment context", error=str(e))
+
+    return None, None
+
+
 async def _resolve_compartment(
     name_or_id: str | None,
     tool_catalog: ToolCatalog,
     query: str | None = None,
+    skip_root_fallback: bool = False,
 ) -> str | None:
     """
     Resolve a compartment name or ID to an OCID.
@@ -366,9 +532,11 @@ async def _resolve_compartment(
         name_or_id: Compartment name, partial name, or OCID
         tool_catalog: Tool catalog for executing MCP tools
         query: Original query to extract compartment name from if name_or_id is None
+        skip_root_fallback: If True, return None instead of falling back to root compartment.
+                           Use this when the caller wants to try conversation context first.
 
     Returns:
-        Compartment OCID if found, root compartment as fallback, or None
+        Compartment OCID if found, root compartment as fallback (unless skip_root_fallback), or None
     """
     # If already an OCID, return as-is
     if name_or_id and name_or_id.startswith("ocid1."):
@@ -377,29 +545,53 @@ async def _resolve_compartment(
     # Try to extract compartment name from query if not provided
     search_name = name_or_id
     if not search_name and query:
-        # Look for common patterns like "in X compartment" or "X compartment"
+        # Look for common patterns - support multiple variations:
+        # - "in/from compartment NAME"
+        # - "NAME compartment"
+        # - "compartment NAME"
+        # - "from NAME with status"
         import re
         patterns = [
-            r"(?:in|from|for)\s+(\w+(?:[-_]\w+)*)\s+compartment",
-            r"(\w+(?:[-_]\w+)*)\s+compartment",
-            r"compartment\s+(\w+(?:[-_]\w+)*)",
+            r"(?:in|from|for)\s+compartment\s+(\w+(?:[-_]\w+)*)",  # "in/from compartment NAME"
+            r"(\w+(?:[-_]\w+)*)\s+compartment",  # "NAME compartment"
+            r"compartment\s+(\w+(?:[-_]\w+)*)",  # "compartment NAME"
+            r"(?:in|from)\s+(\w+(?:[-_]\w+)*)\s+(?:compartment|with)",  # "from NAME with..."
+            r"(?:in|from)\s+(\w+(?:[-_]\w+)*)(?:\s|$)",  # "from NAME" at end
         ]
+        skip_words = {
+            # Articles and pronouns
+            "the", "a", "an", "all", "my", "our", "this", "that",
+            # Common query verbs (these are NOT compartment names)
+            "list", "show", "get", "display", "find", "search", "check", "describe",
+            "what", "which", "where", "how", "view", "fetch",
+            # Status words
+            "current", "status", "instances", "running", "stopped", "available",
+            # Common nouns that might appear before "compartment"
+            "root", "parent", "child", "default", "main", "home",
+        }
         for pattern in patterns:
             match = re.search(pattern, query, re.IGNORECASE)
             if match:
-                search_name = match.group(1)
-                logger.debug("Extracted compartment name from query", name=search_name)
-                break
+                candidate = match.group(1)
+                if candidate.lower() not in skip_words:
+                    search_name = candidate
+                    logger.debug("Extracted compartment name from query", name=search_name, pattern=pattern)
+                    break
 
     # If we have a name to search, try to find it
     if search_name:
         try:
+            logger.debug("Searching for compartment by name", search_name=search_name)
             # Search for compartments matching the name
             result = await tool_catalog.execute(
                 "oci_search_compartments",
                 {"query": search_name, "limit": 5},
             )
             result_str = _extract_result(result)
+            logger.debug("Compartment search result preview",
+                        search_name=search_name,
+                        result_preview=result_str[:200] if result_str else None,
+                        has_ocid="ocid1.compartment" in result_str if result_str else False)
 
             # Parse the result to find matching compartment
             if result_str and "ocid1.compartment" in result_str:
@@ -415,20 +607,38 @@ async def _resolve_compartment(
                     logger.info("Resolved compartment name to OCID",
                                name=search_name, ocid=compartment_id[:50])
                     return compartment_id
+                else:
+                    logger.warning("Compartment OCID found in result but regex failed to extract",
+                                  search_name=search_name)
+            else:
+                logger.warning("Compartment search returned no OCID matches",
+                              search_name=search_name,
+                              result_preview=result_str[:100] if result_str else "empty")
 
             # Try JSON parsing if it's structured
             try:
                 data = json.loads(result_str)
                 if isinstance(data, list) and data:
                     # Return first matching compartment
-                    return data[0].get("id") or data[0].get("ocid")
+                    comp_id = data[0].get("id") or data[0].get("ocid")
+                    if comp_id:
+                        logger.info("Resolved compartment from JSON list", name=search_name, ocid=comp_id[:50])
+                    return comp_id
                 elif isinstance(data, dict):
-                    return data.get("id") or data.get("ocid")
+                    comp_id = data.get("id") or data.get("ocid")
+                    if comp_id:
+                        logger.info("Resolved compartment from JSON dict", name=search_name, ocid=comp_id[:50])
+                    return comp_id
             except (json.JSONDecodeError, TypeError):
                 pass
 
         except Exception as e:
-            logger.debug("Compartment search failed", name=search_name, error=str(e))
+            logger.warning("Compartment search failed", name=search_name, error=str(e))
+
+    # Skip root fallback if caller wants to try conversation context first
+    if skip_root_fallback:
+        logger.debug("Skipping root compartment fallback (caller will try context)")
+        return None
 
     # Fall back to root compartment
     root = _get_root_compartment()
@@ -441,6 +651,7 @@ async def _resolve_managed_database(
     name_or_id: str | None,
     tool_catalog: ToolCatalog,
     compartment_id: str | None = None,
+    profile: str | None = None,
 ) -> str | None:
     """
     Resolve a database name to a managed_database_id.
@@ -448,7 +659,8 @@ async def _resolve_managed_database(
     Args:
         name_or_id: Database name or managed_database_id (OCID)
         tool_catalog: Tool catalog for executing MCP tools
-        compartment_id: Compartment to search in (defaults to root)
+        compartment_id: Compartment to search in (defaults to profile's dbmgmt compartment)
+        profile: OCI profile to use (auto-selected if not provided)
 
     Returns:
         Managed database OCID if found, or None
@@ -460,68 +672,221 @@ async def _resolve_managed_database(
     if name_or_id.startswith("ocid1."):
         return name_or_id
 
-    # Search for the database by name
-    try:
-        search_compartment = compartment_id or _get_root_compartment()
-        if not search_compartment:
-            logger.warning("No compartment for database search")
-            return None
+    # Auto-select profile for DB operations
+    profile = _auto_select_db_profile(profile)
 
-        # List managed databases and find the match
+    # Get profile-specific compartment and region for DB Management
+    dbmgmt_compartment, dbmgmt_region = _get_profile_compartment(profile, "dbmgmt")
+
+    # Use profile-specific compartment, or fall back to provided, then root
+    search_compartment = dbmgmt_compartment or compartment_id or _get_root_compartment(profile)
+    if not search_compartment:
+        logger.warning("No compartment for database search")
+        return None
+
+    name_upper = name_or_id.upper()
+
+    # Helper function to search databases list for a name match
+    def _search_databases(databases: list[dict], source: str) -> str | None:
+        for db in databases:
+            # Safely extract database name - handle nested dicts and None values
+            raw_name = db.get("name") or db.get("database_name") or db.get("display_name") or ""
+            # Handle case where value is a dict (nested structure from API)
+            if isinstance(raw_name, dict):
+                raw_name = raw_name.get("name") or raw_name.get("value") or str(raw_name)
+            db_name = str(raw_name).upper() if raw_name else ""
+            if db_name == name_upper or name_upper in db_name:
+                db_id = db.get("id") or db.get("managed_database_id")
+                if db_id:
+                    logger.info(f"Resolved database name to ID ({source})",
+                               name=name_or_id, db_id=db_id[:50])
+                    return db_id
+        return None
+
+    # ── First: Search Managed Databases ────────────────────────────────────
+    try:
+        search_params: dict[str, Any] = {
+            "compartment_id": search_compartment,
+            "include_subtree": True,
+        }
+        if profile:
+            search_params["profile"] = profile
+        if dbmgmt_region:
+            search_params["region"] = dbmgmt_region
+
         result = await tool_catalog.execute(
             "oci_dbmgmt_list_databases",
-            {
-                "compartment_id": search_compartment,
-                "include_subtree": True,
-            },
+            search_params,
         )
         result_str = _extract_result(result)
 
-        if not result_str:
-            return None
+        if result_str:
+            try:
+                data = json.loads(result_str)
+                databases = []
+                if isinstance(data, dict):
+                    databases = data.get("databases", data.get("items", []))
+                elif isinstance(data, list):
+                    databases = data
 
-        # Try JSON parsing
-        try:
-            data = json.loads(result_str)
-            databases = []
-
-            if isinstance(data, dict):
-                databases = data.get("databases", data.get("items", []))
-            elif isinstance(data, list):
-                databases = data
-
-            # Search for matching database by name (case-insensitive)
-            name_upper = name_or_id.upper()
-            for db in databases:
-                db_name = db.get("name", db.get("database_name", "")).upper()
-                if db_name == name_upper or name_upper in db_name:
-                    db_id = db.get("id") or db.get("managed_database_id")
-                    if db_id:
-                        logger.info("Resolved database name to ID",
-                                   name=name_or_id, db_id=db_id[:50])
-                        return db_id
-
-        except (json.JSONDecodeError, TypeError):
-            # Try regex extraction from markdown/text output
-            import re
-            # Look for patterns like "FINANCE" followed by an OCID
-            pattern = rf"{re.escape(name_or_id)}.*?(ocid1\.manageddatabase\.[^\s,\]\[\"'`|]+)"
-            match = re.search(pattern, result_str, re.IGNORECASE | re.DOTALL)
-            if match:
-                db_id = match.group(1).rstrip("`|")
-                logger.info("Resolved database name to ID (regex)",
-                           name=name_or_id, db_id=db_id[:50])
-                return db_id
+                db_id = _search_databases(databases, "managed")
+                if db_id:
+                    return db_id
+            except (json.JSONDecodeError, TypeError):
+                # Try regex extraction from markdown/text output
+                import re
+                pattern = rf"{re.escape(name_or_id)}.*?(ocid1\.manageddatabase\.[^\s,\]\[\"'`|]+)"
+                match = re.search(pattern, result_str, re.IGNORECASE | re.DOTALL)
+                if match:
+                    db_id = match.group(1).rstrip("`|")
+                    logger.info("Resolved database name to ID (regex)",
+                               name=name_or_id, db_id=db_id[:50])
+                    return db_id
 
     except Exception as e:
-        logger.warning("Database name resolution failed", name=name_or_id, error=str(e))
+        logger.debug("Managed database search failed", name=name_or_id, error=str(e))
 
+    # ── Second: Search Autonomous Databases (fallback) ─────────────────────
+    # If not found in managed databases, try autonomous databases
+    try:
+        result = await tool_catalog.execute(
+            "oci_db_list_autonomous",
+            {"compartment_id": search_compartment},
+        )
+        result_str = _extract_result(result)
+
+        if result_str:
+            try:
+                data = json.loads(result_str)
+                databases = []
+                if isinstance(data, dict):
+                    databases = data.get("databases", data.get("items", []))
+                elif isinstance(data, list):
+                    databases = data
+
+                db_id = _search_databases(databases, "autonomous")
+                if db_id:
+                    return db_id
+            except (json.JSONDecodeError, TypeError):
+                # Try regex extraction for autonomous database OCIDs
+                import re
+                pattern = rf"{re.escape(name_or_id)}.*?(ocid1\.autonomousdatabase\.[^\s,\]\[\"'`|]+)"
+                match = re.search(pattern, result_str, re.IGNORECASE | re.DOTALL)
+                if match:
+                    db_id = match.group(1).rstrip("`|")
+                    logger.info("Resolved database name to ID (autonomous regex)",
+                               name=name_or_id, db_id=db_id[:50])
+                    return db_id
+
+    except Exception as e:
+        logger.debug("Autonomous database search failed", name=name_or_id, error=str(e))
+
+    logger.warning("Database name resolution failed - not found", name=name_or_id)
     return None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Identity Workflows
 # ─────────────────────────────────────────────────────────────────────────────
+
+
+def _extract_compartment_filter(query: str) -> dict[str, Any]:
+    """
+    Extract compartment filtering criteria from query.
+
+    Supports:
+    - "starting with B" / "start with B" / "that start with B"
+    - "containing finance" / "with finance in name"
+    - "named production" / "called prod"
+    - "in state ACTIVE" / "with state DELETED"
+
+    Returns dict with filter type and value.
+    """
+    import re
+    query_lower = query.lower()
+    filters: dict[str, Any] = {}
+
+    # Pattern: starting with / start with / that start with
+    prefix_patterns = [
+        r"(?:that\s+)?start(?:s|ing)?\s+with\s+(?:letter\s+)?['\"]?([a-zA-Z])['\"]?",
+        r"beginning\s+with\s+(?:letter\s+)?['\"]?([a-zA-Z])['\"]?",
+        r"with\s+(?:letter|prefix)\s+['\"]?([a-zA-Z])['\"]?",
+    ]
+    for pattern in prefix_patterns:
+        match = re.search(pattern, query_lower)
+        if match:
+            filters["starts_with"] = match.group(1).upper()
+            break
+
+    # Pattern: containing / with ... in name
+    contains_patterns = [
+        r"contain(?:s|ing)?\s+['\"]?([a-zA-Z0-9_-]+)['\"]?",
+        r"with\s+['\"]?([a-zA-Z0-9_-]+)['\"]?\s+in\s+(?:the\s+)?name",
+        r"that\s+have\s+['\"]?([a-zA-Z0-9_-]+)['\"]?\s+in",
+    ]
+    for pattern in contains_patterns:
+        match = re.search(pattern, query_lower)
+        if match and "starts_with" not in filters:
+            filters["contains"] = match.group(1).upper()
+            break
+
+    # Pattern: named / called
+    name_patterns = [
+        r"named\s+['\"]?([a-zA-Z0-9_-]+)['\"]?",
+        r"called\s+['\"]?([a-zA-Z0-9_-]+)['\"]?",
+    ]
+    for pattern in name_patterns:
+        match = re.search(pattern, query_lower)
+        if match:
+            filters["exact_name"] = match.group(1).upper()
+            break
+
+    # Pattern: state filter
+    state_pattern = r"(?:in\s+)?state\s+['\"]?(ACTIVE|DELETED|CREATING|DELETING)['\"]?"
+    match = re.search(state_pattern, query, re.IGNORECASE)
+    if match:
+        filters["state"] = match.group(1).upper()
+
+    return filters
+
+
+def _fuzzy_match_compartment(name: str, compartments: list[dict], threshold: float = 0.6) -> list[dict]:
+    """
+    Find compartments with similar names using fuzzy matching.
+
+    Returns list of similar compartments with match scores.
+    """
+    import difflib
+    name_upper = name.upper()
+    matches = []
+
+    for comp in compartments:
+        # Safely extract name - OCI API can return nested dicts
+        comp_name_raw = _safe_str_value(comp.get("name"), "")
+        comp_name = comp_name_raw.upper()
+        if not comp_name:
+            continue
+
+        # Calculate similarity ratio
+        ratio = difflib.SequenceMatcher(None, name_upper, comp_name).ratio()
+
+        # Also check for partial matches
+        if name_upper in comp_name or comp_name in name_upper:
+            ratio = max(ratio, 0.8)
+
+        if ratio >= threshold:
+            matches.append({
+                "name": comp_name_raw,  # Use the extracted string value
+                "id": _safe_str_value(comp.get("id"), ""),
+                "state": _safe_str_value(
+                    comp.get("lifecycle-state", comp.get("lifecycle_state")), "ACTIVE"
+                ),
+                "score": ratio,
+            })
+
+    # Sort by score descending
+    matches.sort(key=lambda x: x["score"], reverse=True)
+    return matches[:5]  # Return top 5 matches
 
 
 async def list_compartments_workflow(
@@ -531,12 +896,29 @@ async def list_compartments_workflow(
     memory: SharedMemoryManager,
 ) -> str:
     """
-    List compartments in the tenancy.
+    List compartments in the tenancy with filtering and OCID mapping.
 
-    Fast workflow that directly calls the MCP tool with OCI CLI fallback.
+    Features:
+    - Filter by name prefix (e.g., "starting with B")
+    - Filter by name contains (e.g., "containing finance")
+    - Filter by exact name
+    - Filter by lifecycle state
+    - Fuzzy name matching for suggestions
+    - OCID to name mapping in output
+    - Paginated output for large results (25 per page)
+    - Cache with daily refresh support
+
     Matches intents: list_compartments, show_compartments, get_compartments
     """
     try:
+        import json
+
+        # Extract filter criteria from query
+        filters = _extract_compartment_filter(query)
+
+        # Check for force refresh flag
+        force_refresh = entities.get("force_refresh", False) or "latest" in query.lower() or "refresh" in query.lower()
+
         # Resolve compartment - default to root for listing
         compartment_input = entities.get("compartment_id") or entities.get("compartment_name")
         compartment_id = await _resolve_compartment(compartment_input, tool_catalog, query)
@@ -547,27 +929,139 @@ async def list_compartments_workflow(
 
         include_subtree = entities.get("include_subtree", True)
 
+        # Build cache key
+        cache_key = f"compartments:{compartment_id or 'root'}:{json.dumps(filters, sort_keys=True)}"
+
+        # Check cache unless force refresh
+        if not force_refresh:
+            try:
+                cached = await memory.cache.get(cache_key)
+                if cached:
+                    logger.debug("Returning cached compartments", cache_key=cache_key)
+                    return cached
+            except Exception:
+                pass
+
         params = {
             "compartment_id": compartment_id,
             "include_subtree": include_subtree,
-            "limit": 100,
+            "limit": 500,  # Increased to get all compartments for filtering
             "format": "json",
         }
 
         # Build OCI CLI fallback command
-        cli_command = ["oci", "iam", "compartment", "list", "--output", "json"]
+        cli_command = ["oci", "iam", "compartment", "list", "--output", "json", "--all"]
         if compartment_id:
             cli_command.extend(["--compartment-id", compartment_id])
         if include_subtree:
             cli_command.append("--compartment-id-in-subtree=true")
 
-        return await _execute_with_cli_fallback(
+        result_str = await _execute_with_cli_fallback(
             tool_catalog=tool_catalog,
             tool_name="oci_list_compartments",
             tool_params=params,
             cli_command=cli_command,
             cli_timeout=60,
         )
+
+        # Parse and filter results
+        try:
+            data = json.loads(result_str)
+            # Support multiple result formats: list, {"data": [...]}, {"items": [...]}, {"compartments": [...]}
+            compartments = data if isinstance(data, list) else data.get("data", data.get("items", data.get("compartments", [])))
+        except (json.JSONDecodeError, TypeError):
+            # Return raw result if not JSON
+            return result_str
+
+        # Apply filters
+        filtered = []
+        for comp in compartments:
+            # Safely extract values - OCI API can return nested dicts
+            comp_name = _safe_str_value(comp.get("name"), "")
+            comp_state = _safe_str_value(
+                comp.get("lifecycle-state", comp.get("lifecycle_state")), "ACTIVE"
+            )
+
+            # Skip if state filter doesn't match
+            if filters.get("state") and comp_state.upper() != filters["state"]:
+                continue
+
+            # Skip if starts_with filter doesn't match
+            if filters.get("starts_with") and not comp_name.upper().startswith(filters["starts_with"]):
+                continue
+
+            # Skip if contains filter doesn't match
+            if filters.get("contains") and filters["contains"] not in comp_name.upper():
+                continue
+
+            # Skip if exact_name filter doesn't match
+            if filters.get("exact_name") and comp_name.upper() != filters["exact_name"]:
+                filtered_matches = _fuzzy_match_compartment(filters["exact_name"], compartments)
+                if filtered_matches and not any(
+                    _safe_str_value(m.get("name")).upper() == comp_name.upper()
+                    for m in filtered_matches
+                ):
+                    continue
+
+            filtered.append(comp)
+
+        # If no results and we had filters, suggest similar names
+        if not filtered and filters.get("starts_with"):
+            # Find compartments with similar starting letters
+            similar = [c for c in compartments if _safe_str_value(c.get("name")).upper().startswith(filters["starts_with"])]
+            if not similar:
+                # Suggest compartments that might match
+                all_first_letters = sorted(set(_safe_str_value(c.get("name"), "X")[0].upper() for c in compartments if c.get("name")))
+                suggestions = [l for l in all_first_letters if abs(ord(l) - ord(filters["starts_with"])) <= 1]
+                suggestion_text = ""
+                if suggestions:
+                    suggestion_text = f"\n\nDid you mean compartments starting with: {', '.join(suggestions)}?"
+                return f"No compartments found starting with '{filters['starts_with']}'.{suggestion_text}\n\nAvailable starting letters: {', '.join(all_first_letters)}"
+
+        if not filtered and filters.get("exact_name"):
+            # Find similar names for suggestions
+            similar = _fuzzy_match_compartment(filters["exact_name"], compartments)
+            if similar:
+                suggestions = "\n".join([f"  - {m['name']} (OCID: {m['id'][:40]}...)" for m in similar])
+                return f"No compartment found with exact name '{filters['exact_name']}'.\n\nDid you mean one of these?\n{suggestions}"
+
+        # Build output with OCID mapping and pagination
+        total = len(filtered)
+        page_size = 25
+        page = entities.get("page", 1)
+        start_idx = (page - 1) * page_size
+        end_idx = min(start_idx + page_size, total)
+
+        # Build formatted output
+        output_data = {
+            "type": "compartments",
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "total_pages": (total + page_size - 1) // page_size,
+            "filters_applied": filters,
+            "compartments": []
+        }
+
+        for comp in filtered[start_idx:end_idx]:
+            output_data["compartments"].append({
+                "name": comp.get("name"),
+                "id": comp.get("id"),
+                "state": comp.get("lifecycle-state", comp.get("lifecycle_state", "ACTIVE")),
+                "description": comp.get("description", ""),
+                "parent_id": comp.get("compartment-id", comp.get("compartment_id", "")),
+            })
+
+        result = json.dumps(output_data, indent=2)
+
+        # Cache result (4 hour TTL for compartments)
+        try:
+            from datetime import timedelta
+            await memory.cache.set(cache_key, result, ttl=timedelta(hours=4))
+        except Exception:
+            pass
+
+        return result
 
     except Exception as e:
         logger.error("list_compartments workflow failed", error=str(e))
@@ -627,30 +1121,62 @@ async def list_instances_workflow(
     entities: dict[str, Any],
     tool_catalog: ToolCatalog,
     memory: SharedMemoryManager,
+    metadata: dict[str, Any] | None = None,
 ) -> str:
     """
     List compute instances.
 
     Matches intents: list_instances, show_instances, get_instances
     Supports compartment name resolution (e.g., "list instances in Adrian_birzu compartment")
+    Stores resolved compartment in conversation context for subsequent queries.
     """
     try:
+        # Get thread_id for conversation context
+        thread_id = metadata.get("thread_id") if metadata else None
+
         # Resolve compartment name to OCID
         compartment_input = entities.get("compartment_id") or entities.get("compartment_name")
-        logger.debug(
+        logger.info(
             "list_instances workflow starting",
             query=query,
             compartment_input=compartment_input,
             entities=entities,
+            thread_id=thread_id,
         )
-        compartment_id = await _resolve_compartment(compartment_input, tool_catalog, query)
+        compartment_id = await _resolve_compartment(compartment_input, tool_catalog, query, skip_root_fallback=True)
 
-        # Fall back to root compartment if not resolved
+        # Track which compartment we're using
+        used_fallback = False
+        used_context = False
+        context_compartment_name = None  # Track context name for reporting
+
+        # If not resolved, check conversation context for previously used compartment
+        if not compartment_id and thread_id:
+            context_name, context_id = await _get_last_compartment(memory, thread_id)
+            if context_id:
+                compartment_id = context_id
+                used_context = True
+                context_compartment_name = context_name  # Save for reporting
+                logger.info("Using compartment from conversation context",
+                           thread_id=thread_id,
+                           context_name=context_name,
+                           context_id=context_id[:50] if context_id else None)
+
+        # Fall back to root compartment if still not resolved
         if not compartment_id:
             compartment_id = _get_root_compartment()
-            logger.debug("Using root compartment as fallback", compartment_id=compartment_id)
+            used_fallback = True
+            logger.debug("Using root compartment as fallback",
+                        ocid=compartment_id[:50] if compartment_id else None)
             if not compartment_id:
                 return "Error: Could not determine compartment. Please specify a compartment name or configure OCI CLI."
+        elif not used_context:
+            logger.info("Compartment resolved successfully",
+                       requested=compartment_input,
+                       resolved_id=compartment_id[:50] if compartment_id else None)
+            # Store compartment in conversation context for subsequent queries
+            if thread_id:
+                await _store_last_compartment(memory, thread_id, compartment_input, compartment_id)
 
         # Check if user asked for specific state, otherwise list all
         lifecycle_state = entities.get("lifecycle_state")
@@ -705,7 +1231,28 @@ async def list_instances_workflow(
         # If result is empty or [], provide helpful message
         if result_str in ("[]", "", "null"):
             state_msg = f" with state {lifecycle_state}" if lifecycle_state else ""
-            return f"No instances found{state_msg} in the specified compartment."
+            comp_info = f" (compartment: {compartment_input or 'root'})" if compartment_input else ""
+            if used_fallback and compartment_input:
+                return f"No instances found{state_msg}. Note: Compartment '{compartment_input}' was not found, searched root compartment instead."
+            return f"No instances found{state_msg}{comp_info}."
+
+        # Add compartment context to successful results for debugging
+        try:
+            result_data = json.loads(result_str)
+            if isinstance(result_data, dict) and result_data.get("type") == "compute_instances":
+                # Determine compartment name: explicit input > context > root
+                if compartment_input:
+                    searched_name = compartment_input
+                elif context_compartment_name:
+                    searched_name = f"{context_compartment_name} (from context)"
+                else:
+                    searched_name = "root"
+                result_data["searched_compartment"] = searched_name
+                result_data["used_fallback"] = used_fallback
+                result_data["used_context"] = used_context
+                return json.dumps(result_data)
+        except (json.JSONDecodeError, TypeError):
+            pass
 
         return result_str
 
@@ -739,6 +1286,415 @@ async def get_instance_workflow(
     except Exception as e:
         logger.error("get_instance workflow failed", error=str(e))
         return f"Error getting instance: {e}"
+
+
+async def instance_metrics_workflow(
+    query: str,
+    entities: dict[str, Any],
+    tool_catalog: ToolCatalog,
+    memory: SharedMemoryManager,
+    metadata: dict[str, Any] | None = None,
+) -> str:
+    """
+    Get metrics for a compute instance.
+
+    Matches intents: instance_metrics, show_metrics, get_instance_metrics
+    Can look up instance by name. Asks for instance name if not provided.
+    Returns CPU, memory, network, disk metrics with health assessment.
+    """
+    try:
+        # Get thread_id for conversation context
+        thread_id = metadata.get("thread_id") if metadata else None
+
+        # Get instance identifier from entities
+        instance_id = entities.get("instance_id")
+        instance_name = entities.get("instance_name") or entities.get("name")
+
+        # Extract instance name from query if not in entities
+        if not instance_name and not instance_id:
+            instance_name = _extract_instance_name_for_metrics(query)
+
+        # If still no instance specified, ask the user
+        if not instance_name and not instance_id:
+            return json.dumps({
+                "type": "clarification_needed",
+                "message": "Please provide the instance name. Which instance would you like to see metrics for?",
+                "examples": [
+                    "show metrics for my-web-server",
+                    "get instance metrics for app-server-01",
+                    "CPU and memory usage of database-vm"
+                ],
+                "suggestion": "Use 'list instances' to see available instances"
+            })
+
+        # Get compartment from context or entities
+        compartment_id = entities.get("compartment_id")
+        if not compartment_id and thread_id and memory:
+            # Try to get compartment from conversation context
+            context = await memory.get_conversation_context(thread_id)
+            compartment_id = context.get("compartment_id")
+
+        # Get hours_back from entities (default 1 hour)
+        hours_back = entities.get("hours_back", 1)
+
+        # Extract hours from query if specified
+        query_lower = query.lower()
+        if "last" in query_lower:
+            import re
+            match = re.search(r"last\s+(\d+)\s*(?:hour|hr)", query_lower)
+            if match:
+                hours_back = int(match.group(1))
+
+        logger.info(
+            "instance_metrics workflow starting",
+            instance_id=instance_id,
+            instance_name=instance_name,
+            compartment_id=compartment_id,
+            hours_back=hours_back,
+        )
+
+        # Call the metrics tool
+        params = {"hours_back": hours_back}
+        if instance_id:
+            params["instance_id"] = instance_id
+        if instance_name:
+            params["instance_name"] = instance_name
+        if compartment_id:
+            params["compartment_id"] = compartment_id
+
+        result = await tool_catalog.execute(
+            "oci_observability_get_instance_metrics",
+            params,
+        )
+
+        return _extract_result(result)
+
+    except Exception as e:
+        logger.error("instance_metrics workflow failed", error=str(e))
+        return f"Error getting instance metrics: {e}"
+
+
+def _extract_instance_name_for_metrics(query: str) -> str | None:
+    """
+    Extract instance name from metrics-related queries.
+
+    Handles patterns like:
+    - "show metrics for my-instance"
+    - "get CPU usage of web-server-01"
+    - "instance metrics for app-vm"
+    - "memory usage on database-server"
+    """
+    import re
+
+    query_lower = query.lower()
+
+    # Pattern 1: "for <name>" or "of <name>"
+    match = re.search(r"(?:for|of)\s+['\"]?([a-zA-Z0-9_-]+)['\"]?", query_lower)
+    if match:
+        name = match.group(1)
+        if name not in ("the", "a", "an", "my", "instance", "vm", "server", "this"):
+            return name
+
+    # Pattern 2: "on <name>"
+    match = re.search(r"on\s+['\"]?([a-zA-Z0-9_-]+)['\"]?", query_lower)
+    if match:
+        name = match.group(1)
+        if name not in ("the", "a", "an", "my", "instance", "vm"):
+            return name
+
+    # Pattern 3: "instance <name>" or "instance '<name>'"
+    match = re.search(r"instance\s+(?:named\s+)?['\"]?([a-zA-Z0-9_-]+)['\"]?", query_lower)
+    if match:
+        name = match.group(1)
+        if name not in ("metrics", "usage", "health"):
+            return name
+
+    # Pattern 4: "<name> metrics" or "<name> usage"
+    match = re.search(r"([a-zA-Z0-9_-]+)\s+(?:metrics|usage|health)", query_lower)
+    if match:
+        name = match.group(1)
+        if name not in ("instance", "vm", "compute", "cpu", "memory", "show", "get"):
+            return name
+
+    return None
+
+
+def _extract_instance_name(query: str) -> str | None:
+    """
+    Extract instance name from natural language query.
+
+    Handles patterns like:
+    - "start instance my-instance"
+    - "stop my-instance"
+    - "restart the instance 'my-app-server'"
+    - "start vm named my-server"
+    """
+    import re
+
+    query_lower = query.lower()
+
+    # Pattern 1: "instance <name>" or "instance '<name>'" or "instance named <name>"
+    match = re.search(r"instance\s+(?:named\s+)?['\"]?([a-zA-Z0-9_-]+)['\"]?", query_lower)
+    if match:
+        return match.group(1)
+
+    # Pattern 2: "vm <name>" or "vm named <name>"
+    match = re.search(r"vm\s+(?:named\s+)?['\"]?([a-zA-Z0-9_-]+)['\"]?", query_lower)
+    if match:
+        return match.group(1)
+
+    # Pattern 3: "start/stop/restart <name>" (action followed directly by name)
+    match = re.search(r"(?:start|stop|restart|reboot)\s+['\"]?([a-zA-Z0-9_-]+)['\"]?", query_lower)
+    if match:
+        name = match.group(1)
+        # Filter out common non-name words
+        if name not in ("the", "a", "an", "my", "instance", "vm", "server", "machine"):
+            return name
+
+    # Pattern 4: "server <name>" or "server named <name>"
+    match = re.search(r"server\s+(?:named\s+)?['\"]?([a-zA-Z0-9_-]+)['\"]?", query_lower)
+    if match:
+        return match.group(1)
+
+    return None
+
+
+async def start_instance_by_name_workflow(
+    query: str,
+    entities: dict[str, Any],
+    tool_catalog: ToolCatalog,
+    memory: SharedMemoryManager,
+    metadata: dict[str, Any] | None = None,
+) -> str:
+    """
+    Start a compute instance by name.
+
+    Matches intents: start_instance, start_vm, power_on
+    Supports instance name extraction from query and compartment resolution.
+    Uses conversation context to infer compartment from previous queries.
+    """
+    try:
+        # Get thread_id for conversation context
+        thread_id = metadata.get("thread_id") if metadata else None
+
+        # Get instance name from entities or extract from query
+        instance_name = entities.get("instance_name") or entities.get("name")
+        if not instance_name:
+            instance_name = _extract_instance_name(query)
+
+        if not instance_name:
+            return (
+                "Error: Instance name is required. Please specify which instance to start.\n"
+                "Example: 'start instance my-app-server' or 'start my-web-server'"
+            )
+
+        # Resolve compartment - try entities first, then conversation context
+        compartment_input = entities.get("compartment_id") or entities.get("compartment_name")
+        # Use skip_root_fallback=True to allow conversation context to be checked
+        compartment_id = await _resolve_compartment(
+            compartment_input, tool_catalog, query, skip_root_fallback=True
+        )
+        used_context = False
+
+        if not compartment_id:
+            # Try to get compartment from conversation context
+            last_comp_name, last_comp_id = await _get_last_compartment(memory, thread_id)
+            if last_comp_id:
+                compartment_id = last_comp_id
+                compartment_input = last_comp_name
+                used_context = True
+                logger.info("Using compartment from conversation context",
+                           compartment_name=last_comp_name,
+                           compartment_id=last_comp_id[:30] if last_comp_id else None)
+
+        if not compartment_id:
+            compartment_id = _get_root_compartment()
+            if not compartment_id:
+                return (
+                    "Error: Could not determine compartment. Please specify a compartment name or "
+                    "list instances in a compartment first.\n"
+                    "Example: 'start arkime in adrian_birzu compartment'"
+                )
+
+        logger.info(
+            "Starting instance by name",
+            instance_name=instance_name,
+            compartment_id=compartment_id[:30] + "..." if compartment_id else None,
+            used_context=used_context,
+        )
+
+        result = await tool_catalog.execute(
+            "oci_compute_start_by_name",
+            {
+                "instance_name": instance_name,
+                "compartment_id": compartment_id,
+            },
+        )
+        return _extract_result(result)
+
+    except Exception as e:
+        logger.error("start_instance workflow failed", error=str(e))
+        return f"Error starting instance: {e}"
+
+
+async def stop_instance_by_name_workflow(
+    query: str,
+    entities: dict[str, Any],
+    tool_catalog: ToolCatalog,
+    memory: SharedMemoryManager,
+    metadata: dict[str, Any] | None = None,
+) -> str:
+    """
+    Stop a compute instance by name (graceful shutdown).
+
+    Matches intents: stop_instance, stop_vm, power_off, shutdown
+    Supports instance name extraction from query and compartment resolution.
+    Uses conversation context to infer compartment from previous queries.
+    """
+    try:
+        # Get thread_id for conversation context
+        thread_id = metadata.get("thread_id") if metadata else None
+        logger.info("stop_instance_by_name workflow starting",
+                   query=query,
+                   thread_id=thread_id,
+                   metadata_keys=list(metadata.keys()) if metadata else None)
+
+        # Get instance name from entities or extract from query
+        instance_name = entities.get("instance_name") or entities.get("name")
+        if not instance_name:
+            instance_name = _extract_instance_name(query)
+
+        if not instance_name:
+            return (
+                "Error: Instance name is required. Please specify which instance to stop.\n"
+                "Example: 'stop instance my-app-server' or 'stop my-web-server'"
+            )
+
+        # Resolve compartment - try entities first, then conversation context
+        compartment_input = entities.get("compartment_id") or entities.get("compartment_name")
+        # Use skip_root_fallback=True to allow conversation context to be checked
+        compartment_id = await _resolve_compartment(
+            compartment_input, tool_catalog, query, skip_root_fallback=True
+        )
+        used_context = False
+
+        if not compartment_id:
+            # Try to get compartment from conversation context
+            last_comp_name, last_comp_id = await _get_last_compartment(memory, thread_id)
+            if last_comp_id:
+                compartment_id = last_comp_id
+                compartment_input = last_comp_name
+                used_context = True
+                logger.info("Using compartment from conversation context",
+                           compartment_name=last_comp_name,
+                           compartment_id=last_comp_id[:30] if last_comp_id else None)
+
+        if not compartment_id:
+            compartment_id = _get_root_compartment()
+            if not compartment_id:
+                return (
+                    "Error: Could not determine compartment. Please specify a compartment name or "
+                    "list instances in a compartment first.\n"
+                    "Example: 'stop arkime in adrian_birzu compartment'"
+                )
+
+        logger.info(
+            "Stopping instance by name",
+            instance_name=instance_name,
+            compartment_id=compartment_id[:30] + "..." if compartment_id else None,
+            used_context=used_context,
+        )
+
+        result = await tool_catalog.execute(
+            "oci_compute_stop_by_name",
+            {
+                "instance_name": instance_name,
+                "compartment_id": compartment_id,
+            },
+        )
+        return _extract_result(result)
+
+    except Exception as e:
+        logger.error("stop_instance workflow failed", error=str(e))
+        return f"Error stopping instance: {e}"
+
+
+async def restart_instance_by_name_workflow(
+    query: str,
+    entities: dict[str, Any],
+    tool_catalog: ToolCatalog,
+    memory: SharedMemoryManager,
+    metadata: dict[str, Any] | None = None,
+) -> str:
+    """
+    Restart a compute instance by name (graceful reboot).
+
+    Matches intents: restart_instance, reboot_vm, reboot_instance
+    Supports instance name extraction from query and compartment resolution.
+    Uses conversation context to infer compartment from previous queries.
+    """
+    try:
+        # Get thread_id for conversation context
+        thread_id = metadata.get("thread_id") if metadata else None
+
+        # Get instance name from entities or extract from query
+        instance_name = entities.get("instance_name") or entities.get("name")
+        if not instance_name:
+            instance_name = _extract_instance_name(query)
+
+        if not instance_name:
+            return (
+                "Error: Instance name is required. Please specify which instance to restart.\n"
+                "Example: 'restart instance my-app-server' or 'reboot my-web-server'"
+            )
+
+        # Resolve compartment - try entities first, then conversation context
+        compartment_input = entities.get("compartment_id") or entities.get("compartment_name")
+        # Use skip_root_fallback=True to allow conversation context to be checked
+        compartment_id = await _resolve_compartment(
+            compartment_input, tool_catalog, query, skip_root_fallback=True
+        )
+        used_context = False
+
+        if not compartment_id:
+            # Try to get compartment from conversation context
+            last_comp_name, last_comp_id = await _get_last_compartment(memory, thread_id)
+            if last_comp_id:
+                compartment_id = last_comp_id
+                compartment_input = last_comp_name
+                used_context = True
+                logger.info("Using compartment from conversation context",
+                           compartment_name=last_comp_name,
+                           compartment_id=last_comp_id[:30] if last_comp_id else None)
+
+        if not compartment_id:
+            compartment_id = _get_root_compartment()
+            if not compartment_id:
+                return (
+                    "Error: Could not determine compartment. Please specify a compartment name or "
+                    "list instances in a compartment first.\n"
+                    "Example: 'restart arkime in adrian_birzu compartment'"
+                )
+
+        logger.info(
+            "Restarting instance by name",
+            instance_name=instance_name,
+            compartment_id=compartment_id[:30] + "..." if compartment_id else None,
+            used_context=used_context,
+        )
+
+        result = await tool_catalog.execute(
+            "oci_compute_restart_by_name",
+            {
+                "instance_name": instance_name,
+                "compartment_id": compartment_id,
+            },
+        )
+        return _extract_result(result)
+
+    except Exception as e:
+        logger.error("restart_instance workflow failed", error=str(e))
+        return f"Error restarting instance: {e}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1067,6 +2023,193 @@ async def storage_costs_workflow(
         return f"Error getting storage costs: {e}"
 
 
+async def cost_by_service_workflow(
+    query: str,
+    entities: dict[str, Any],
+    tool_catalog: ToolCatalog,
+    memory: SharedMemoryManager,
+    metadata: dict[str, Any] | None = None,
+) -> str:
+    """
+    Get detailed cost breakdown by service with SKU-level detail.
+
+    Provides deeper service analysis showing top resources within each service.
+
+    Matches intents: cost_by_service, service_drilldown, service_breakdown,
+                     show_costs_by_service, detailed_costs
+    """
+    try:
+        time_range = entities.get("time_range", "30d")
+        days = 30
+        if isinstance(time_range, str) and time_range.endswith("d"):
+            try:
+                days = int(time_range.replace("d", ""))
+            except ValueError:
+                pass
+
+        tool_params = {"days": days}
+
+        # Get profile from entities first, then metadata
+        oci_profile = entities.get("oci_profile") or (metadata.get("oci_profile") if metadata else None)
+        if oci_profile:
+            tool_params["profile"] = oci_profile
+
+        # Support explicit date ranges
+        start_date = entities.get("start_date")
+        end_date = entities.get("end_date")
+        if start_date and end_date:
+            tool_params["start_date"] = start_date
+            tool_params["end_date"] = end_date
+
+        result = await tool_catalog.execute("oci_cost_service_drilldown", tool_params)
+
+        return _extract_result(result)
+
+    except Exception as e:
+        logger.error("cost_by_service workflow failed", error=str(e))
+        return f"Error getting service cost breakdown: {e}"
+
+
+async def monthly_cost_trend_workflow(
+    query: str,
+    entities: dict[str, Any],
+    tool_catalog: ToolCatalog,
+    memory: SharedMemoryManager,
+    metadata: dict[str, Any] | None = None,
+) -> str:
+    """
+    Get month-over-month cost trend.
+
+    Shows how costs have changed over the specified number of months.
+
+    Matches intents: monthly_trend, cost_trend, monthly_costs,
+                     spending_trend, month_over_month
+    """
+    try:
+        # Parse months from query
+        months = 6  # default
+        time_range = entities.get("time_range", "")
+        if isinstance(time_range, str):
+            if "3" in time_range:
+                months = 3
+            elif "6" in time_range:
+                months = 6
+            elif "12" in time_range or "year" in time_range.lower():
+                months = 12
+
+        tool_params = {"months": months}
+
+        # Get profile
+        oci_profile = entities.get("oci_profile") or (metadata.get("oci_profile") if metadata else None)
+        if oci_profile:
+            tool_params["profile"] = oci_profile
+
+        result = await tool_catalog.execute("oci_cost_monthly_trend", tool_params)
+
+        return _extract_result(result)
+
+    except Exception as e:
+        logger.error("monthly_cost_trend workflow failed", error=str(e))
+        return f"Error getting monthly cost trend: {e}"
+
+
+async def cost_comparison_workflow(
+    query: str,
+    entities: dict[str, Any],
+    tool_catalog: ToolCatalog,
+    memory: SharedMemoryManager,
+    metadata: dict[str, Any] | None = None,
+) -> str:
+    """
+    Compare costs between specific months.
+
+    Takes month names from the query like "August vs October vs November"
+    or "compare October and November".
+
+    Matches intents: cost_comparison, compare_costs, compare_months,
+                     month_comparison
+    """
+    try:
+        # Extract month references from query
+        # Common patterns: "August vs October", "compare Oct and Nov"
+        import re
+
+        # Find month names in the query
+        month_pattern = r'\b(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec)\b'
+        matches = re.findall(month_pattern, query.lower())
+
+        if len(matches) < 2:
+            return json.dumps({
+                "type": "cost_comparison",
+                "error": "Please specify at least 2 months to compare (e.g., 'compare costs August vs October')"
+            })
+
+        # Build the months string
+        months_str = " vs ".join(matches)
+
+        tool_params = {"months": months_str}
+
+        # Get profile
+        oci_profile = entities.get("oci_profile") or (metadata.get("oci_profile") if metadata else None)
+        if oci_profile:
+            tool_params["profile"] = oci_profile
+
+        result = await tool_catalog.execute("oci_cost_usage_comparison", tool_params)
+
+        return _extract_result(result)
+
+    except Exception as e:
+        logger.error("cost_comparison workflow failed", error=str(e))
+        return f"Error comparing costs: {e}"
+
+
+async def cost_by_compartment_workflow(
+    query: str,
+    entities: dict[str, Any],
+    tool_catalog: ToolCatalog,
+    memory: SharedMemoryManager,
+    metadata: dict[str, Any] | None = None,
+) -> str:
+    """
+    Get cost breakdown by compartment.
+
+    Shows which compartments are consuming the most resources.
+
+    Matches intents: cost_by_compartment, compartment_spending,
+                     show_costs_by_compartment
+    """
+    try:
+        time_range = entities.get("time_range", "30d")
+        days = 30
+        if isinstance(time_range, str) and time_range.endswith("d"):
+            try:
+                days = int(time_range.replace("d", ""))
+            except ValueError:
+                pass
+
+        tool_params = {"days": days}
+
+        # Get profile
+        oci_profile = entities.get("oci_profile") or (metadata.get("oci_profile") if metadata else None)
+        if oci_profile:
+            tool_params["profile"] = oci_profile
+
+        # Support explicit date ranges
+        start_date = entities.get("start_date")
+        end_date = entities.get("end_date")
+        if start_date and end_date:
+            tool_params["start_date"] = start_date
+            tool_params["end_date"] = end_date
+
+        result = await tool_catalog.execute("oci_cost_by_compartment", tool_params)
+
+        return _extract_result(result)
+
+    except Exception as e:
+        logger.error("cost_by_compartment workflow failed", error=str(e))
+        return f"Error getting compartment cost breakdown: {e}"
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Database Listing Workflows
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1151,10 +2294,30 @@ async def list_databases_workflow(
             profiles_to_query = [metadata["oci_profile"]]
             logger.info(f"list_databases: using profile '{profiles_to_query[0]}' from metadata")
 
-        # If no profiles specified, use None (default profile)
+        # If no profiles specified, query both DEFAULT and EMDEMO for comprehensive results
+        # This ensures multi-tenancy users see all their databases
         if not profiles_to_query:
-            profiles_to_query = [None]  # type: ignore[list-item]
-            logger.info("list_databases: no profile specified, using default")
+            import os
+            # Check which profiles have DB Management compartments configured
+            default_dbmgmt = os.getenv("OCI_DEFAULT_DBMGMT_COMPARTMENT_ID")
+            emdemo_dbmgmt = os.getenv("OCI_EMDEMO_DBMGMT_COMPARTMENT_ID")
+
+            if default_dbmgmt and emdemo_dbmgmt:
+                # Both profiles configured - query both for comprehensive results
+                profiles_to_query = [None, "EMDEMO"]  # type: ignore[list-item]
+                logger.info("list_databases: querying both DEFAULT and EMDEMO profiles")
+            elif emdemo_dbmgmt:
+                # Only EMDEMO has DB Management configured
+                profiles_to_query = ["EMDEMO"]
+                logger.info("list_databases: using EMDEMO profile (has DBMGMT config)")
+            elif default_dbmgmt:
+                # Only DEFAULT has DB Management configured
+                profiles_to_query = [None]  # type: ignore[list-item]
+                logger.info("list_databases: using DEFAULT profile")
+            else:
+                # No DB Management configured - use DEFAULT and hope for the best
+                profiles_to_query = [None]  # type: ignore[list-item]
+                logger.info("list_databases: no DBMGMT compartment configured, using default")
 
         # ── Cache Check ──────────────────────────────────────────────────────
         # Build cache key from compartment and profiles
@@ -2290,53 +3453,70 @@ async def db_sql_monitoring_workflow(
     """
     Get SQL Monitoring Report for active or recent SQL statements.
 
-    Shows real-time SQL execution monitoring data from v$sql_monitor.
-    Requires SQLcl connection to the target database.
+    Uses DB Management API (oci_dbmgmt_get_top_sql) as primary source.
+    Falls back to OPSI SQL statistics if specific DB not found.
 
     Matches intents: sql_monitoring, sql_monitor, active_sql, running_queries,
                      execution_monitoring, real_time_sql
     """
     try:
-        # Resolve database name to SQLcl connection
         database_name = entities.get("connection_name") or entities.get("database_name")
-        connection_name, error = await _resolve_sqlcl_connection(database_name, tool_catalog)
-        if error:
-            return error
+        profile = entities.get("oci_profile")
 
-        sql_id = entities.get("sql_id")
-        limit = entities.get("limit", 20)
+        # First, try to find the managed database OCID
+        managed_db_id = None
+        if database_name:
+            # Search for the database in DB Management
+            search_result = await tool_catalog.execute(
+                "oci_dbmgmt_search_databases",
+                {"name": database_name, "profile": profile},
+            )
+            search_str = _extract_result(search_result)
 
-        # Build SQL query for v$sql_monitor
-        if sql_id:
-            sql = f"""
-                SELECT sql_id, status, sql_exec_start,
-                       ROUND(elapsed_time/1000000, 2) as elapsed_sec,
-                       ROUND(cpu_time/1000000, 2) as cpu_sec,
-                       buffer_gets, disk_reads,
-                       px_servers_requested, px_servers_allocated
-                FROM v$sql_monitor
-                WHERE sql_id = '{sql_id}'
-                ORDER BY sql_exec_start DESC
-                FETCH FIRST {limit} ROWS ONLY
-            """
-        else:
-            sql = f"""
-                SELECT sql_id, status, sql_exec_start,
-                       ROUND(elapsed_time/1000000, 2) as elapsed_sec,
-                       ROUND(cpu_time/1000000, 2) as cpu_sec,
-                       buffer_gets, disk_reads,
-                       px_servers_requested, px_servers_allocated
-                FROM v$sql_monitor
-                WHERE status IN ('EXECUTING', 'DONE (ERROR)', 'DONE')
-                ORDER BY elapsed_time DESC
-                FETCH FIRST {limit} ROWS ONLY
-            """
+            # Try to extract OCID from search results (match both regular and autonomous databases)
+            if search_str and ("ocid1.database" in search_str.lower() or "ocid1.autonomousdatabase" in search_str.lower()):
+                import re
+                ocid_match = re.search(r'(ocid1\.(?:autonomous)?database\.[^"\s,]+)', search_str, re.IGNORECASE)
+                if ocid_match:
+                    managed_db_id = ocid_match.group(1)
+                    logger.info("Found managed database OCID", database_id=managed_db_id)
 
+        # If we found a managed database, get top SQL from DB Management
+        if managed_db_id:
+            logger.info("Using DB Management API for SQL monitoring", database_id=managed_db_id)
+            result = await tool_catalog.execute(
+                "oci_dbmgmt_get_top_sql",
+                {
+                    "managed_database_id": managed_db_id,
+                    "hours_back": 1,  # Last hour of SQL activity
+                    "limit": 10,      # Top 10 SQL statements
+                    "profile": profile,
+                },
+            )
+            extracted = _extract_result(result)
+            if extracted and not extracted.startswith("Error"):
+                return f"**Top SQL Activity for {database_name or 'database'}** (Last Hour)\n\n{extracted}"
+
+        # Fallback to OPSI SQL statistics for broader view
+        logger.info("Using OPSI SQL statistics for SQL monitoring")
         result = await tool_catalog.execute(
-            "oci_database_execute_sql",
-            {"sql": sql.strip(), "connection_name": connection_name},
+            "oci_opsi_summarize_sql_statistics",
+            {
+                "profile": profile,
+                "sort_by": "databaseTimeInSec",  # Sort by total database time
+                "limit": 15,  # Top 15 SQL statements
+            },
         )
-        return _extract_result(result)
+        extracted = _extract_result(result)
+        if extracted and not extracted.startswith("Error"):
+            return f"**SQL Activity Summary{' for ' + database_name if database_name else ''}**\n\n{extracted}"
+
+        # If all else fails, try OPSI SQL insights
+        result = await tool_catalog.execute(
+            "oci_opsi_summarize_sql_insights",
+            {"profile": profile},
+        )
+        return f"**SQL Insights{' for ' + database_name if database_name else ''}**\n\n{_extract_result(result)}"
 
     except Exception as e:
         logger.error("db_sql_monitoring workflow failed", error=str(e))
@@ -2407,61 +3587,76 @@ async def db_parallelism_stats_workflow(
     """
     Compare requested vs actual parallelism degree for SQL statements.
 
-    Shows SQL statements where parallel execution was requested but may
-    have been downgraded. Useful for diagnosing parallel query issues.
+    Uses OPSI SQL statistics to analyze parallel query execution.
+    Falls back to DB Management top SQL if OPSI unavailable.
 
     Matches intents: parallelism_stats, parallel_query, px_stats,
                      degree_comparison, parallel_execution, px_downgrade
     """
     try:
-        # Resolve database name to SQLcl connection
         database_name = entities.get("connection_name") or entities.get("database_name")
-        connection_name, error = await _resolve_sqlcl_connection(database_name, tool_catalog)
-        if error:
-            return error
+        profile = entities.get("oci_profile")
 
-        sql_id = entities.get("sql_id")
-        limit = entities.get("limit", 20)
-
-        if sql_id:
-            sql = f"""
-                SELECT sql_id,
-                       px_servers_requested as req_degree,
-                       px_servers_allocated as actual_degree,
-                       CASE WHEN px_servers_requested > px_servers_allocated
-                            THEN 'DOWNGRADED' ELSE 'OK' END as status,
-                       ROUND(elapsed_time/1000000, 2) as elapsed_sec,
-                       executions
-                FROM v$sql
-                WHERE sql_id = '{sql_id}'
-                  AND px_servers_requested > 0
-            """
-        else:
-            sql = f"""
-                SELECT sql_id,
-                       px_servers_requested as req_degree,
-                       px_servers_allocated as actual_degree,
-                       CASE WHEN px_servers_requested > px_servers_allocated
-                            THEN 'DOWNGRADED' ELSE 'OK' END as status,
-                       ROUND(elapsed_time/1000000, 2) as elapsed_sec,
-                       executions
-                FROM v$sql
-                WHERE px_servers_requested > 0
-                  AND px_servers_requested != px_servers_allocated
-                ORDER BY elapsed_time DESC
-                FETCH FIRST {limit} ROWS ONLY
-            """
-
+        # Try OPSI SQL statistics for parallel query analysis
+        logger.info("Using OPSI for parallelism analysis", database=database_name)
         result = await tool_catalog.execute(
-            "oci_database_execute_sql",
-            {"sql": sql.strip(), "connection_name": connection_name},
+            "oci_opsi_summarize_sql_statistics",
+            {
+                "profile": profile,
+                "sort_by": "cpuTimeInSec",  # CPU-intensive queries often use parallelism
+                "limit": 15,
+            },
         )
-
         extracted = _extract_result(result)
-        # Provide helpful message if no downgraded parallelism found
-        if "No rows" in extracted or (isinstance(extracted, str) and "[]" in extracted):
-            return "✅ No parallel execution downgrade detected. All parallel queries ran with requested degree."
-        return extracted
+
+        if extracted and not extracted.startswith("Error"):
+            # Format response with parallelism context
+            response_parts = [
+                f"**Parallel Query Analysis{' for ' + database_name if database_name else ''}**",
+                "",
+                "SQL statements analyzed for parallel execution patterns:",
+                "",
+                extracted,
+                "",
+                "---",
+                "**Interpretation Guide:**",
+                "- High CPU Time with low Buffer Gets may indicate parallelism working well",
+                "- High Execution Count with long elapsed time may indicate PX downgrade",
+                "- Use AWR report for detailed parallel execution statistics",
+            ]
+            return "\n".join(response_parts)
+
+        # Fallback to DB Management top SQL
+        if database_name:
+            search_result = await tool_catalog.execute(
+                "oci_dbmgmt_search_databases",
+                {"name": database_name, "profile": profile},
+            )
+            search_str = _extract_result(search_result)
+
+            # Match both regular and autonomous database OCIDs
+            if search_str and ("ocid1.database" in search_str.lower() or "ocid1.autonomousdatabase" in search_str.lower()):
+                import re
+                ocid_match = re.search(r'(ocid1\.(?:autonomous)?database\.[^"\s,]+)', search_str, re.IGNORECASE)
+                if ocid_match:
+                    managed_db_id = ocid_match.group(1)
+                    logger.info("Found managed database OCID for top SQL", database_id=managed_db_id)
+                    result = await tool_catalog.execute(
+                        "oci_dbmgmt_get_top_sql",
+                        {"managed_database_id": managed_db_id, "profile": profile},
+                    )
+                    return f"**Top SQL Analysis for {database_name}**\n\n{_extract_result(result)}"
+
+        # If no specific DB, get ADDM findings which include parallelism recommendations
+        result = await tool_catalog.execute(
+            "oci_opsi_get_addm_findings",
+            {"profile": profile},
+        )
+        extracted = _extract_result(result)
+        if extracted and not extracted.startswith("Error"):
+            return f"**ADDM Findings (includes parallel execution analysis)**\n\n{extracted}"
+
+        return "No parallelism statistics available. Ensure database is enrolled in OPSI or DB Management."
 
     except Exception as e:
         logger.error("db_parallelism_stats workflow failed", error=str(e))
@@ -2549,47 +3744,129 @@ async def db_blocking_sessions_workflow(
     memory: SharedMemoryManager,
 ) -> str:
     """
-    Check for blocking sessions in the database.
+    Check for blocking sessions / lock contention in the database.
 
-    Shows sessions that are blocking other sessions, causing lock contention.
-    Essential for diagnosing performance issues due to locking.
+    Uses DB Management API (oci_dbmgmt_get_wait_events) to identify lock-related
+    wait events, and OPSI ADDM findings for blocking analysis.
 
     Matches intents: blocking_sessions, blocked_sessions, lock_contention,
                      session_blocking, lock_analysis, database_locks
     """
     try:
-        # Resolve database name to SQLcl connection
         database_name = entities.get("connection_name") or entities.get("database_name")
-        connection_name, error = await _resolve_sqlcl_connection(database_name, tool_catalog)
-        if error:
-            return error
+        profile = _auto_select_db_profile(entities.get("oci_profile"))
 
-        sql = """
-            SELECT blocking_session,
-                   s.sid, s.serial#, s.username, s.program,
-                   s.sql_id, s.event, s.wait_class,
-                   s.seconds_in_wait,
-                   l.type as lock_type
-            FROM v$session s
-            LEFT JOIN v$lock l ON s.sid = l.sid AND l.block > 0
-            WHERE s.blocking_session IS NOT NULL
-            ORDER BY s.seconds_in_wait DESC
-        """
+        # First, try to find the managed database OCID
+        managed_db_id = None
+        if database_name:
+            search_result = await tool_catalog.execute(
+                "oci_dbmgmt_search_databases",
+                {"name": database_name, "profile": profile},
+            )
+            search_str = _extract_result(search_result)
+            # Match both ocid1.database and ocid1.autonomousdatabase OCIDs
+            if search_str and ("ocid1.database" in search_str.lower() or "ocid1.autonomousdatabase" in search_str.lower()):
+                import re
+                # Match both regular and autonomous database OCIDs
+                ocid_match = re.search(r'(ocid1\.(?:autonomous)?database\.[^"\s,]+)', search_str, re.IGNORECASE)
+                if ocid_match:
+                    managed_db_id = ocid_match.group(1)
+                    logger.info("Found managed database OCID", database_id=managed_db_id)
 
+        # If we found a managed database, get wait events (includes lock waits)
+        if managed_db_id:
+            logger.info("Using DB Management API for blocking/lock analysis", database_id=managed_db_id)
+            result = await tool_catalog.execute(
+                "oci_dbmgmt_get_wait_events",
+                {
+                    "managed_database_id": managed_db_id,
+                    "hours_back": 1,
+                    "top_n": 15,  # Get more events to catch lock-related ones
+                    "profile": profile,
+                },
+            )
+            extracted = _extract_result(result)
+            if extracted and not extracted.startswith("Error"):
+                # Check for lock-related wait events
+                lock_keywords = ["lock", "enq:", "tx -", "row lock", "library cache", "latch"]
+                has_lock_events = any(kw.lower() in extracted.lower() for kw in lock_keywords)
+
+                header = f"**Wait Events Analysis for {database_name or 'database'}** (Last Hour)\n\n"
+                if has_lock_events:
+                    header += "⚠️ **Lock-related wait events detected!** Review the events below:\n\n"
+                else:
+                    header += "✅ **No significant lock contention detected.** Current wait events:\n\n"
+                return header + extracted
+
+        # Fallback: Try to get OPSI database insight ID if we have a database name
+        opsi_db_id = None
+        if database_name:
+            # Search OPSI database insights for the database
+            logger.info("Searching OPSI for database", database_name=database_name)
+            opsi_result = await tool_catalog.execute(
+                "oci_opsi_list_database_insights",
+                {"profile": profile, "limit": 100},
+            )
+            opsi_str = _extract_result(opsi_result)
+            if opsi_str and database_name.lower() in opsi_str.lower():
+                import re
+                # Look for OPSI database insight ID
+                opsi_match = re.search(r'"id"\s*:\s*"(ocid1\.databaseinsight\.[^"]+)"', opsi_str)
+                if opsi_match:
+                    opsi_db_id = opsi_match.group(1)
+                    logger.info("Found OPSI database insight", opsi_db_id=opsi_db_id)
+
+        # Try OPSI ADDM findings with database context if available
+        db_id_for_addm = opsi_db_id or managed_db_id
+        if db_id_for_addm:
+            logger.info("Using OPSI ADDM for blocking analysis", db_id=db_id_for_addm)
+            result = await tool_catalog.execute(
+                "oci_opsi_get_addm_findings",
+                {"database_id": db_id_for_addm, "profile": profile},
+            )
+            extracted = _extract_result(result)
+            if extracted and not extracted.startswith("Error") and '"error"' not in extracted.lower():
+                return f"**ADDM Blocking/Performance Findings{' for ' + database_name if database_name else ''}**\n\n{extracted}"
+        else:
+            logger.debug("Skipping ADDM - no database ID available", opsi_db_id=opsi_db_id, managed_db_id=managed_db_id)
+
+        # Fallback: Use SQLcl to directly query blocking sessions if we have a connection
+        if database_name:
+            logger.info("Using SQLcl for direct blocking session query", connection=database_name)
+            blocking_sql = """
+SELECT s.sid || ',' || s.serial# as blocked_session,
+       bs.sid || ',' || bs.serial# as blocking_session,
+       s.username as blocked_user,
+       bs.username as blocking_user,
+       s.event as wait_event,
+       s.seconds_in_wait as wait_seconds,
+       s.sql_id as blocked_sql_id,
+       bs.sql_id as blocking_sql_id
+FROM v$session s
+JOIN v$session bs ON s.blocking_session = bs.sid
+WHERE s.blocking_session IS NOT NULL
+ORDER BY s.seconds_in_wait DESC"""
+            result = await tool_catalog.execute(
+                "oci_database_execute_sql",
+                {"connection_name": database_name, "sql": blocking_sql},
+            )
+            extracted = _extract_result(result)
+            if extracted and not extracted.startswith("Error"):
+                if "No rows" in extracted or "0 rows" in extracted:
+                    return f"✅ **No blocking sessions detected on {database_name}**\n\nNo sessions are currently blocked by other sessions."
+                return f"**Blocking Sessions on {database_name}**\n\n{extracted}"
+
+        # Final fallback - check wait events across all databases
         result = await tool_catalog.execute(
-            "oci_database_execute_sql",
-            {"sql": sql.strip(), "connection_name": connection_name},
+            "oci_opsi_summarize_sql_insights",
+            {"profile": profile},
         )
-
-        # Provide helpful message if no blocking found
         extracted = _extract_result(result)
-        if "No rows" in extracted or (isinstance(extracted, str) and "[]" in extracted):
-            return "✅ No blocking sessions found. All sessions are running without lock contention."
-        return extracted
+        return f"**SQL Insights (may include lock waits){' for ' + database_name if database_name else ''}**\n\n{extracted}"
 
     except Exception as e:
         logger.error("db_blocking_sessions workflow failed", error=str(e))
-        return f"Error checking blocking sessions: {e}"
+        return f"Error checking blocking/lock contention: {e}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2913,10 +4190,14 @@ async def db_performance_overview_workflow(
     Get comprehensive database performance overview.
 
     Combines multiple data sources for a complete performance picture:
-    - Fleet health summary
+    - Fleet health summary (DB Management in dbmgmt region)
     - Top SQL by CPU
-    - ADDM findings and recommendations
+    - ADDM findings and recommendations (OPSI in opsi region)
     - Capacity trends
+
+    Uses profile-specific compartments/regions:
+    - EMDEMO: DB Management in us-ashburn-1, OPSI in uk-london-1
+    - DEFAULT: Uses root tenancy compartment
 
     Matches intents: db_performance_overview, database_performance, db_health_check,
                      comprehensive_db_status, full_db_analysis
@@ -2924,21 +4205,37 @@ async def db_performance_overview_workflow(
     import asyncio
 
     try:
+        # Extract profile - supports multi-tenancy (EMDEMO, DEFAULT, etc.)
+        profile = entities.get("profile") or entities.get("oci_profile")
         compartment_id = entities.get("compartment_id")
-        if not compartment_id:
-            compartment_id = _get_root_compartment()
+
+        # Auto-select best profile for DB operations if none specified
+        profile = _auto_select_db_profile(profile)
+
+        # Get profile-specific compartments and regions for different services
+        dbmgmt_compartment, dbmgmt_region = _get_profile_compartment(profile, "dbmgmt")
+        opsi_compartment, opsi_region = _get_profile_compartment(profile, "opsi")
+
+        # Use profile-specific compartment, or fall back to provided, then root
+        if not dbmgmt_compartment:
+            dbmgmt_compartment = compartment_id or _get_root_compartment(profile)
+        if not opsi_compartment:
+            opsi_compartment = compartment_id or _get_root_compartment(profile)
 
         database_id = entities.get("database_id") or entities.get("managed_database_id")
 
         results = []
-        results.append("# Database Performance Overview\n")
+        profile_label = profile.upper() if profile else "DEFAULT"
+        results.append(f"# Database Performance Overview ({profile_label})\n")
 
         async def get_fleet_health():
             try:
-                result = await tool_catalog.execute(
-                    "oci_dbmgmt_get_fleet_health",
-                    {"compartment_id": compartment_id, "include_subtree": True},
-                )
+                params = {"compartment_id": dbmgmt_compartment, "include_subtree": True}
+                if profile:
+                    params["profile"] = profile
+                if dbmgmt_region:
+                    params["region"] = dbmgmt_region
+                result = await tool_catalog.execute("oci_dbmgmt_get_fleet_health", params)
                 return _extract_result(result)
             except Exception as e:
                 logger.debug("Fleet health failed", error=str(e))
@@ -2946,9 +4243,13 @@ async def db_performance_overview_workflow(
 
         async def get_addm_findings():
             try:
-                params = {"compartment_id": compartment_id, "days": 7}
+                params = {"compartment_id": opsi_compartment, "days": 7}
                 if database_id:
                     params["database_id"] = database_id
+                if profile:
+                    params["profile"] = profile
+                if opsi_region:
+                    params["region"] = opsi_region
                 result = await tool_catalog.execute("oci_opsi_get_addm_findings", params)
                 return _extract_result(result)
             except Exception as e:
@@ -2957,9 +4258,13 @@ async def db_performance_overview_workflow(
 
         async def get_recommendations():
             try:
-                params = {"compartment_id": compartment_id, "days": 7}
+                params = {"compartment_id": opsi_compartment, "days": 7}
                 if database_id:
                     params["database_id"] = database_id
+                if profile:
+                    params["profile"] = profile
+                if opsi_region:
+                    params["region"] = opsi_region
                 result = await tool_catalog.execute("oci_opsi_get_addm_recommendations", params)
                 return _extract_result(result)
             except Exception as e:
@@ -2968,10 +4273,12 @@ async def db_performance_overview_workflow(
 
         async def get_resource_stats():
             try:
-                result = await tool_catalog.execute(
-                    "oci_opsi_summarize_resource_stats",
-                    {"compartment_id": compartment_id, "resource_metric": "CPU", "days": 7},
-                )
+                params = {"compartment_id": opsi_compartment, "resource_metric": "CPU", "days": 7}
+                if profile:
+                    params["profile"] = profile
+                if opsi_region:
+                    params["region"] = opsi_region
+                result = await tool_catalog.execute("oci_opsi_summarize_resource_stats", params)
                 return _extract_result(result)
             except Exception as e:
                 logger.debug("Resource stats failed", error=str(e))
@@ -3010,16 +4317,623 @@ async def db_performance_overview_workflow(
             results.append("")
 
         if len(results) == 1:  # Only header
-            results.append(
-                "No performance data available. Ensure databases are registered with "
-                "DB Management and Operations Insights services."
-            )
+            results.append("## Status: No Database Performance Data Available\n")
+            results.append("The performance analysis could not retrieve any database metrics.\n")
+            results.append("**Possible causes:**")
+            results.append("1. **No databases registered with DB Management Service** - Enable Database Management for your databases")
+            results.append("2. **No databases enrolled in Operations Insights (OPSI)** - Enroll databases to get ADDM findings and SQL insights")
+            results.append("3. **Database performance monitoring not enabled** - Check database monitoring settings in OCI Console\n")
+            results.append("**Recommended actions:**")
+            results.append("- Run `list databases` to see available databases in the tenancy")
+            results.append("- Enable DB Management for Autonomous Databases via OCI Console > Autonomous Databases > Database Details > Enable DB Management")
+            results.append("- Enable Operations Insights via OCI Console > Database Management > Operations Insights\n")
+            results.append("For more information, see the [OCI Database Management documentation](https://docs.oracle.com/en-us/iaas/database-management/home.htm)")
 
         return "\n".join(results)
 
     except Exception as e:
         logger.error("db_performance_overview workflow failed", error=str(e))
         return f"Error getting database performance overview: {e}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Observability Workflows
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+async def list_alarms_workflow(
+    query: str,
+    entities: dict[str, Any],
+    tool_catalog: ToolCatalog,
+    memory: SharedMemoryManager,
+) -> str:
+    """
+    List active alarms from OCI Monitoring service.
+
+    Returns alarms with severity, state, and namespace information.
+
+    Matches intents: list_alarms, show_alarms, active_alarms, monitoring_alarms,
+                     alarm_status, alert_status
+    """
+    try:
+        compartment_id = entities.get("compartment_id")
+        profile = entities.get("oci_profile")
+        lifecycle_state = entities.get("lifecycle_state", "ACTIVE")
+
+        params: dict[str, Any] = {"limit": 50}
+        if compartment_id:
+            params["compartment_id"] = compartment_id
+        if profile:
+            params["profile"] = profile
+        if lifecycle_state:
+            params["lifecycle_state"] = lifecycle_state
+
+        result = await tool_catalog.execute(
+            "oci_observability_list_alarms",
+            params,
+        )
+
+        extracted = _extract_result(result)
+        if not extracted or extracted.startswith("Error"):
+            return "Error listing alarms: Unable to retrieve alarm data."
+
+        return extracted
+
+    except Exception as e:
+        logger.error("list_alarms workflow failed", error=str(e))
+        return f"Error listing alarms: {e}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Log Analytics Workflows
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+async def log_summary_workflow(
+    query: str,
+    entities: dict[str, Any],
+    tool_catalog: ToolCatalog,
+    memory: SharedMemoryManager,
+) -> str:
+    """
+    Get Log Analytics summary.
+
+    Returns storage usage, source counts, and log group information.
+
+    Matches intents: log_summary, show_log_summary, logging_summary,
+                     log_analytics_status
+    """
+    try:
+        compartment_id = entities.get("compartment_id")
+        profile = entities.get("oci_profile")
+        hours_back = entities.get("hours_back", 24)
+
+        params: dict[str, Any] = {"hours_back": hours_back}
+        if compartment_id:
+            params["compartment_id"] = compartment_id
+        if profile:
+            params["profile"] = profile
+
+        result = await tool_catalog.execute(
+            "oci_logan_get_summary",
+            params,
+        )
+
+        extracted = _extract_result(result)
+        if not extracted or extracted.startswith("Error"):
+            return "Error getting log summary: Unable to retrieve Log Analytics data."
+
+        return extracted
+
+    except Exception as e:
+        logger.error("log_summary workflow failed", error=str(e))
+        return f"Error getting log summary: {e}"
+
+
+async def log_search_workflow(
+    query: str,
+    entities: dict[str, Any],
+    tool_catalog: ToolCatalog,
+    memory: SharedMemoryManager,
+) -> str:
+    """
+    Search logs for errors or specific text.
+
+    Executes a Log Analytics query to find matching log entries.
+
+    Matches intents: log_search, search_logs, find_logs, error_logs,
+                     search_for_errors
+    """
+    try:
+        compartment_id = entities.get("compartment_id")
+        profile = entities.get("oci_profile")
+        hours_back = entities.get("hours_back", 24)
+
+        # Extract search term from query
+        search_text = "error"  # Default to searching for errors
+        query_lower = query.lower()
+        if "warning" in query_lower:
+            search_text = "warning"
+        elif "exception" in query_lower:
+            search_text = "exception"
+        elif "fail" in query_lower:
+            search_text = "fail"
+
+        params: dict[str, Any] = {
+            "search_text": search_text,
+            "hours_back": hours_back,
+            "limit": 100,
+        }
+        if compartment_id:
+            params["compartment_id"] = compartment_id
+        if profile:
+            params["profile"] = profile
+
+        result = await tool_catalog.execute(
+            "oci_logan_search_logs",
+            params,
+        )
+
+        extracted = _extract_result(result)
+        if not extracted or extracted.startswith("Error"):
+            return "Error searching logs: Unable to retrieve log data."
+
+        return extracted
+
+    except Exception as e:
+        logger.error("log_search workflow failed", error=str(e))
+        return f"Error searching logs: {e}"
+
+
+async def error_analysis_workflow(
+    query: str,
+    entities: dict[str, Any],
+    tool_catalog: ToolCatalog,
+    memory: SharedMemoryManager,
+) -> str:
+    """
+    Analyze error messages and provide explanations.
+
+    This workflow handles queries where users paste error messages, stack traces,
+    or exceptions and want help understanding what went wrong.
+
+    Uses LLM analysis to explain the error and suggest fixes.
+
+    Matches intents: error_analysis, explain_error, what_is_this_error,
+                     help_with_error, understand_exception
+    """
+    try:
+        # The error message is the query itself or extracted from entities
+        error_message = entities.get("error_message") or query
+
+        # Use the LLM to analyze the error
+        from src.memory.context import SharedMemoryManager
+        from src.llm.provider import get_llm_provider
+
+        llm = get_llm_provider()
+
+        analysis_prompt = f"""You are an expert software engineer. Analyze the following error message or exception and provide:
+
+1. **What went wrong**: A clear explanation of what the error means
+2. **Likely cause**: The most probable reason(s) this error occurred
+3. **How to fix it**: Concrete steps to resolve the issue
+4. **Prevention tips**: How to avoid this error in the future
+
+Error to analyze:
+```
+{error_message}
+```
+
+Provide a helpful, educational response that a developer would find useful."""
+
+        # Call LLM for analysis
+        response = await llm.ainvoke(analysis_prompt)
+
+        # Extract content from response
+        if hasattr(response, "content"):
+            analysis = response.content
+        else:
+            analysis = str(response)
+
+        return f"# Error Analysis\n\n{analysis}"
+
+    except Exception as e:
+        logger.error("error_analysis workflow failed", error=str(e))
+        return f"Error analyzing the error message: {e}\n\nPlease share more details about the error you're encountering."
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Security Workflows
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+async def security_overview_workflow(
+    query: str,
+    entities: dict[str, Any],
+    tool_catalog: ToolCatalog,
+    memory: SharedMemoryManager,
+) -> str:
+    """
+    Get comprehensive security posture overview.
+
+    Combines Cloud Guard problems, security score, and audit activity
+    to provide a holistic security view with recommendations.
+
+    Matches intents: security_overview, show_security, security_status,
+                     security_posture, cloud_guard_summary
+    """
+    try:
+        compartment_id = entities.get("compartment_id")
+        profile = entities.get("oci_profile")
+
+        params: dict[str, Any] = {}
+        if compartment_id:
+            params["compartment_id"] = compartment_id
+        if profile:
+            params["profile"] = profile
+
+        result = await tool_catalog.execute(
+            "oci_security_overview",
+            params,
+        )
+
+        extracted = _extract_result(result)
+        if not extracted or extracted.startswith("Error"):
+            return "Error getting security overview: Unable to retrieve security data."
+
+        return extracted
+
+    except Exception as e:
+        logger.error("security_overview workflow failed", error=str(e))
+        return f"Error getting security overview: {e}"
+
+
+async def cloud_guard_problems_workflow(
+    query: str,
+    entities: dict[str, Any],
+    tool_catalog: ToolCatalog,
+    memory: SharedMemoryManager,
+) -> str:
+    """
+    List Cloud Guard security problems.
+
+    Returns problems with severity summary and risk level breakdown.
+
+    Matches intents: cloud_guard_problems, list_security_problems,
+                     security_issues, cloud_guard_findings
+    """
+    try:
+        compartment_id = entities.get("compartment_id")
+        profile = entities.get("oci_profile")
+        risk_level = entities.get("risk_level")  # CRITICAL, HIGH, MEDIUM, LOW
+
+        params: dict[str, Any] = {"limit": 50}
+        if compartment_id:
+            params["compartment_id"] = compartment_id
+        if profile:
+            params["profile"] = profile
+        if risk_level:
+            params["risk_level"] = risk_level.upper()
+
+        result = await tool_catalog.execute(
+            "oci_security_cloudguard_list_problems",
+            params,
+        )
+
+        extracted = _extract_result(result)
+        if not extracted or extracted.startswith("Error"):
+            return "Error listing Cloud Guard problems: Unable to retrieve security problems."
+
+        return extracted
+
+    except Exception as e:
+        logger.error("cloud_guard_problems workflow failed", error=str(e))
+        return f"Error listing Cloud Guard problems: {e}"
+
+
+async def security_score_workflow(
+    query: str,
+    entities: dict[str, Any],
+    tool_catalog: ToolCatalog,
+    memory: SharedMemoryManager,
+) -> str:
+    """
+    Get Cloud Guard security score.
+
+    Returns security score, grade (A-F), and problem counts by severity.
+
+    Matches intents: security_score, get_security_score, show_security_score,
+                     security_grade, security_rating
+    """
+    try:
+        compartment_id = entities.get("compartment_id")
+        profile = entities.get("oci_profile")
+
+        params: dict[str, Any] = {}
+        if compartment_id:
+            params["compartment_id"] = compartment_id
+        if profile:
+            params["profile"] = profile
+
+        result = await tool_catalog.execute(
+            "oci_security_cloudguard_get_security_score",
+            params,
+        )
+
+        extracted = _extract_result(result)
+        if not extracted or extracted.startswith("Error"):
+            return "Error getting security score: Unable to retrieve score data."
+
+        return extracted
+
+    except Exception as e:
+        logger.error("security_score workflow failed", error=str(e))
+        return f"Error getting security score: {e}"
+
+
+async def audit_events_workflow(
+    query: str,
+    entities: dict[str, Any],
+    tool_catalog: ToolCatalog,
+    memory: SharedMemoryManager,
+) -> str:
+    """
+    List recent audit events.
+
+    Returns audit events with event type summary and time range.
+
+    Matches intents: audit_events, list_audit_events, show_audit,
+                     recent_audit, audit_log
+    """
+    try:
+        compartment_id = entities.get("compartment_id")
+        profile = entities.get("oci_profile")
+        hours_back = entities.get("hours_back", 24)
+
+        params: dict[str, Any] = {"hours_back": hours_back, "limit": 100}
+        if compartment_id:
+            params["compartment_id"] = compartment_id
+        if profile:
+            params["profile"] = profile
+
+        result = await tool_catalog.execute(
+            "oci_security_audit_list_events",
+            params,
+        )
+
+        extracted = _extract_result(result)
+        if not extracted or extracted.startswith("Error"):
+            return "Error listing audit events: Unable to retrieve audit data."
+
+        return extracted
+
+    except Exception as e:
+        logger.error("audit_events workflow failed", error=str(e))
+        return f"Error listing audit events: {e}"
+
+
+async def security_threats_workflow(
+    query: str,
+    entities: dict[str, Any],
+    tool_catalog: ToolCatalog,
+    memory: SharedMemoryManager,
+) -> str:
+    """
+    Analyze security threats and potential indicators.
+
+    Combines Cloud Guard threat intelligence with MITRE ATT&CK mapping
+    to provide actionable threat analysis and recommendations.
+
+    Matches intents: security_threats, threat_analysis, threat_detection,
+                     show_threats, list_threats
+    """
+    import asyncio
+    import json
+
+    try:
+        compartment_id = entities.get("compartment_id")
+        profile = entities.get("oci_profile")
+
+        # Gather threat data from multiple sources in parallel
+        async def get_cloud_guard_problems() -> dict[str, Any]:
+            params: dict[str, Any] = {"limit": 50}
+            if compartment_id:
+                params["compartment_id"] = compartment_id
+            if profile:
+                params["profile"] = profile
+            # Focus on high-severity problems that may indicate threats
+            params["risk_level"] = "CRITICAL"
+
+            try:
+                result = await tool_catalog.execute(
+                    "oci_security_cloudguard_list_problems",
+                    params,
+                )
+                return {"source": "cloud_guard_critical", "data": _extract_result(result)}
+            except Exception as e:
+                return {"source": "cloud_guard_critical", "error": str(e)}
+
+        async def get_high_problems() -> dict[str, Any]:
+            params: dict[str, Any] = {"limit": 50}
+            if compartment_id:
+                params["compartment_id"] = compartment_id
+            if profile:
+                params["profile"] = profile
+            params["risk_level"] = "HIGH"
+
+            try:
+                result = await tool_catalog.execute(
+                    "oci_security_cloudguard_list_problems",
+                    params,
+                )
+                return {"source": "cloud_guard_high", "data": _extract_result(result)}
+            except Exception as e:
+                return {"source": "cloud_guard_high", "error": str(e)}
+
+        async def get_security_score() -> dict[str, Any]:
+            params: dict[str, Any] = {}
+            if compartment_id:
+                params["compartment_id"] = compartment_id
+            if profile:
+                params["profile"] = profile
+
+            try:
+                result = await tool_catalog.execute(
+                    "oci_security_cloudguard_get_security_score",
+                    params,
+                )
+                return {"source": "security_score", "data": _extract_result(result)}
+            except Exception as e:
+                return {"source": "security_score", "error": str(e)}
+
+        async def get_recent_audit() -> dict[str, Any]:
+            params: dict[str, Any] = {"hours_back": 24, "limit": 50}
+            if compartment_id:
+                params["compartment_id"] = compartment_id
+            if profile:
+                params["profile"] = profile
+
+            try:
+                result = await tool_catalog.execute(
+                    "oci_security_audit_list_events",
+                    params,
+                )
+                return {"source": "audit_events", "data": _extract_result(result)}
+            except Exception as e:
+                return {"source": "audit_events", "error": str(e)}
+
+        # Run all queries in parallel
+        results = await asyncio.gather(
+            get_cloud_guard_problems(),
+            get_high_problems(),
+            get_security_score(),
+            get_recent_audit(),
+            return_exceptions=True,
+        )
+
+        # Build threat analysis report
+        threat_report: dict[str, Any] = {
+            "type": "security_threats",
+            "generated_at": datetime.now(UTC).isoformat(),
+            "compartment_id": compartment_id or "root",
+            "critical_threats": [],
+            "high_risk_issues": [],
+            "security_score": None,
+            "recent_suspicious_events": [],
+            "mitre_mappings": [],
+            "recommendations": [],
+        }
+
+        # MITRE ATT&CK mapping for common Cloud Guard detectors
+        mitre_mapping = {
+            "PRIVILEGED_ACCESS": {"technique": "T1078", "tactic": "Privilege Escalation"},
+            "SUSPICIOUS_ACTIVITY": {"technique": "T1071", "tactic": "Command and Control"},
+            "DATA_EXFILTRATION": {"technique": "T1041", "tactic": "Exfiltration"},
+            "ANOMALY": {"technique": "T1078.004", "tactic": "Initial Access"},
+            "BRUTE_FORCE": {"technique": "T1110", "tactic": "Credential Access"},
+            "CONFIGURATION": {"technique": "T1562", "tactic": "Defense Evasion"},
+            "NETWORK": {"technique": "T1090", "tactic": "Command and Control"},
+            "IAM": {"technique": "T1098", "tactic": "Persistence"},
+        }
+
+        for result in results:
+            if isinstance(result, Exception):
+                continue
+            if result.get("error"):
+                continue
+
+            source = result.get("source", "")
+            data = result.get("data", "")
+
+            if source == "cloud_guard_critical" and data:
+                # Parse critical problems
+                try:
+                    problems = json.loads(data) if isinstance(data, str) else data
+                    if isinstance(problems, list):
+                        threat_report["critical_threats"] = problems[:10]
+                        # Add MITRE mappings
+                        for problem in problems[:10]:
+                            detector = problem.get("detector_id", "").upper()
+                            for key, mapping in mitre_mapping.items():
+                                if key in detector:
+                                    threat_report["mitre_mappings"].append({
+                                        "problem": problem.get("name", "Unknown"),
+                                        "technique_id": mapping["technique"],
+                                        "tactic": mapping["tactic"],
+                                    })
+                                    break
+                except (json.JSONDecodeError, TypeError):
+                    if "critical" in data.lower() or "threat" in data.lower():
+                        threat_report["critical_threats"].append({"raw": data[:500]})
+
+            elif source == "cloud_guard_high" and data:
+                try:
+                    problems = json.loads(data) if isinstance(data, str) else data
+                    if isinstance(problems, list):
+                        threat_report["high_risk_issues"] = problems[:10]
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+            elif source == "security_score" and data:
+                try:
+                    score_data = json.loads(data) if isinstance(data, str) else data
+                    if isinstance(score_data, dict):
+                        threat_report["security_score"] = score_data
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+            elif source == "audit_events" and data:
+                try:
+                    events = json.loads(data) if isinstance(data, str) else data
+                    if isinstance(events, list):
+                        # Filter for suspicious events
+                        suspicious = [
+                            e for e in events
+                            if any(keyword in str(e).lower() for keyword in [
+                                "delete", "create user", "update policy",
+                                "modify security", "change password", "failed login"
+                            ])
+                        ]
+                        threat_report["recent_suspicious_events"] = suspicious[:10]
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+        # Generate recommendations based on findings
+        if threat_report["critical_threats"]:
+            threat_report["recommendations"].append({
+                "priority": "CRITICAL",
+                "action": "Immediately investigate and remediate critical Cloud Guard findings",
+                "count": len(threat_report["critical_threats"]),
+            })
+
+        if threat_report["high_risk_issues"]:
+            threat_report["recommendations"].append({
+                "priority": "HIGH",
+                "action": "Review and address high-risk security issues within 24 hours",
+                "count": len(threat_report["high_risk_issues"]),
+            })
+
+        score = threat_report.get("security_score")
+        if score and isinstance(score, dict):
+            score_value = score.get("score", score.get("security_score", 0))
+            if isinstance(score_value, (int, float)) and score_value < 50:
+                threat_report["recommendations"].append({
+                    "priority": "HIGH",
+                    "action": f"Security score is {score_value}/100. Review Cloud Guard recommendations to improve posture.",
+                })
+
+        if threat_report["mitre_mappings"]:
+            threat_report["recommendations"].append({
+                "priority": "MEDIUM",
+                "action": "Review MITRE ATT&CK mapped threats and implement defensive controls",
+                "techniques": list(set(m["technique_id"] for m in threat_report["mitre_mappings"])),
+            })
+
+        return json.dumps(threat_report, indent=2, default=str)
+
+    except Exception as e:
+        logger.error("security_threats workflow failed", error=str(e))
+        return f"Error analyzing security threats: {e}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -3329,6 +5243,320 @@ async def list_instance_images_workflow(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# SelectAI Workflows
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+async def selectai_list_tables_workflow(
+    query: str,
+    entities: dict[str, Any],
+    tool_catalog: ToolCatalog,
+    memory: SharedMemoryManager,
+) -> str:
+    """
+    List tables associated with a SelectAI profile.
+
+    Uses oci_selectai_get_profile_tables to retrieve the tables that
+    a profile has been configured to access for natural language queries.
+
+    Matches intents: list_tables, show_tables, selectai_tables,
+                     profile_tables, database_tables
+    """
+    try:
+        # Extract profile name from entities or use default
+        profile_name = (
+            entities.get("profile_name")
+            or entities.get("database_name")
+            or entities.get("connection_name")
+        )
+
+        if not profile_name:
+            # Try to extract from query
+            import re
+            match = re.search(r'(?:on|for|profile|selectai)\s+([a-zA-Z][a-zA-Z0-9_]*)', query, re.IGNORECASE)
+            if match:
+                profile_name = match.group(1)
+
+        if not profile_name:
+            return "Please specify a SelectAI profile name (e.g., 'show tables on MY_PROFILE')"
+
+        logger.info("SelectAI list tables workflow", profile_name=profile_name)
+
+        result = await tool_catalog.execute(
+            "oci_selectai_get_profile_tables",
+            {"profile_name": profile_name},
+        )
+
+        extracted = _extract_result(result)
+        if extracted and not extracted.startswith("Error"):
+            # Parse JSON response for better formatting
+            try:
+                data = json.loads(extracted)
+                if data.get("type") == "selectai_profile_tables":
+                    tables = data.get("tables", [])
+                    if tables:
+                        lines = [f"**Tables for SelectAI Profile '{profile_name}'** ({len(tables)} tables)\n"]
+                        for i, table in enumerate(tables, 1):
+                            lines.append(f"{i}. `{table}`")
+                        return "\n".join(lines)
+                    else:
+                        return f"No tables configured for SelectAI profile '{profile_name}'"
+            except json.JSONDecodeError:
+                pass
+            return f"**Tables for SelectAI Profile '{profile_name}'**\n\n{extracted}"
+
+        return f"Error getting tables for profile '{profile_name}': {extracted}"
+
+    except Exception as e:
+        logger.error("selectai_list_tables workflow failed", error=str(e))
+        return f"Error listing SelectAI tables: {e}"
+
+
+async def selectai_generate_workflow(
+    query: str,
+    entities: dict[str, Any],
+    tool_catalog: ToolCatalog,
+    memory: SharedMemoryManager,
+) -> str:
+    """
+    Execute a SelectAI natural language query.
+
+    Translates natural language queries into SQL and executes them
+    using Oracle Autonomous Database's SelectAI feature.
+
+    Matches intents: selectai_query, nl_query, natural_language_sql,
+                     ask_database, ask_selectai
+    """
+    try:
+        # Extract profile name and query
+        profile_name = entities.get("profile_name") or entities.get("database_name")
+        user_query = entities.get("user_query") or query
+        action = entities.get("action", "runsql")
+
+        logger.info("SelectAI generate workflow", profile=profile_name, action=action)
+
+        params = {
+            "prompt": user_query,
+            "action": action,
+        }
+        if profile_name:
+            params["profile_name"] = profile_name
+
+        result = await tool_catalog.execute("oci_selectai_generate", params)
+
+        extracted = _extract_result(result)
+        return f"**SelectAI Results**\n\n{extracted}"
+
+    except Exception as e:
+        logger.error("selectai_generate workflow failed", error=str(e))
+        return f"Error executing SelectAI query: {e}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Anomaly Detection Workflows (Logs/Metrics Correlation)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+async def anomaly_detection_workflow(
+    query: str,
+    entities: dict[str, Any],
+    tool_catalog: ToolCatalog,
+    memory: SharedMemoryManager,
+    metadata: dict[str, Any] | None = None,
+) -> str:
+    """
+    Detect anomalies by correlating metrics and logs.
+
+    This workflow:
+    1. Gets instance metrics (CPU, memory, network, disk)
+    2. Queries logs for the same time period
+    3. Analyzes patterns to identify anomalies
+    4. Correlates metric spikes with log events
+
+    Matches intents: anomaly_detection, detect_anomalies, find_anomalies,
+                     correlate_logs_metrics, analyze_anomalies
+    """
+    try:
+        # Get instance identifier from entities
+        instance_id = entities.get("instance_id")
+        instance_name = entities.get("instance_name") or entities.get("name")
+
+        # Extract instance name from query if not in entities
+        if not instance_name and not instance_id:
+            instance_name = _extract_instance_name_for_metrics(query)
+
+        # If still no instance specified, ask the user
+        if not instance_name and not instance_id:
+            return json.dumps({
+                "type": "clarification_needed",
+                "message": "Please provide the instance name for anomaly detection. Which instance should I analyze?",
+                "examples": [
+                    "detect anomalies on my-web-server",
+                    "find anomalies for app-server-01",
+                    "analyze health of database-vm"
+                ],
+                "suggestion": "Use 'list instances' to see available instances"
+            })
+
+        # Get compartment from context or entities
+        compartment_id = entities.get("compartment_id")
+        thread_id = metadata.get("thread_id") if metadata else None
+        if not compartment_id and thread_id and memory:
+            context = await memory.get_conversation_context(thread_id)
+            compartment_id = context.get("compartment_id")
+
+        # Get time range (default 4 hours for anomaly detection)
+        hours_back = entities.get("hours_back", 4)
+
+        # Extract hours from query if specified
+        query_lower = query.lower()
+        import re
+        if "last" in query_lower:
+            match = re.search(r"last\s+(\d+)\s*(?:hour|hr)", query_lower)
+            if match:
+                hours_back = int(match.group(1))
+
+        logger.info(
+            "anomaly_detection workflow starting",
+            instance_id=instance_id,
+            instance_name=instance_name,
+            hours_back=hours_back,
+        )
+
+        # Step 1: Get instance metrics
+        metrics_params = {"hours_back": hours_back}
+        if instance_id:
+            metrics_params["instance_id"] = instance_id
+        if instance_name:
+            metrics_params["instance_name"] = instance_name
+        if compartment_id:
+            metrics_params["compartment_id"] = compartment_id
+
+        metrics_result = await tool_catalog.execute(
+            "oci_observability_get_instance_metrics",
+            metrics_params,
+        )
+        metrics_data = _extract_result(metrics_result)
+
+        # Step 2: Get logs for the same time period (if logan tools available)
+        logs_data = None
+        try:
+            profile = entities.get("oci_profile") or (metadata.get("oci_profile") if metadata else None)
+            log_params = {
+                "hours_back": hours_back,
+                "limit": 100,
+            }
+            if profile:
+                log_params["profile"] = profile
+
+            # Try to get log summary first
+            log_result = await tool_catalog.execute(
+                "oci_logan_get_summary",
+                log_params,
+            )
+            logs_data = _extract_result(log_result)
+        except Exception as log_err:
+            logger.warning("Could not fetch logs for correlation", error=str(log_err))
+            logs_data = None
+
+        # Step 3: Build analysis response
+        analysis = {
+            "type": "anomaly_analysis",
+            "instance": instance_name or instance_id,
+            "time_range_hours": hours_back,
+            "metrics": None,
+            "logs": None,
+            "anomalies": [],
+            "correlations": [],
+            "recommendations": [],
+        }
+
+        # Parse metrics data
+        try:
+            if metrics_data and not metrics_data.startswith("Error"):
+                metrics_json = json.loads(metrics_data) if isinstance(metrics_data, str) else metrics_data
+                analysis["metrics"] = metrics_json
+
+                # Check for metric anomalies
+                if isinstance(metrics_json, dict):
+                    health = metrics_json.get("health_assessment", {})
+                    if health.get("issues"):
+                        for issue in health["issues"]:
+                            analysis["anomalies"].append({
+                                "type": "metric_issue",
+                                "description": issue,
+                                "source": "metrics"
+                            })
+
+                    # Check for high utilization
+                    summary = metrics_json.get("summary", {})
+                    if summary.get("avg_cpu_percent", 0) > 80:
+                        analysis["anomalies"].append({
+                            "type": "high_cpu",
+                            "value": summary.get("avg_cpu_percent"),
+                            "threshold": 80,
+                            "description": f"High CPU utilization: {summary.get('avg_cpu_percent'):.1f}%"
+                        })
+                    if summary.get("avg_memory_percent", 0) > 85:
+                        analysis["anomalies"].append({
+                            "type": "high_memory",
+                            "value": summary.get("avg_memory_percent"),
+                            "threshold": 85,
+                            "description": f"High memory utilization: {summary.get('avg_memory_percent'):.1f}%"
+                        })
+        except (json.JSONDecodeError, TypeError):
+            analysis["metrics"] = {"raw": metrics_data}
+
+        # Parse logs data
+        try:
+            if logs_data and not logs_data.startswith("Error"):
+                logs_json = json.loads(logs_data) if isinstance(logs_data, str) else logs_data
+                analysis["logs"] = logs_json
+
+                # Check for log anomalies
+                if isinstance(logs_json, dict):
+                    if logs_json.get("error"):
+                        analysis["logs"] = {"status": "unavailable", "reason": logs_json.get("error")}
+        except (json.JSONDecodeError, TypeError):
+            analysis["logs"] = {"raw": logs_data} if logs_data else None
+
+        # Generate recommendations based on anomalies
+        if analysis["anomalies"]:
+            for anomaly in analysis["anomalies"]:
+                if anomaly["type"] == "high_cpu":
+                    analysis["recommendations"].append(
+                        "Consider scaling up the instance or investigating CPU-intensive processes"
+                    )
+                elif anomaly["type"] == "high_memory":
+                    analysis["recommendations"].append(
+                        "Check for memory leaks or consider increasing instance memory"
+                    )
+                elif anomaly["type"] == "metric_issue":
+                    analysis["recommendations"].append(
+                        f"Investigate: {anomaly['description']}"
+                    )
+
+            # Add correlation suggestion if logs available
+            if analysis["logs"] and not isinstance(analysis["logs"], dict) or not analysis["logs"].get("status") == "unavailable":
+                analysis["correlations"].append({
+                    "suggestion": "Review logs for error messages that correlate with metric spikes",
+                    "time_range": f"Last {hours_back} hours"
+                })
+        else:
+            analysis["summary"] = "No anomalies detected. System appears to be operating normally."
+
+        return json.dumps(analysis, indent=2, default=str)
+
+    except Exception as e:
+        logger.error("anomaly_detection workflow failed", error=str(e))
+        return json.dumps({
+            "type": "error",
+            "error": f"Error during anomaly detection: {e}",
+            "suggestion": "Try specifying a valid instance name or check OCI permissions"
+        })
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Workflow Registry
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -3345,6 +5573,17 @@ WORKFLOW_REGISTRY: dict[str, Any] = {
     "list_instances": list_instances_workflow,
     "get_instance": get_instance_workflow,
 
+    # Instance Metrics
+    "instance_metrics": instance_metrics_workflow,
+    "show_instance_metrics": instance_metrics_workflow,
+    "get_instance_metrics": instance_metrics_workflow,
+    "show_metrics": instance_metrics_workflow,
+    "cpu_usage": instance_metrics_workflow,
+    "memory_usage": instance_metrics_workflow,
+    "instance_health": instance_metrics_workflow,
+    "compute_metrics": instance_metrics_workflow,
+    "vm_metrics": instance_metrics_workflow,
+
     # Infrastructure Provisioning
     "provision_instance": provision_instance_workflow,
     "create_instance": provision_instance_workflow,
@@ -3359,6 +5598,23 @@ WORKFLOW_REGISTRY: dict[str, Any] = {
     "list_images": list_instance_images_workflow,
     "list_compute_images": list_instance_images_workflow,
     "available_images": list_instance_images_workflow,
+
+    # Instance Lifecycle (start/stop/restart by name)
+    "start_instance": start_instance_by_name_workflow,
+    "start_instance_by_name": start_instance_by_name_workflow,
+    "start_vm": start_instance_by_name_workflow,
+    "power_on": start_instance_by_name_workflow,
+    "power_on_instance": start_instance_by_name_workflow,
+    "stop_instance": stop_instance_by_name_workflow,
+    "stop_instance_by_name": stop_instance_by_name_workflow,
+    "stop_vm": stop_instance_by_name_workflow,
+    "power_off": stop_instance_by_name_workflow,
+    "shutdown_instance": stop_instance_by_name_workflow,
+    "restart_instance": restart_instance_by_name_workflow,
+    "restart_instance_by_name": restart_instance_by_name_workflow,
+    "reboot_instance": restart_instance_by_name_workflow,
+    "reboot_vm": restart_instance_by_name_workflow,
+    "restart_vm": restart_instance_by_name_workflow,
 
     # Network
     "list_vcns": list_vcns_workflow,
@@ -3398,6 +5654,34 @@ WORKFLOW_REGISTRY: dict[str, Any] = {
     "block_storage_costs": storage_costs_workflow,
     "object_storage_costs": storage_costs_workflow,
     "show_storage_costs": storage_costs_workflow,
+
+    # Cost by service - detailed SKU-level breakdown
+    "cost_by_service": cost_by_service_workflow,
+    "service_drilldown": cost_by_service_workflow,
+    "service_breakdown": cost_by_service_workflow,
+    "show_costs_by_service": cost_by_service_workflow,
+    "detailed_costs": cost_by_service_workflow,
+    "service_cost_breakdown": cost_by_service_workflow,
+
+    # Monthly cost trend
+    "monthly_trend": monthly_cost_trend_workflow,
+    "cost_trend": monthly_cost_trend_workflow,
+    "show_cost_trend": monthly_cost_trend_workflow,
+    "spending_trend": monthly_cost_trend_workflow,
+    "month_over_month": monthly_cost_trend_workflow,
+    "monthly_spending": monthly_cost_trend_workflow,
+
+    # Cost comparison between months
+    "cost_comparison": cost_comparison_workflow,
+    "compare_costs": cost_comparison_workflow,
+    "compare_months": cost_comparison_workflow,
+    "month_comparison": cost_comparison_workflow,
+    "compare_spending": cost_comparison_workflow,
+
+    # Cost by compartment - direct tool call
+    "cost_by_compartment_direct": cost_by_compartment_workflow,
+    "compartment_spending": cost_by_compartment_workflow,
+    "show_costs_by_compartment": cost_by_compartment_workflow,
 
     # Database listing (names, inventory)
     "list_databases": list_databases_workflow,
@@ -3605,6 +5889,104 @@ WORKFLOW_REGISTRY: dict[str, Any] = {
     "db_health_check": db_performance_overview_workflow,
     "comprehensive_db_status": db_performance_overview_workflow,
     "full_db_analysis": db_performance_overview_workflow,
+
+    # SelectAI - List Tables
+    "list_tables": selectai_list_tables_workflow,
+    "show_tables": selectai_list_tables_workflow,
+    "selectai_tables": selectai_list_tables_workflow,
+    "profile_tables": selectai_list_tables_workflow,
+    "database_tables": selectai_list_tables_workflow,
+    "get_tables": selectai_list_tables_workflow,
+    "tables_on": selectai_list_tables_workflow,
+
+    # SelectAI - Natural Language Query
+    "selectai_query": selectai_generate_workflow,
+    "nl_query": selectai_generate_workflow,
+    "natural_language_sql": selectai_generate_workflow,
+    "ask_database": selectai_generate_workflow,
+    "ask_selectai": selectai_generate_workflow,
+    "selectai_generate": selectai_generate_workflow,
+
+    # Observability - Alarms and Monitoring
+    "list_alarms": list_alarms_workflow,
+    "show_alarms": list_alarms_workflow,
+    "active_alarms": list_alarms_workflow,
+    "monitoring_alarms": list_alarms_workflow,
+    "get_alarms": list_alarms_workflow,
+    "alarm_status": list_alarms_workflow,
+    "check_alarms": list_alarms_workflow,
+
+    # Log Analytics - Summary
+    "log_summary": log_summary_workflow,
+    "show_log_summary": log_summary_workflow,
+    "logging_summary": log_summary_workflow,
+    "log_analytics_status": log_summary_workflow,
+    "logs_overview": log_summary_workflow,
+
+    # Log Analytics - Search
+    "log_search": log_search_workflow,
+    "search_logs": log_search_workflow,
+    "find_logs": log_search_workflow,
+    "error_logs": log_search_workflow,
+    "search_for_errors": log_search_workflow,
+    "log_query": log_search_workflow,
+
+    # Error Analysis - explain error messages, exceptions, stack traces
+    "error_analysis": error_analysis_workflow,
+    "explain_error": error_analysis_workflow,
+    "what_is_this_error": error_analysis_workflow,
+    "help_with_error": error_analysis_workflow,
+    "understand_exception": error_analysis_workflow,
+    "analyze_error": error_analysis_workflow,
+    "error_explanation": error_analysis_workflow,
+
+    # Security - Overview
+    "security_overview": security_overview_workflow,
+    "show_security": security_overview_workflow,
+    "security_status": security_overview_workflow,
+    "security_posture": security_overview_workflow,
+    "cloud_guard_summary": security_overview_workflow,
+
+    # Security - Cloud Guard Problems
+    "cloud_guard_problems": cloud_guard_problems_workflow,
+    "list_cloud_guard_problems": cloud_guard_problems_workflow,
+    "security_problems": cloud_guard_problems_workflow,
+    "security_issues": cloud_guard_problems_workflow,
+    "cloud_guard_findings": cloud_guard_problems_workflow,
+
+    # Security - Security Score
+    "security_score": security_score_workflow,
+    "get_security_score": security_score_workflow,
+    "show_security_score": security_score_workflow,
+    "security_grade": security_score_workflow,
+    "security_rating": security_score_workflow,
+
+    # Security - Audit Events
+    "audit_events": audit_events_workflow,
+    "list_audit_events": audit_events_workflow,
+    "show_audit": audit_events_workflow,
+    "recent_audit": audit_events_workflow,
+    "audit_log": audit_events_workflow,
+
+    # Security - Threats Analysis
+    "security_threats": security_threats_workflow,
+    "threat_analysis": security_threats_workflow,
+    "threat_detection": security_threats_workflow,
+    "show_threats": security_threats_workflow,
+    "list_threats": security_threats_workflow,
+    "mitre_analysis": security_threats_workflow,
+    "threat_intelligence": security_threats_workflow,
+
+    # Anomaly Detection - Logs/Metrics Correlation
+    "anomaly_detection": anomaly_detection_workflow,
+    "detect_anomalies": anomaly_detection_workflow,
+    "find_anomalies": anomaly_detection_workflow,
+    "correlate_logs_metrics": anomaly_detection_workflow,
+    "analyze_anomalies": anomaly_detection_workflow,
+    "log_metric_correlation": anomaly_detection_workflow,
+    "performance_analysis": anomaly_detection_workflow,
+    "health_analysis": anomaly_detection_workflow,
+    "troubleshoot_instance": anomaly_detection_workflow,
 }
 
 

@@ -61,71 +61,105 @@ async def _list_autonomous_databases_logic(
     limit: int = 50,
     profile: str | None = None,
     region: str | None = None,
+    include_subtree: bool = True,
 ) -> str:
     """Internal logic for listing autonomous databases.
 
     Uses the OCI Database service API to list autonomous databases.
+    Searches child compartments recursively when include_subtree is True.
     """
     import oci
 
     try:
         client = get_database_client(profile=profile, region=region)
         config = client.base_client.config
-        comp_id = compartment_id or config.get("tenancy")
+        root_comp_id = compartment_id or config.get("tenancy")
 
-        # Build list parameters
-        list_params = {
-            "compartment_id": comp_id,
-            "limit": limit,
-        }
+        # Get compartments to search
+        compartments_to_search = [root_comp_id]
+        if include_subtree:
+            try:
+                identity_client = oci.identity.IdentityClient(config)
+                comps_resp = identity_client.list_compartments(
+                    compartment_id=root_comp_id,
+                    compartment_id_in_subtree=True,
+                    access_level="ACCESSIBLE",
+                    lifecycle_state="ACTIVE",
+                )
+                compartments_to_search.extend([c.id for c in comps_resp.data])
+            except Exception:
+                pass  # Fall back to single compartment
 
-        # Add optional filters
-        if lifecycle_state:
-            list_params["lifecycle_state"] = lifecycle_state.upper()
-        if workload_type:
-            # Map common workload type names to OCI API values
-            workload_map = {
-                "atp": "OLTP",
-                "adw": "DW",
-                "oltp": "OLTP",
-                "dw": "DW",
-                "apex": "APEX",
-                "ajd": "AJD",
-            }
-            list_params["db_workload"] = workload_map.get(
-                workload_type.lower(), workload_type.upper()
-            )
-
-        # Call OCI API
-        response = await _call_oci(
-            client.list_autonomous_databases,
-            **list_params,
-        )
-
-        # Format response
+        # Search for databases in all compartments
         databases = []
-        for db in response.data:
-            db_info = {
-                "name": db.display_name,
-                "id": db.id,
-                "workload_type": db.db_workload,
-                "lifecycle_state": db.lifecycle_state,
-                "cpu_core_count": db.cpu_core_count,
-                "data_storage_size_tb": db.data_storage_size_in_tbs,
-                "is_free_tier": db.is_free_tier,
-                "db_version": db.db_version,
-                "time_created": db.time_created.isoformat() if db.time_created else None,
+        compartments_searched = 0
+        for comp_id in compartments_to_search:
+            if len(databases) >= limit:
+                break
+
+            # Build list parameters
+            list_params = {
+                "compartment_id": comp_id,
+                "limit": min(limit - len(databases), 50),
             }
-            # Add compute model info if available
-            if hasattr(db, "compute_model"):
-                db_info["compute_model"] = db.compute_model
-            databases.append(db_info)
+
+            # Add optional filters
+            if lifecycle_state:
+                list_params["lifecycle_state"] = lifecycle_state.upper()
+            if workload_type:
+                # Map common workload type names to OCI API values
+                workload_map = {
+                    "atp": "OLTP",
+                    "adw": "DW",
+                    "oltp": "OLTP",
+                    "dw": "DW",
+                    "apex": "APEX",
+                    "ajd": "AJD",
+                }
+                list_params["db_workload"] = workload_map.get(
+                    workload_type.lower(), workload_type.upper()
+                )
+
+            # Call OCI API for this compartment
+            try:
+                response = await _call_oci(
+                    client.list_autonomous_databases,
+                    **list_params,
+                )
+                compartments_searched += 1
+
+                # Process databases from this compartment
+                for db in response.data:
+                    if len(databases) >= limit:
+                        break
+                    db_info = {
+                        "name": db.display_name,
+                        "display_name": db.display_name,
+                        "database_name": getattr(db, "db_name", None),
+                        "id": db.id,
+                        "workload_type": db.db_workload,
+                        "lifecycle_state": db.lifecycle_state,
+                        "cpu_core_count": db.cpu_core_count,
+                        "data_storage_size_tb": db.data_storage_size_in_tbs,
+                        "is_free_tier": db.is_free_tier,
+                        "db_version": db.db_version,
+                        "time_created": db.time_created.isoformat() if db.time_created else None,
+                        "compartment_id": comp_id,
+                    }
+                    # Add compute model info if available
+                    if hasattr(db, "compute_model"):
+                        db_info["compute_model"] = db.compute_model
+                    databases.append(db_info)
+            except Exception:
+                # Skip compartments that fail (permission issues)
+                continue
 
         return json.dumps({
             "type": "autonomous_databases",
             "databases": databases,
             "count": len(databases),
-            "compartment_id": comp_id,
+            "compartments_searched": compartments_searched,
+            "include_subtree": include_subtree,
         })
 
     except oci.exceptions.ServiceError as e:
@@ -910,6 +944,473 @@ async def _get_database_metrics_logic(
         return json.dumps({"error": str(e)})
 
 
+def _parse_tnsnames(tns_admin: str) -> list[str]:
+    """Parse tnsnames.ora to extract connection aliases.
+
+    Args:
+        tns_admin: Path to TNS_ADMIN directory containing tnsnames.ora
+
+    Returns:
+        List of connection alias names
+    """
+    import os
+    import re
+
+    aliases = []
+    tns_file = os.path.join(os.path.expanduser(tns_admin), "tnsnames.ora")
+
+    if not os.path.isfile(tns_file):
+        return aliases
+
+    try:
+        with open(tns_file, 'r') as f:
+            content = f.read()
+
+        # Parse TNS aliases - they appear at the start of lines followed by "="
+        # Pattern: ALIAS_NAME = (DESCRIPTION = ...)
+        pattern = r'^([A-Za-z][A-Za-z0-9_]*)\s*='
+        for match in re.finditer(pattern, content, re.MULTILINE):
+            alias = match.group(1).strip()
+            if alias.upper() not in ('DESCRIPTION', 'ADDRESS', 'ADDRESS_LIST',
+                                      'CONNECT_DATA', 'SERVICE_NAME', 'SID',
+                                      'SECURITY', 'SSL_SERVER_CERT_DN'):
+                aliases.append(alias)
+    except Exception:
+        pass
+
+    return aliases
+
+
+async def _list_database_connections_logic() -> str:
+    """Internal logic for listing available database connections.
+
+    Checks environment variables for ATP wallet-based connections,
+    SQLcl CLI availability, and parses tnsnames.ora for all available aliases.
+    """
+    import os
+
+    connections = []
+
+    # Check SQLcl CLI availability first
+    sqlcl_path = os.environ.get("SQLCL_PATH", "/usr/bin/sql")
+    sqlcl_exists = os.path.isfile(os.path.expanduser(sqlcl_path))
+
+    # Get SQLcl TNS admin directory for connection aliases
+    sqlcl_tns_admin = os.environ.get("SQLCL_TNS_ADMIN")
+    sqlcl_default_connection = os.environ.get("SQLCL_DB_CONNECTION")
+    sqlcl_fallback_connection = os.environ.get("SQLCL_FALLBACK_CONNECTION")
+    sqlcl_username = os.environ.get("SQLCL_DB_USERNAME", "ADMIN")
+
+    # Parse tnsnames.ora from SQLcl wallet if available
+    sqlcl_aliases = []
+    if sqlcl_tns_admin and os.path.isdir(os.path.expanduser(sqlcl_tns_admin)):
+        sqlcl_aliases = _parse_tnsnames(sqlcl_tns_admin)
+
+    # Add SQLcl connections from tnsnames.ora
+    if sqlcl_exists and sqlcl_aliases:
+        for alias in sqlcl_aliases:
+            is_default = alias == sqlcl_default_connection
+            is_fallback = alias == sqlcl_fallback_connection
+            connections.append({
+                "name": alias,
+                "type": "sqlcl_tns",
+                "tns_alias": alias,
+                "tns_admin": sqlcl_tns_admin,
+                "user": sqlcl_username,
+                "status": "available",
+                "is_default": is_default,
+                "is_fallback": is_fallback,
+                "description": f"SQLcl connection via TNS alias{' (default)' if is_default else ''}{' (fallback)' if is_fallback else ''}",
+            })
+    elif sqlcl_exists:
+        # SQLcl available but no tnsnames.ora found - add generic entry
+        connections.append({
+            "name": "sqlcl",
+            "type": "sqlcl_cli",
+            "path": sqlcl_path,
+            "status": "available",
+            "description": "SQLcl CLI (configure SQLCL_TNS_ADMIN for connection aliases)",
+        })
+    else:
+        connections.append({
+            "name": "sqlcl",
+            "type": "sqlcl_cli",
+            "path": sqlcl_path,
+            "status": "not_found",
+            "description": "SQLcl CLI (not installed at configured path)",
+        })
+
+    # Check for ATP wallet-based connection (oracledb) - for programmatic access
+    atp_tns = os.environ.get("ATP_TNS_NAME")
+    atp_user = os.environ.get("ATP_USER")
+    atp_wallet_dir = os.environ.get("ATP_WALLET_DIR")
+
+    if atp_tns and atp_user and atp_wallet_dir:
+        wallet_exists = os.path.isdir(os.path.expanduser(atp_wallet_dir))
+        # Only add if not already in SQLcl aliases
+        if atp_tns not in [c.get("tns_alias") for c in connections]:
+            connections.append({
+                "name": "atp_wallet",
+                "type": "oracledb_wallet",
+                "tns_name": atp_tns,
+                "user": atp_user,
+                "wallet_dir": atp_wallet_dir,
+                "status": "configured" if wallet_exists else "wallet_not_found",
+                "description": "ATP connection via wallet (oracledb)",
+            })
+
+    # Default connection preference
+    default_connection = None
+    # First check for explicitly configured SQLcl default
+    if sqlcl_default_connection and any(
+        c.get("tns_alias") == sqlcl_default_connection and c["status"] == "available"
+        for c in connections
+    ):
+        default_connection = sqlcl_default_connection
+    elif any(c["name"] == "atp_wallet" and c["status"] == "configured" for c in connections):
+        default_connection = "atp_wallet"
+    elif sqlcl_exists and sqlcl_aliases:
+        default_connection = sqlcl_aliases[0]
+    elif any(c["name"] == "sqlcl" and c["status"] == "available" for c in connections):
+        default_connection = "sqlcl"
+
+    available_count = len([c for c in connections if c["status"] in ("configured", "available")])
+
+    return json.dumps({
+        "type": "database_connections",
+        "connections": connections,
+        "default_connection": default_connection,
+        "count": available_count,
+        "sqlcl_available": sqlcl_exists,
+        "tns_admin": sqlcl_tns_admin if sqlcl_exists else None,
+    })
+
+
+async def _execute_sql_logic(
+    sql: str,
+    connection_name: str | None = None,
+    timeout_seconds: int = 60,
+) -> str:
+    """Internal logic for SQL execution.
+
+    Supports three methods:
+    1. oracledb with wallet (for ATP) - preferred for Autonomous DBs
+    2. SQLcl CLI with TNS alias - for connections from tnsnames.ora
+    3. SQLcl CLI subprocess - fallback for any Oracle DB
+    """
+    import os
+    import subprocess
+
+    # Sanitize SQL input
+    sql = sql.strip()
+    if not sql:
+        return json.dumps({"error": "Empty SQL statement"})
+
+    # Determine connection method
+    atp_tns = os.environ.get("ATP_TNS_NAME")
+    atp_user = os.environ.get("ATP_USER")
+    atp_password = os.environ.get("ATP_PASSWORD")
+    atp_wallet_dir = os.environ.get("ATP_WALLET_DIR")
+    sqlcl_path = os.environ.get("SQLCL_PATH", "/usr/bin/sql")
+    sqlcl_tns_admin = os.environ.get("SQLCL_TNS_ADMIN")
+    sqlcl_username = os.environ.get("SQLCL_DB_USERNAME", "ADMIN")
+    sqlcl_password = os.environ.get("SQLCL_DB_PASSWORD")
+    sqlcl_default_connection = os.environ.get("SQLCL_DB_CONNECTION")
+
+    use_oracledb = False
+    use_sqlcl = False
+    use_tns_alias = False
+    tns_alias = None
+
+    # Check if connection_name is a TNS alias from tnsnames.ora
+    if connection_name and connection_name not in ("atp_wallet", "sqlcl"):
+        # Assume it's a TNS alias
+        if sqlcl_tns_admin and os.path.isdir(os.path.expanduser(sqlcl_tns_admin)):
+            sqlcl_aliases = _parse_tnsnames(sqlcl_tns_admin)
+            if connection_name in sqlcl_aliases:
+                use_tns_alias = True
+                tns_alias = connection_name
+
+    if not use_tns_alias:
+        if connection_name == "atp_wallet" or (connection_name is None and atp_tns):
+            # Prefer oracledb with wallet if ATP is configured
+            if atp_tns and atp_user and atp_password and atp_wallet_dir:
+                use_oracledb = True
+        elif connection_name == "sqlcl" or connection_name is None:
+            if os.path.isfile(os.path.expanduser(sqlcl_path)):
+                # Use default SQLcl connection if available
+                if sqlcl_default_connection and sqlcl_tns_admin:
+                    use_tns_alias = True
+                    tns_alias = sqlcl_default_connection
+                else:
+                    use_sqlcl = True
+
+    if not use_oracledb and not use_sqlcl and not use_tns_alias:
+        return json.dumps({
+            "error": "No database connection available",
+            "suggestion": "Configure ATP_* environment variables for wallet connection or SQLCL_* for CLI",
+        })
+
+    # Execute with oracledb (wallet-based)
+    if use_oracledb:
+        try:
+            import oracledb
+
+            # Initialize thick mode for wallet support if not already done
+            try:
+                oracledb.init_oracle_client()
+            except Exception:
+                pass  # May already be initialized
+
+            wallet_dir = os.path.expanduser(atp_wallet_dir)
+
+            # Connect using wallet
+            connection = await asyncio.to_thread(
+                oracledb.connect,
+                user=atp_user,
+                password=atp_password,
+                dsn=atp_tns,
+                config_dir=wallet_dir,
+                wallet_location=wallet_dir,
+                wallet_password=os.environ.get("ATP_WALLET_PASSWORD"),
+            )
+
+            try:
+                cursor = connection.cursor()
+
+                # Execute the query
+                await asyncio.to_thread(cursor.execute, sql)
+
+                # Check if it's a SELECT query
+                if sql.strip().upper().startswith("SELECT"):
+                    columns = [col[0] for col in cursor.description] if cursor.description else []
+                    rows = await asyncio.to_thread(cursor.fetchall)
+
+                    # Convert to list of dicts
+                    data = [dict(zip(columns, row)) for row in rows]
+
+                    return json.dumps({
+                        "type": "sql_result",
+                        "connection": "atp_wallet",
+                        "columns": columns,
+                        "data": data,
+                        "row_count": len(data),
+                    })
+                else:
+                    # DML or DDL
+                    row_count = cursor.rowcount
+                    await asyncio.to_thread(connection.commit)
+
+                    return json.dumps({
+                        "type": "sql_result",
+                        "connection": "atp_wallet",
+                        "message": f"Statement executed successfully. Rows affected: {row_count}",
+                        "row_count": row_count,
+                    })
+
+            finally:
+                cursor.close()
+                connection.close()
+
+        except ImportError:
+            # oracledb not installed, fall through to SQLcl
+            if os.path.isfile(os.path.expanduser(sqlcl_path)):
+                use_sqlcl = True
+                use_oracledb = False
+            else:
+                return json.dumps({
+                    "error": "oracledb module not installed and SQLcl not available",
+                    "suggestion": "Install oracledb: pip install oracledb",
+                })
+        except Exception as e:
+            return json.dumps({
+                "type": "sql_error",
+                "connection": "atp_wallet",
+                "error": str(e),
+            })
+
+    # Execute with SQLcl CLI using TNS alias
+    if use_tns_alias:
+        try:
+            sqlcl_path_expanded = os.path.expanduser(sqlcl_path)
+
+            # Prepare SQL script (add SET commands for clean JSON output)
+            sql_script = f"""
+SET PAGESIZE 0
+SET LINESIZE 32767
+SET FEEDBACK OFF
+SET HEADING ON
+SET SQLFORMAT JSON
+{sql}
+EXIT;
+"""
+            # Build connection string using TNS alias
+            tns_admin_expanded = os.path.expanduser(sqlcl_tns_admin)
+            conn_string = f"{sqlcl_username}/{sqlcl_password}@{tns_alias}"
+            env = os.environ.copy()
+            env["TNS_ADMIN"] = tns_admin_expanded
+
+            # Execute SQLcl
+            result = await asyncio.to_thread(
+                subprocess.run,
+                [sqlcl_path_expanded, "-S", conn_string],
+                input=sql_script,
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds,
+                env=env,
+            )
+
+            if result.returncode != 0:
+                return json.dumps({
+                    "type": "sql_error",
+                    "connection": tns_alias,
+                    "error": result.stderr or result.stdout,
+                    "return_code": result.returncode,
+                })
+
+            # Parse SQLcl JSON output
+            output = result.stdout.strip()
+
+            try:
+                parsed = json.loads(output)
+                if isinstance(parsed, dict) and "results" in parsed:
+                    results = parsed["results"]
+                    if results and isinstance(results, list):
+                        first_result = results[0]
+                        if "items" in first_result:
+                            data = first_result["items"]
+                            columns = list(data[0].keys()) if data else []
+                            return json.dumps({
+                                "type": "sql_result",
+                                "connection": tns_alias,
+                                "columns": columns,
+                                "data": data,
+                                "row_count": len(data),
+                            })
+                return json.dumps({
+                    "type": "sql_result",
+                    "connection": tns_alias,
+                    "data": parsed,
+                })
+            except json.JSONDecodeError:
+                return json.dumps({
+                    "type": "sql_result",
+                    "connection": tns_alias,
+                    "raw_output": output,
+                })
+
+        except subprocess.TimeoutExpired:
+            return json.dumps({
+                "type": "sql_error",
+                "connection": tns_alias,
+                "error": f"Query timed out after {timeout_seconds} seconds",
+            })
+        except Exception as e:
+            return json.dumps({
+                "type": "sql_error",
+                "connection": tns_alias,
+                "error": str(e),
+            })
+
+    # Execute with SQLcl CLI (legacy/fallback)
+    if use_sqlcl:
+        try:
+            # Build SQLcl command
+            sqlcl_path_expanded = os.path.expanduser(sqlcl_path)
+
+            # Prepare SQL script (add SET commands for clean JSON output)
+            sql_script = f"""
+SET PAGESIZE 0
+SET LINESIZE 32767
+SET FEEDBACK OFF
+SET HEADING ON
+SET SQLFORMAT JSON
+{sql}
+EXIT;
+"""
+            # Build connection string
+            if atp_tns and atp_user and atp_password and atp_wallet_dir:
+                # Use wallet for ATP
+                wallet_dir = os.path.expanduser(atp_wallet_dir)
+                conn_string = f"{atp_user}/{atp_password}@{atp_tns}"
+                env = os.environ.copy()
+                env["TNS_ADMIN"] = wallet_dir
+            else:
+                # Use environment-based connection or default
+                conn_string = os.environ.get("ORACLE_CONN_STRING", "/as sysdba")
+                env = os.environ.copy()
+
+            # Execute SQLcl
+            result = await asyncio.to_thread(
+                subprocess.run,
+                [sqlcl_path_expanded, "-S", conn_string],
+                input=sql_script,
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds,
+                env=env,
+            )
+
+            if result.returncode != 0:
+                return json.dumps({
+                    "type": "sql_error",
+                    "connection": "sqlcl",
+                    "error": result.stderr or result.stdout,
+                    "return_code": result.returncode,
+                })
+
+            # Parse SQLcl JSON output
+            output = result.stdout.strip()
+
+            # Try to parse as JSON
+            try:
+                # SQLcl JSON format wraps results in {"results":[...]}
+                parsed = json.loads(output)
+                if isinstance(parsed, dict) and "results" in parsed:
+                    results = parsed["results"]
+                    if results and isinstance(results, list):
+                        first_result = results[0]
+                        if "items" in first_result:
+                            data = first_result["items"]
+                            columns = list(data[0].keys()) if data else []
+                            return json.dumps({
+                                "type": "sql_result",
+                                "connection": "sqlcl",
+                                "columns": columns,
+                                "data": data,
+                                "row_count": len(data),
+                            })
+                return json.dumps({
+                    "type": "sql_result",
+                    "connection": "sqlcl",
+                    "data": parsed,
+                })
+            except json.JSONDecodeError:
+                # Return raw output if not JSON
+                return json.dumps({
+                    "type": "sql_result",
+                    "connection": "sqlcl",
+                    "raw_output": output,
+                    "message": "Query executed (raw output)",
+                })
+
+        except subprocess.TimeoutExpired:
+            return json.dumps({
+                "type": "sql_error",
+                "connection": "sqlcl",
+                "error": f"Query timed out after {timeout_seconds} seconds",
+            })
+        except Exception as e:
+            return json.dumps({
+                "type": "sql_error",
+                "connection": "sqlcl",
+                "error": str(e),
+            })
+
+    return json.dumps({"error": "No execution path available"})
+
+
 def register_database_tools(mcp: FastMCP) -> None:
     """Register database management tools with the MCP server."""
 
@@ -1209,11 +1710,12 @@ def register_database_tools(mcp: FastMCP) -> None:
         limit: int = 50,
         profile: str | None = None,
         region: str | None = None,
+        include_subtree: bool = True,
     ) -> str:
         """List Autonomous Databases in a compartment.
 
         Lists all autonomous databases (ATP, ADW, AJD, APEX) using
-        the OCI Database service API.
+        the OCI Database service API. Searches child compartments by default.
 
         Args:
             compartment_id: Filter by compartment (defaults to tenancy root)
@@ -1222,10 +1724,50 @@ def register_database_tools(mcp: FastMCP) -> None:
             limit: Maximum databases to return (default 50)
             profile: OCI profile name
             region: OCI region override
+            include_subtree: Search child compartments (default True)
 
         Returns:
             List of autonomous databases with details
         """
         return await _list_autonomous_databases_logic(
-            compartment_id, workload_type, lifecycle_state, limit, profile, region
+            compartment_id, workload_type, lifecycle_state, limit, profile, region, include_subtree
         )
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # SQLcl Execution Tools - For direct SQL execution against Oracle databases
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    @mcp.tool()
+    async def oci_database_list_connections() -> str:
+        """List available database connections configured in the environment.
+
+        Returns connection configurations from environment variables and wallet settings.
+        Connections can be used with oci_database_execute_sql.
+
+        Returns:
+            List of available database connections with their configuration status
+        """
+        return await _list_database_connections_logic()
+
+    @mcp.tool()
+    async def oci_database_execute_sql(
+        sql: str,
+        connection_name: str | None = None,
+        timeout_seconds: int = 60,
+    ) -> str:
+        """Execute SQL query against an Oracle database using SQLcl or oracledb.
+
+        Supports two connection methods:
+        1. Wallet-based (oracledb): For Autonomous Database with ATP_* env vars
+        2. SQLcl CLI: For any Oracle database with SQLCL_PATH configured
+
+        Args:
+            sql: SQL statement to execute
+            connection_name: Database connection name (from oci_database_list_connections)
+                           If not specified, uses default configured connection
+            timeout_seconds: Maximum execution time (default 60)
+
+        Returns:
+            Query results in JSON format or error message
+        """
+        return await _execute_sql_logic(sql, connection_name, timeout_seconds)

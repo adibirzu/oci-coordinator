@@ -593,7 +593,7 @@ class DbTroubleshootAgent(BaseAgent, SelfHealingMixin):
             # Get fleet summary for context if no specific database
             fleet_result = await self._call_mcp_tool(
                 "oci_opsi_get_fleet_summary",
-                {"use_cache": True},
+                {},
             )
 
             updates["fleet_summary"] = fleet_result if fleet_result.get("success") else {}
@@ -1076,9 +1076,8 @@ class DbTroubleshootAgent(BaseAgent, SelfHealingMixin):
 
             # Search in cached databases
             databases = await cache.search_resources(
+                query=db_name,
                 resource_type="database",
-                name_pattern=db_name,
-                limit=5,
             )
 
             if databases:

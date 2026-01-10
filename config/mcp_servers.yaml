@@ -31,7 +31,7 @@ servers:
   # This is the primary server - no external dependencies
   oci-unified:
     transport: stdio
-    command: python
+    command: .venv/bin/python
     args:
       - "-m"
       - "src.mcp.server.main"
@@ -39,7 +39,7 @@ servers:
     env:
       OCI_CONFIG_FILE: "~/.oci/config"
       OCI_CLI_PROFILE: "DEFAULT"
-      MCP_OTEL_SDK_DISABLED: "true"  # Disable OTEL to speed up init
+      MCP_OTEL_SDK_DISABLED: "false"  # Enable OTEL for observability
     enabled: true
     domains:
       - identity
@@ -54,20 +54,24 @@ servers:
     timeout_seconds: 120  # Increased for slow initialization
 
   # Database Observatory - Primary database operations server
-  # Replace path with your local installation
+  # Set DB_OBSERVATORY_PATH environment variable or replace path below
   database-observatory:
     transport: stdio
     command: python
     args:
       - "-m"
       - "src.mcp_server"
-    working_dir: /path/to/mcp-oci-database-observatory
+    working_dir: ${DB_OBSERVATORY_PATH:-/path/to/mcp-oci-database-observatory}
     env:
       OCI_CONFIG_FILE: "~/.oci/config"
       OCI_CLI_PROFILE: "DEFAULT"
-      SQLCL_PATH: "/usr/bin/sql"
-      MCP_OTEL_SDK_DISABLED: "true"  # Disable OTEL to speed up init
-    enabled: false
+      # SQLcl configuration - uses values from .env.local
+      SQLCL_PATH: ${SQLCL_PATH:-/Applications/sqlcl/bin/sql}
+      SQLCL_TNS_ADMIN: ${SQLCL_TNS_ADMIN:-~/Downloads/Wallet_th}
+      SQLCL_DB_USERNAME: ${SQLCL_DB_USERNAME:-ADMIN}
+      SQLCL_DB_CONNECTION: ${SQLCL_DB_CONNECTION:-th_high}
+      MCP_OTEL_SDK_DISABLED: "false"  # Enable OTEL for observability
+    enabled: true
     domains:
       - database
       - opsi
@@ -75,22 +79,24 @@ servers:
       - observability
     description: "Oracle Database Observatory with SQLcl, OPSI, and Logan Analytics"
     timeout_seconds: 120  # Increased for slow initialization
+    # Note: Requires DB_OBSERVATORY_PATH env var pointing to mcp-oci-database-observatory clone
 
   # OCI Infrastructure MCP Server - External mcp-oci (fallback)
-  # Full OCI management capabilities via mcp-oci
+  # Set OCI_INFRASTRUCTURE_PATH environment variable or replace path below
   oci-infrastructure:
     transport: stdio
     command: python
     args:
       - "-m"
       - "mcp_server_oci.server"
-    working_dir: /path/to/mcp-oci
+    working_dir: ${OCI_INFRASTRUCTURE_PATH:-/path/to/mcp-oci}
     env:
       OCI_CONFIG_FILE: "~/.oci/config"
       OCI_CLI_PROFILE: "DEFAULT"
       ALLOW_MUTATIONS: "false"  # Set to "true" to enable write operations
       MCP_SERVER_ID: "oci-infrastructure"
-    enabled: false
+      MCP_OTEL_SDK_DISABLED: "false"  # Enable OTEL for observability
+    enabled: true
     domains:
       - compute
       - network
@@ -102,18 +108,20 @@ servers:
     timeout_seconds: 60
 
   # OCI Security MCP Server - Comprehensive security services
+  # Set OCI_SECURITY_PATH environment variable or replace path below
   oci-mcp-security:
     transport: stdio
     command: python
     args:
       - "-m"
       - "oci_mcp_security.server"
-    working_dir: /path/to/oci-mcp-security
+    working_dir: ${OCI_SECURITY_PATH:-/path/to/oci-mcp-security}
     env:
       OCI_CONFIG_FILE: "~/.oci/config"
       OCI_CLI_PROFILE: "DEFAULT"
       PYTHONPATH: "src"
-    enabled: false
+      MCP_OTEL_SDK_DISABLED: "false"  # Enable OTEL for observability
+    enabled: true
     domains:
       - security
       - cloudguard
@@ -150,18 +158,20 @@ servers:
   #   description: "OCI Logging Analytics via HTTP"
 
   # FinOps AI MCP Server - Multicloud cost management
+  # Set FINOPSAI_PATH environment variable or replace path below
   finopsai:
     transport: stdio
     command: python
     args:
       - "-m"
       - "finopsai_mcp.server"
-    working_dir: /path/to/finopsai-mcp
+    working_dir: ${FINOPSAI_PATH:-/path/to/finopsai-mcp}
     env:
       OCI_CONFIG_FILE: "~/.oci/config"
       OCI_CLI_PROFILE: "DEFAULT"
       PYTHONPATH: "src"
-    enabled: false
+      MCP_OTEL_SDK_DISABLED: "false"  # Enable OTEL for observability
+    enabled: true
     domains:
       - cost
       - budget

@@ -61,6 +61,10 @@ class LLMFactory:
                 )
 
         # Create the base LLM
+        # Handle provider aliases
+        if provider == "oracle_code_assist":
+            provider = "oca"
+
         if provider == "oca":
             # OCA uses shared token cache from ~/.oca/token.json
             # Authentication is handled by oca-langchain-client OAuth flow
@@ -70,7 +74,7 @@ class LLMFactory:
                     "OCA not authenticated - requests will fail until login"
                 )
             llm = ChatOCA(
-                model=config.get("model_name", "oca/gpt5"),
+                model=config.get("model_name", "oca/gpt-4.1"),
                 temperature=config.get("temperature", 0.7),
                 max_tokens=config.get("max_tokens", 4096),
             )

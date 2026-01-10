@@ -389,6 +389,181 @@ class ResponseParser:
 
         return ParseResult(response=response, table_data=services)
 
+    def _parse_cost_by_compartment(self, data: dict, agent_name: str | None) -> ParseResult:
+        """Parse cost_by_compartment response."""
+        summary = data.get("summary", {})
+        compartments = data.get("compartments", [])
+
+        response = StructuredResponse(
+            header=ResponseHeader(
+                title="Cost by Compartment",
+                icon="📁",
+                agent_name=agent_name,
+                severity=Severity.INFO,
+            ),
+        )
+
+        # Add summary metrics
+        metrics = [
+            MetricValue(
+                label="Period",
+                value=summary.get("period", "N/A"),
+                unit=f"({summary.get('days', 30)} days)",
+            ),
+            MetricValue(
+                label="Total Spend",
+                value=summary.get("total", "N/A"),
+                severity=Severity.INFO,
+            ),
+        ]
+        response.add_metrics("Summary", metrics)
+
+        # Add compartments table if present
+        if compartments:
+            table = self._list_to_table(compartments, title="Cost by Compartment")
+            response.add_section(table=table)
+
+        return ParseResult(response=response, table_data=compartments)
+
+    def _parse_cost_service_drilldown(self, data: dict, agent_name: str | None) -> ParseResult:
+        """Parse cost_service_drilldown response with SKU-level detail."""
+        summary = data.get("summary", {})
+        services = data.get("services", [])
+
+        response = StructuredResponse(
+            header=ResponseHeader(
+                title="Cost Service Drilldown",
+                icon="🔍",
+                agent_name=agent_name,
+                severity=Severity.INFO,
+            ),
+        )
+
+        # Add summary metrics
+        metrics = [
+            MetricValue(
+                label="Period",
+                value=summary.get("period", "N/A"),
+                unit=f"({summary.get('days', 30)} days)",
+            ),
+            MetricValue(
+                label="Total Spend",
+                value=summary.get("total", "N/A"),
+                severity=Severity.INFO,
+            ),
+        ]
+        response.add_metrics("Summary", metrics)
+
+        # Add services with their SKU breakdown
+        for svc in services[:5]:  # Top 5 services with detail
+            svc_name = svc.get("service", "Unknown")
+            svc_cost = svc.get("cost", "N/A")
+            svc_pct = svc.get("percent", "")
+
+            response.add_section(
+                title=f"📊 {svc_name}",
+                content=f"*Cost:* {svc_cost} ({svc_pct})",
+            )
+
+            # Add top resources as a sub-table
+            resources = svc.get("top_resources", [])
+            if resources:
+                table = self._list_to_table(resources, title="Top Resources")
+                response.add_section(table=table)
+
+        return ParseResult(response=response, table_data=services)
+
+    def _parse_cost_monthly_trend(self, data: dict, agent_name: str | None) -> ParseResult:
+        """Parse cost_monthly_trend response."""
+        summary = data.get("summary", {})
+        trend = data.get("trend", [])
+
+        response = StructuredResponse(
+            header=ResponseHeader(
+                title="Monthly Cost Trend",
+                icon="📈",
+                agent_name=agent_name,
+                severity=Severity.INFO,
+            ),
+        )
+
+        # Add summary metrics
+        metrics = [
+            MetricValue(
+                label="Period",
+                value=summary.get("period", "N/A"),
+            ),
+            MetricValue(
+                label="Total",
+                value=summary.get("total", "N/A"),
+            ),
+            MetricValue(
+                label="Average",
+                value=summary.get("average", "N/A"),
+            ),
+        ]
+        response.add_metrics("Summary", metrics)
+
+        # Add trend table
+        if trend:
+            table = self._list_to_table(trend, title="Monthly Trend")
+            response.add_section(table=table)
+
+        return ParseResult(response=response, table_data=trend)
+
+    def _parse_cost_comparison(self, data: dict, agent_name: str | None) -> ParseResult:
+        """Parse cost_comparison response."""
+        summary = data.get("summary", {})
+        comparison = data.get("comparison", [])
+
+        response = StructuredResponse(
+            header=ResponseHeader(
+                title="Cost Comparison",
+                icon="⚖️",
+                agent_name=agent_name,
+                severity=Severity.INFO,
+            ),
+        )
+
+        # Add summary metrics
+        metrics = [
+            MetricValue(
+                label="Months",
+                value=str(summary.get("months_compared", "N/A")),
+            ),
+            MetricValue(
+                label="Total",
+                value=summary.get("total", "N/A"),
+            ),
+            MetricValue(
+                label="Highest",
+                value=summary.get("highest", "N/A"),
+                severity=Severity.HIGH,
+            ),
+            MetricValue(
+                label="Lowest",
+                value=summary.get("lowest", "N/A"),
+                severity=Severity.SUCCESS,
+            ),
+        ]
+        response.add_metrics("Comparison Summary", metrics)
+
+        # Build comparison table
+        if comparison:
+            table_items = []
+            for item in comparison:
+                row = {
+                    "Month": item.get("month", "N/A"),
+                    "Cost": item.get("formatted", "N/A"),
+                }
+                if "change_from_prev" in item:
+                    row["Change"] = item["change_from_prev"]
+                table_items.append(row)
+            table = self._list_to_table(table_items, title="Month Comparison")
+            response.add_section(table=table)
+
+        return ParseResult(response=response, table_data=comparison)
+
     def _parse_fleet_health(self, data: dict, agent_name: str | None) -> ParseResult:
         """Parse fleet_health response."""
         summary = data.get("summary", {}) or {}
@@ -477,6 +652,460 @@ class ResponseParser:
             response.add_section(content=message)
 
         return ParseResult(response=response, table_data=connections)
+
+    def _parse_compute_instances(self, data: dict, agent_name: str | None) -> ParseResult:
+        """Parse compute_instances response from oci_compute_list_instances.
+
+        Converts instance data to a table for proper Slack rendering.
+        """
+        instances = data.get("instances", [])
+        count = data.get("count", len(instances))
+        lifecycle_state = data.get("lifecycle_state")
+
+        # Build subtitle with filter context
+        if lifecycle_state:
+            subtitle = f"{count} {lifecycle_state.lower()} instance(s)"
+        else:
+            subtitle = f"{count} instance(s) found"
+
+        response = StructuredResponse(
+            header=ResponseHeader(
+                title="Compute Instances",
+                icon="💻",
+                subtitle=subtitle,
+                agent_name=agent_name,
+                severity=Severity.INFO,
+            ),
+        )
+
+        if instances:
+            # Create table with relevant columns
+            table = TableData(
+                title="Instances",
+                headers=["Name", "State", "Shape", "Availability Domain"],
+                rows=[
+                    TableRow(cells=[
+                        inst.get("name", "N/A"),
+                        inst.get("state", "N/A"),
+                        inst.get("shape", "N/A"),
+                        inst.get("availability_domain", "N/A"),
+                    ])
+                    for inst in instances
+                ],
+            )
+            response.add_section(table=table)
+        else:
+            response.add_section(content="No instances found in the specified compartment.")
+
+        return ParseResult(response=response, table_data=instances)
+
+    def _parse_compartments(self, data: dict, agent_name: str | None) -> ParseResult:
+        """Parse compartments response from oci_tenancy_list_compartments.
+
+        Converts compartment data to a table for proper Slack rendering.
+        """
+        compartments = data.get("compartments", [])
+        count = data.get("count", len(compartments))
+
+        response = StructuredResponse(
+            header=ResponseHeader(
+                title="Compartments",
+                icon="📁",
+                subtitle=f"{count} compartment(s) found",
+                agent_name=agent_name,
+                severity=Severity.INFO,
+            ),
+        )
+
+        if compartments:
+            # Create table with relevant columns
+            table = TableData(
+                title="Compartments",
+                headers=["Name", "State", "Description"],
+                rows=[
+                    TableRow(cells=[
+                        comp.get("name", "N/A"),
+                        comp.get("lifecycle_state", "N/A"),
+                        (comp.get("description") or "")[:50],  # Truncate description
+                    ])
+                    for comp in compartments
+                ],
+            )
+            response.add_section(table=table)
+        else:
+            response.add_section(content="No compartments found.")
+
+        return ParseResult(response=response, table_data=compartments)
+
+    def _parse_alarms(self, data: dict, agent_name: str | None) -> ParseResult:
+        """Parse alarms response from oci_observability_list_alarms.
+
+        Converts alarm data to a table for proper Slack rendering.
+        """
+        alarms = data.get("alarms", [])
+        count = data.get("count", len(alarms))
+
+        # Count by severity
+        critical = sum(1 for a in alarms if a.get("severity") == "CRITICAL")
+        warning = sum(1 for a in alarms if a.get("severity") == "WARNING")
+
+        subtitle_parts = [f"{count} alarm(s)"]
+        if critical > 0:
+            subtitle_parts.append(f"🔴 {critical} critical")
+        if warning > 0:
+            subtitle_parts.append(f"🟡 {warning} warning")
+
+        response = StructuredResponse(
+            header=ResponseHeader(
+                title="Active Alarms",
+                icon="🔔",
+                subtitle=" | ".join(subtitle_parts),
+                agent_name=agent_name,
+                severity=Severity.WARNING if critical > 0 or warning > 0 else Severity.INFO,
+            ),
+        )
+
+        if alarms:
+            # Create table with relevant columns
+            table = TableData(
+                title="Alarms",
+                headers=["Name", "Severity", "State", "Namespace", "Enabled"],
+                rows=[
+                    TableRow(cells=[
+                        alarm.get("name", "N/A"),
+                        alarm.get("severity", "INFO"),
+                        alarm.get("state", "N/A"),
+                        alarm.get("namespace", "N/A"),
+                        "✓" if alarm.get("is_enabled") else "✗",
+                    ])
+                    for alarm in alarms
+                ],
+            )
+            response.add_section(table=table)
+        else:
+            response.add_section(content="✅ No active alarms.")
+
+        return ParseResult(response=response, table_data=alarms)
+
+    def _parse_cloud_guard_problems(
+        self, data: dict, agent_name: str | None
+    ) -> ParseResult:
+        """Parse cloud_guard_problems response."""
+        problems = data.get("problems", [])
+        count = data.get("count", len(problems))
+        severity_summary = data.get("severity_summary", {})
+
+        # Determine overall severity
+        critical = severity_summary.get("CRITICAL", 0)
+        high = severity_summary.get("HIGH", 0)
+        if critical > 0:
+            severity = Severity.CRITICAL
+        elif high > 0:
+            severity = Severity.HIGH
+        elif count > 0:
+            severity = Severity.MEDIUM
+        else:
+            severity = Severity.SUCCESS
+
+        response = StructuredResponse(
+            header=ResponseHeader(
+                title="Cloud Guard Problems",
+                icon="🛡️",
+                subtitle=f"{count} security problems found",
+                agent_name=agent_name,
+                severity=severity,
+            ),
+        )
+
+        # Add severity summary
+        if severity_summary:
+            summary_parts = []
+            for level in ["CRITICAL", "HIGH", "MEDIUM", "LOW"]:
+                if severity_summary.get(level, 0) > 0:
+                    summary_parts.append(f"{level}: {severity_summary[level]}")
+            if summary_parts:
+                response.add_section(content="*Severity breakdown:* " + " | ".join(summary_parts))
+
+        # Add problems table
+        if problems:
+            table = TableData(
+                headers=["Name", "Risk Level", "Resource Type", "State"],
+                rows=[
+                    TableRow(
+                        cells=[
+                            p.get("name", "Unknown"),
+                            p.get("risk_level", "N/A"),
+                            p.get("resource_type", "N/A"),
+                            p.get("lifecycle_state", "N/A"),
+                        ])
+                    for p in problems[:20]  # Limit display
+                ],
+            )
+            response.add_section(table=table)
+        else:
+            response.add_section(content="✅ No security problems detected.")
+
+        return ParseResult(response=response, table_data=problems)
+
+    def _parse_security_score(
+        self, data: dict, agent_name: str | None
+    ) -> ParseResult:
+        """Parse security_score response."""
+        score = data.get("score", 0)
+        grade = data.get("grade", "N/A")
+        problem_counts = data.get("problem_counts", {})
+
+        # Determine severity from score
+        if score >= 80:
+            severity = Severity.SUCCESS
+        elif score >= 60:
+            severity = Severity.MEDIUM
+        else:
+            severity = Severity.HIGH
+
+        response = StructuredResponse(
+            header=ResponseHeader(
+                title="Security Score",
+                icon="📊",
+                subtitle=f"Grade: {grade} ({score}/100)",
+                agent_name=agent_name,
+                severity=severity,
+            ),
+        )
+
+        # Add score details
+        response.add_section(
+            content=f"**Security Score:** {score}/100 (Grade: {grade})"
+        )
+
+        # Add problem counts
+        if problem_counts:
+            counts_parts = []
+            for level in ["critical", "high", "medium", "low"]:
+                if problem_counts.get(level, 0) > 0:
+                    counts_parts.append(f"{level.title()}: {problem_counts[level]}")
+            if counts_parts:
+                response.add_section(
+                    content="*Problem counts:* " + " | ".join(counts_parts)
+                )
+
+        return ParseResult(response=response, table_data=data)
+
+    def _parse_audit_events(
+        self, data: dict, agent_name: str | None
+    ) -> ParseResult:
+        """Parse audit_events response."""
+        events = data.get("events", [])
+        count = data.get("count", len(events))
+        time_range = data.get("time_range", {})
+        event_summary = data.get("event_type_summary", {})
+
+        response = StructuredResponse(
+            header=ResponseHeader(
+                title="Audit Events",
+                icon="📋",
+                subtitle=f"{count} events in last {time_range.get('hours', 24)}h",
+                agent_name=agent_name,
+                severity=Severity.INFO,
+            ),
+        )
+
+        # Add event type summary
+        if event_summary:
+            top_types = sorted(event_summary.items(), key=lambda x: x[1], reverse=True)[:5]
+            if top_types:
+                summary_text = ", ".join([f"{k}: {v}" for k, v in top_types])
+                response.add_section(content=f"*Top event types:* {summary_text}")
+
+        # Add events table
+        if events:
+            table = TableData(
+                headers=["Event Type", "Time", "Source", "Resource"],
+                rows=[
+                    TableRow(
+                        cells=[
+                            e.get("event_type", "N/A")[:40],  # Truncate long types
+                            e.get("event_time", "N/A")[:19] if e.get("event_time") else "N/A",
+                            e.get("source", "N/A")[:20],
+                            e.get("resource_name", "N/A")[:30],
+                        ])
+                    for e in events[:15]  # Limit display
+                ],
+            )
+            response.add_section(table=table)
+        else:
+            response.add_section(content="No audit events found in the specified time range.")
+
+        return ParseResult(response=response, table_data=events)
+
+    def _parse_security_overview(
+        self, data: dict, agent_name: str | None
+    ) -> ParseResult:
+        """Parse security_overview response."""
+        posture = data.get("posture", {})
+        critical_issues = data.get("critical_issues", {})
+        audit_activity = data.get("audit_activity", {})
+        recommendations = data.get("recommendations", [])
+
+        score = posture.get("score", 0)
+        grade = posture.get("grade", "N/A")
+
+        # Determine severity
+        if score >= 80 and critical_issues.get("count", 0) == 0:
+            severity = Severity.SUCCESS
+        elif critical_issues.get("count", 0) > 0:
+            severity = Severity.CRITICAL
+        elif score < 60:
+            severity = Severity.HIGH
+        else:
+            severity = Severity.MEDIUM
+
+        response = StructuredResponse(
+            header=ResponseHeader(
+                title="Security Overview",
+                icon="🔐",
+                subtitle=f"Score: {score}/100 (Grade: {grade})",
+                agent_name=agent_name,
+                severity=severity,
+            ),
+        )
+
+        # Add posture summary
+        response.add_section(
+            content=f"**Security Posture:** {score}/100 ({grade})\n"
+                    f"*Total problems:* {posture.get('total_problems', 0)}"
+        )
+
+        # Add critical issues
+        if critical_issues.get("count", 0) > 0:
+            response.add_section(
+                content=f"⚠️ **Critical Issues:** {critical_issues['count']} require immediate attention"
+            )
+
+        # Add audit activity
+        response.add_section(
+            content=f"*Audit activity (24h):* {audit_activity.get('events_24h', 0)} events, "
+                    f"{audit_activity.get('event_types', 0)} event types"
+        )
+
+        # Add recommendations
+        if recommendations:
+            rec_items = []
+            for rec in recommendations[:3]:
+                priority = rec.get("priority", "medium").upper()
+                action = rec.get("action", "Review security posture")
+                rec_items.append(f"• [{priority}] {action}")
+            if rec_items:
+                response.add_section(
+                    content="**Recommendations:**\n" + "\n".join(rec_items)
+                )
+
+        return ParseResult(response=response, table_data=data)
+
+    def _parse_log_summary(
+        self, data: dict, agent_name: str | None
+    ) -> ParseResult:
+        """Parse log_summary response."""
+        namespace = data.get("namespace", "Unknown")
+        time_range = data.get("time_range", {})
+        storage = data.get("storage", {})
+        sources = data.get("sources", {})
+        log_groups = data.get("log_groups", {})
+
+        response = StructuredResponse(
+            header=ResponseHeader(
+                title="Log Analytics Summary",
+                icon="📊",
+                subtitle=f"Namespace: {namespace}",
+                agent_name=agent_name,
+                severity=Severity.INFO,
+            ),
+        )
+
+        # Add time range
+        hours = time_range.get("hours", 24)
+        response.add_section(content=f"*Time range:* Last {hours} hours")
+
+        # Add storage info
+        active_bytes = storage.get("active_data_size_bytes", 0)
+        archived_bytes = storage.get("archived_data_size_bytes", 0)
+        active_gb = round(active_bytes / (1024**3), 2) if active_bytes else 0
+        archived_gb = round(archived_bytes / (1024**3), 2) if archived_bytes else 0
+        response.add_section(
+            content=f"**Storage:** Active: {active_gb} GB | Archived: {archived_gb} GB"
+        )
+
+        # Add sources and groups
+        response.add_section(
+            content=f"**Log Sources:** {sources.get('count', 0)} | **Log Groups:** {log_groups.get('count', 0)}"
+        )
+
+        # List log groups if available
+        group_names = log_groups.get("names", [])
+        if group_names:
+            response.add_section(
+                content="*Log Groups:* " + ", ".join(group_names[:5])
+            )
+
+        return ParseResult(response=response, table_data=data)
+
+    def _parse_log_query_results(
+        self, data: dict, agent_name: str | None
+    ) -> ParseResult:
+        """Parse log_query_results response."""
+        query = data.get("query", "Unknown query")
+        result_count = data.get("result_count", 0)
+        time_range = data.get("time_range", {})
+        columns = data.get("columns", [])
+        rows = data.get("rows", [])
+        error = data.get("error")
+
+        if error:
+            response = StructuredResponse(
+                header=ResponseHeader(
+                    title="Log Query",
+                    icon="🔍",
+                    subtitle="Query failed",
+                    agent_name=agent_name,
+                    severity=Severity.HIGH,
+                ),
+            )
+            response.add_section(content=f"**Error:** {error}")
+            if data.get("suggestion"):
+                response.add_section(content=f"*Suggestion:* {data['suggestion']}")
+            return ParseResult(response=response, table_data=data)
+
+        response = StructuredResponse(
+            header=ResponseHeader(
+                title="Log Query Results",
+                icon="🔍",
+                subtitle=f"{result_count} results found",
+                agent_name=agent_name,
+                severity=Severity.INFO if result_count > 0 else Severity.SUCCESS,
+            ),
+        )
+
+        # Add query info
+        hours = time_range.get("hours", 1)
+        response.add_section(content=f"*Query:* `{query[:80]}...`" if len(query) > 80 else f"*Query:* `{query}`")
+        response.add_section(content=f"*Time range:* Last {hours} hour(s)")
+
+        # Add results table
+        if rows and columns:
+            # Take first 4 columns max for display
+            display_cols = columns[:4]
+            table = TableData(
+                headers=display_cols,
+                rows=[
+                    TableRow(cells=[str(row[i])[:50] if i < len(row) else "" for i in range(len(display_cols))])
+                    for row in rows[:20]
+                ],
+            )
+            response.add_section(table=table)
+        elif result_count == 0:
+            response.add_section(content="No matching log entries found.")
+
+        return ParseResult(response=response, table_data=rows)
 
     def _parse_database_list(
         self, data: dict, title: str, agent_name: str | None
@@ -696,6 +1325,301 @@ class ResponseParser:
             response.add_section(table=table)
 
         return ParseResult(response=response, table_data=metrics)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # OPSI Type Parsers (Operations Insights)
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _parse_sql_statistics(self, data: dict, agent_name: str | None) -> ParseResult:
+        """Parse sql_statistics response from OPSI."""
+        distilled = data.get("distilled_summary", {})
+        items = data.get("items", [])
+        sql_count = data.get("sql_count", len(items))
+
+        response = StructuredResponse(
+            header=ResponseHeader(
+                title="SQL Statistics",
+                icon="📊",
+                subtitle=f"{sql_count} SQL statements",
+                agent_name=agent_name,
+                severity=self._sql_stats_severity(distilled),
+            ),
+        )
+
+        # Add distilled summary as content
+        summary_text = distilled.get("summary", "")
+        if summary_text:
+            response.add_section(content=summary_text)
+
+        # Add totals as metrics
+        totals = distilled.get("totals", {})
+        if totals:
+            metrics = [
+                MetricValue(label="DB Time", value=f"{totals.get('database_time_sec', 0):.1f}s"),
+                MetricValue(label="CPU Time", value=f"{totals.get('cpu_time_sec', 0):.1f}s"),
+                MetricValue(label="IO Time", value=f"{totals.get('io_time_sec', 0):.1f}s"),
+                MetricValue(label="Executions", value=str(totals.get("executions", 0))),
+            ]
+            response.add_metrics("Totals", metrics)
+
+        # Add problem counts if any issues
+        problem_counts = distilled.get("problem_counts", {})
+        degrading = problem_counts.get("degrading", 0)
+        inefficient = problem_counts.get("inefficient", 0)
+        if degrading > 0 or inefficient > 0:
+            problem_metrics = []
+            if degrading > 0:
+                problem_metrics.append(MetricValue(
+                    label="Degrading",
+                    value=str(degrading),
+                    severity=Severity.HIGH,
+                ))
+            if inefficient > 0:
+                problem_metrics.append(MetricValue(
+                    label="Inefficient",
+                    value=str(inefficient),
+                    severity=Severity.MEDIUM,
+                ))
+            response.add_metrics("Issues Detected", problem_metrics)
+
+        # Add top offenders metrics
+        top_offenders = distilled.get("top_offenders", [])
+        if top_offenders:
+            top_metrics = []
+            for sql in top_offenders[:3]:
+                label = (sql.get("sql_id") or "SQL")[:15]
+                db_time = sql.get("db_time_sec", 0)
+                top_metrics.append(
+                    MetricValue(
+                        label=label,
+                        value=f"{db_time:.1f}s",
+                        unit="db time",
+                    )
+                )
+            if top_metrics:
+                response.add_metrics("Top SQL by DB Time", top_metrics)
+
+        # Add next action
+        next_action = distilled.get("next_action", "")
+        if next_action:
+            response.add_section(content=f"*Next Action:* {next_action}")
+
+        # Add items table if present
+        if items:
+            # Create a simplified table with key columns
+            table_items = []
+            for item in items[:10]:  # Limit to 10 rows
+                table_items.append({
+                    "SQL": (item.get("sql_identifier") or "")[:15],
+                    "Database": (item.get("database_display_name") or "")[:15],
+                    "DB Time (s)": f"{item.get('database_time_in_sec', 0):.1f}",
+                    "CPU (s)": f"{item.get('cpu_time_in_sec', 0):.1f}",
+                    "Executions": item.get("executions_count", 0),
+                })
+            table = self._list_to_table(table_items, title="SQL Details")
+            response.add_section(table=table)
+
+        return ParseResult(response=response, table_data=items)
+
+    def _parse_addm_findings(self, data: dict, agent_name: str | None) -> ParseResult:
+        """Parse addm_findings response from OPSI."""
+        distilled = data.get("distilled_summary", {})
+        items = data.get("items", [])
+        finding_count = data.get("finding_count", len(items))
+
+        severity = Severity.SUCCESS
+        if distilled.get("severity") == "critical":
+            severity = Severity.CRITICAL
+        elif distilled.get("severity") == "high":
+            severity = Severity.HIGH
+        elif distilled.get("severity") == "medium":
+            severity = Severity.MEDIUM
+
+        response = StructuredResponse(
+            header=ResponseHeader(
+                title="ADDM Findings",
+                icon="🔍",
+                subtitle=f"{finding_count} findings",
+                agent_name=agent_name,
+                severity=severity,
+            ),
+        )
+
+        # Add distilled summary
+        summary_text = distilled.get("summary", "")
+        if summary_text:
+            response.add_section(content=summary_text)
+
+        # Add severity counts as metrics
+        metrics = []
+        for sev_name, sev_level in [("critical_count", Severity.CRITICAL),
+                                     ("high_count", Severity.HIGH),
+                                     ("medium_count", Severity.MEDIUM)]:
+            count = distilled.get(sev_name, 0)
+            if count > 0:
+                metrics.append(MetricValue(
+                    label=sev_name.replace("_count", "").title(),
+                    value=str(count),
+                    severity=sev_level,
+                ))
+        if metrics:
+            response.add_metrics("Finding Severity", metrics)
+
+        # Add next action
+        next_action = distilled.get("next_action", "")
+        if next_action:
+            response.add_section(content=f"*Next Action:* {next_action}")
+
+        # Add findings table
+        if items:
+            table_items = []
+            for item in items[:10]:
+                table_items.append({
+                    "Category": (item.get("category_name") or "")[:20],
+                    "Database": (item.get("database_display_name") or "")[:15],
+                    "Impact %": f"{item.get('impact_overall_percent', 0):.1f}",
+                    "Details": (item.get("finding_details") or "")[:40],
+                })
+            table = self._list_to_table(table_items, title="Finding Details")
+            response.add_section(table=table)
+
+        return ParseResult(response=response, table_data=items)
+
+    def _parse_addm_recommendations(self, data: dict, agent_name: str | None) -> ParseResult:
+        """Parse addm_recommendations response from OPSI."""
+        distilled = data.get("distilled_summary", {})
+        items = data.get("items", [])
+        rec_count = data.get("recommendation_count", len(items))
+
+        response = StructuredResponse(
+            header=ResponseHeader(
+                title="ADDM Recommendations",
+                icon="💡",
+                subtitle=f"{rec_count} recommendations",
+                agent_name=agent_name,
+                severity=Severity.INFO,
+            ),
+        )
+
+        # Add summary
+        summary_text = distilled.get("summary", "")
+        if summary_text:
+            response.add_section(content=summary_text)
+
+        # Add key metrics
+        total_benefit = distilled.get("total_potential_benefit_percent", 0)
+        restart_count = distilled.get("requires_restart_count", 0)
+        if total_benefit > 0 or restart_count > 0:
+            metrics = [
+                MetricValue(
+                    label="Potential Benefit",
+                    value=f"{total_benefit:.1f}%",
+                    severity=Severity.SUCCESS if total_benefit > 10 else Severity.INFO,
+                ),
+            ]
+            if restart_count > 0:
+                metrics.append(MetricValue(
+                    label="Require Restart",
+                    value=str(restart_count),
+                    severity=Severity.MEDIUM,
+                ))
+            response.add_metrics("Summary", metrics)
+
+        # Add next action
+        next_action = distilled.get("next_action", "")
+        if next_action:
+            response.add_section(content=f"*Next Action:* {next_action}")
+
+        # Add recommendations table
+        if items:
+            table_items = []
+            for item in items[:10]:
+                table_items.append({
+                    "Type": (item.get("type") or "")[:15],
+                    "Benefit %": f"{item.get('overall_benefit_percent', 0):.1f}",
+                    "Restart": "Yes" if item.get("require_restart") else "No",
+                    "Message": (item.get("message") or "")[:40],
+                })
+            table = self._list_to_table(table_items, title="Recommendation Details")
+            response.add_section(table=table)
+
+        return ParseResult(response=response, table_data=items)
+
+    def _parse_sql_insights_summary(self, data: dict, agent_name: str | None) -> ParseResult:
+        """Parse sql_insights_summary response from OPSI."""
+        insights = data.get("insights", [])
+
+        response = StructuredResponse(
+            header=ResponseHeader(
+                title="SQL Insights",
+                icon="🔎",
+                subtitle=f"{len(insights)} insights",
+                agent_name=agent_name,
+                severity=Severity.INFO,
+            ),
+        )
+
+        if insights:
+            # Add insights as list items
+            insight_texts = []
+            for insight in insights[:10]:
+                category = insight.get("category", "")
+                text = insight.get("text") or insight.get("description", "")
+                if text:
+                    insight_texts.append(f"*{category}*: {text[:100]}")
+            if insight_texts:
+                response.add_section(list_items=insight_texts)
+
+            # Also add as table for structured view
+            table = self._list_to_table(insights[:10], title="Insight Details")
+            response.add_section(table=table)
+
+        return ParseResult(response=response, table_data=insights)
+
+    def _parse_database_insights(self, data: dict, agent_name: str | None) -> ParseResult:
+        """Parse database_insights response from OPSI."""
+        items = data.get("items", [])
+        db_count = data.get("database_count", len(items))
+
+        response = StructuredResponse(
+            header=ResponseHeader(
+                title="Database Insights",
+                icon="📈",
+                subtitle=f"{db_count} databases",
+                agent_name=agent_name,
+                severity=Severity.INFO,
+            ),
+        )
+
+        if items:
+            table_items = []
+            for item in items[:10]:
+                table_items.append({
+                    "Database": (item.get("database_display_name") or "")[:20],
+                    "Type": (item.get("database_type") or "")[:15],
+                    "Status": item.get("status", ""),
+                    "Host": (item.get("host_name") or "")[:20],
+                })
+            table = self._list_to_table(table_items, title="Database List")
+            response.add_section(table=table)
+
+        return ParseResult(response=response, table_data=items)
+
+    def _sql_stats_severity(self, distilled: dict) -> Severity:
+        """Determine severity from SQL statistics summary."""
+        severity_str = distilled.get("severity", "low")
+        if severity_str == "critical":
+            return Severity.CRITICAL
+        if severity_str == "warning":
+            return Severity.MEDIUM
+
+        # Check problem counts
+        problem_counts = distilled.get("problem_counts", {})
+        if problem_counts.get("degrading", 0) > 0:
+            return Severity.HIGH
+        if problem_counts.get("inefficient", 0) > 0:
+            return Severity.MEDIUM
+        return Severity.INFO
 
     # ─────────────────────────────────────────────────────────────────────────
     # Helper Methods

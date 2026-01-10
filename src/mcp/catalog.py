@@ -42,6 +42,9 @@ if TYPE_CHECKING:
     from src.resilience.bulkhead import Bulkhead
     from src.resilience.deadletter import DeadLetterQueue
 
+# Import partition timeout function for runtime use
+from src.resilience.bulkhead import get_partition_timeout
+
 logger = structlog.get_logger(__name__)
 
 # Refresh configuration
@@ -1371,12 +1374,13 @@ class ToolCatalog:
         # Bulkhead Acquisition
         # ─────────────────────────────────────────────────────────────────────
         # Acquire bulkhead slot for resource isolation
-        # Timeout reduced from 30s to 10s - fail fast, don't cascade delays
+        # Use partition-specific timeouts: cost/database ops need longer waits
         bulkhead_handle = None
         if self._bulkhead:
             partition = self._bulkhead.get_partition_for_tool(tool_name)
+            acquire_timeout = get_partition_timeout(partition)
             try:
-                bulkhead_handle = await self._bulkhead.acquire(partition, timeout=10.0)
+                bulkhead_handle = await self._bulkhead.acquire(partition, timeout=acquire_timeout)
             except TimeoutError:
                 # Check if this is a read-only operation (list, get, search, etc.)
                 # Read-only ops can proceed without isolation as a graceful degradation
@@ -1391,17 +1395,19 @@ class ToolCatalog:
                         "Bulkhead timeout, proceeding without isolation (read-only)",
                         tool=tool_name,
                         partition=partition.value,
+                        timeout=acquire_timeout,
                     )
                 else:
                     self._logger.warning(
                         "Bulkhead timeout",
                         tool=tool_name,
                         partition=partition.value,
+                        timeout=acquire_timeout,
                     )
                     return ToolCallResult(
                         tool_name=tool_name,
                         success=False,
-                        error=f"Resource pool {partition.value} exhausted (bulkhead timeout)",
+                        error=f"Resource pool {partition.value} exhausted (bulkhead timeout after {acquire_timeout}s)",
                     )
 
         # ─────────────────────────────────────────────────────────────────────

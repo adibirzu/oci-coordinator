@@ -4,8 +4,8 @@
 
 This document provides a comprehensive mapping of all features, MCP servers, tools, agents, and their interconnections in the OCI AI Agent Coordinator system.
 
-**Last Updated**: 2026-01-08
-**Test Status**: 21/41 tools tested (new DB Mgmt/OPSI/SQLcl tools pending)
+**Last Updated**: 2026-01-10
+**Test Status**: 21/77 tools tested (new Logan/Observability tools pending)
 
 ---
 
@@ -15,12 +15,16 @@ This document provides a comprehensive mapping of all features, MCP servers, too
 
 | Server | Tools | Status | Transport | Primary Use |
 |--------|-------|--------|-----------|-------------|
-| **oci-unified** | 51 | Enabled | stdio | Core OCI operations + DB Mgmt + OPSI |
-| **database-observatory** | 50+ | Enabled | stdio | Database/SQLcl/Logan |
+| **oci-unified** | 77 | Enabled | stdio | Core OCI + DB Mgmt + OPSI + Logan |
+| **database-observatory** | 50+ | Enabled | stdio | Database/SQLcl/Logan queries |
 | **oci-infrastructure** | 44 | Enabled | stdio | Full OCI SDK wrapper |
 | **finopsai-mcp** | 33 | Enabled | stdio | Multicloud FinOps |
+| **oci-mcp-security** | 60+ | Enabled | stdio | Cloud Guard, WAF, Bastion, KMS |
 
-**Total Available Tools**: 395+ (with logan MCP server tools)
+**Total Available Tools**: 395+ (with external MCP servers)
+
+**Note**: External MCP servers require path configuration via environment variables:
+- `DB_OBSERVATORY_PATH`, `OCI_INFRASTRUCTURE_PATH`, `FINOPSAI_PATH`, `OCI_SECURITY_PATH`
 
 ### New in v1.3 (2026-01-03)
 - **DB Management Tools (10)**: AWR reports, Top SQL, Wait Events, SQL Plan Baselines, Fleet Health
@@ -34,6 +38,28 @@ This document provides a comprehensive mapping of all features, MCP servers, too
   - Parallelism Stats (`parallelism_stats`, `px_stats`, `req_degree`)
   - Full Table Scan Detection (`full_table_scan`, `table_scan`, `full_scan`)
   - Blocking Sessions (`blocking_sessions`, `check_blocking`, `lock_contention`)
+
+### New in v1.5 (2026-01-10)
+- **Log Analytics Tools (5)**: Multi-tenancy support with OCI profile selection
+  - `oci_logan_list_namespaces` - List Log Analytics namespaces
+  - `oci_logan_list_log_groups` - List log groups
+  - `oci_logan_get_summary` - Get storage/source stats
+  - `oci_logan_execute_query` - Execute Log Analytics queries
+  - `oci_logan_search_logs` - Search log content
+- **Observability Tools (3)**:
+  - `oci_observability_get_instance_metrics` - Instance CPU/memory/network metrics
+  - `oci_list_profiles` - List OCI config profiles
+  - `oci_observability_list_alarms` - List monitoring alarms
+- **New Workflows (10+)**:
+  - `instance_metrics_workflow` - Interactive instance metrics with name lookup
+  - `anomaly_detection_workflow` - Correlate metrics with logs
+  - `log_query_workflow` - Execute Log Analytics queries
+  - `log_search_workflow` - Search logs for patterns
+- **LLM Observability**:
+  - GenAI semantic conventions for OpenTelemetry
+  - `OracleCodeAssistInstrumentor` for OCA tracing
+  - Token usage, latency, and error tracking
+- **OpenTelemetry Enabled** for all MCP servers
 
 ---
 

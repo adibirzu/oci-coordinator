@@ -100,10 +100,28 @@ def get_identity_client():
     config = get_oci_config()
     return oci.identity.IdentityClient(config)
 
-def get_monitoring_client():
-    """Get OCI Monitoring client."""
-    config = get_oci_config()
-    return oci.monitoring.MonitoringClient(config)
+def get_monitoring_client(
+    profile: str | None = None,
+    region: str | None = None,
+) -> oci.monitoring.MonitoringClient:
+    """Get OCI Monitoring client.
+
+    Args:
+        profile: OCI config profile name (default: from env or DEFAULT)
+        region: OCI region override
+
+    Returns:
+        MonitoringClient instance for alarms and metrics
+    """
+    profile_key = (profile or "default").lower()
+    cache_key = f"monitoring:{profile_key}:{region or 'default'}"
+    if cache_key in _client_cache:
+        return _client_cache[cache_key]
+
+    config = get_oci_config_with_region(profile, region)
+    client = oci.monitoring.MonitoringClient(config)
+    _client_cache[cache_key] = client
+    return client
 
 def get_logging_client():
     """Get OCI Logging Management client."""
@@ -243,6 +261,54 @@ def get_diagnosability_client(
 
     config = get_oci_config_with_region(profile, region)
     client = oci.database_management.DiagnosabilityClient(config)
+    _client_cache[cache_key] = client
+    return client
+
+
+def get_cloud_guard_client(
+    profile: str | None = None,
+    region: str | None = None,
+) -> oci.cloud_guard.CloudGuardClient:
+    """Get OCI Cloud Guard client.
+
+    Args:
+        profile: OCI config profile. Defaults to OCI_CLI_PROFILE.
+        region: OCI region override.
+
+    Returns:
+        CloudGuardClient for security operations
+    """
+    profile_key = (profile or "default").lower()
+    cache_key = f"cloudguard:{profile_key}:{region or 'default'}"
+    if cache_key in _client_cache:
+        return _client_cache[cache_key]
+
+    config = get_oci_config_with_region(profile, region)
+    client = oci.cloud_guard.CloudGuardClient(config)
+    _client_cache[cache_key] = client
+    return client
+
+
+def get_audit_client(
+    profile: str | None = None,
+    region: str | None = None,
+) -> oci.audit.AuditClient:
+    """Get OCI Audit client.
+
+    Args:
+        profile: OCI config profile. Defaults to OCI_CLI_PROFILE.
+        region: OCI region override.
+
+    Returns:
+        AuditClient for audit event operations
+    """
+    profile_key = (profile or "default").lower()
+    cache_key = f"audit:{profile_key}:{region or 'default'}"
+    if cache_key in _client_cache:
+        return _client_cache[cache_key]
+
+    config = get_oci_config_with_region(profile, region)
+    client = oci.audit.AuditClient(config)
     _client_cache[cache_key] = client
     return client
 

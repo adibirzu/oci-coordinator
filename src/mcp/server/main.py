@@ -14,8 +14,65 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+def _init_mcp_oci_logging():
+    """Initialize OCI Logging for MCP server with trace correlation.
+
+    Uses separate log group for MCP server:
+    - OCI_MCP_LOG_GROUP_ID: MCP-specific log group
+    - OCI_MCP_LOG_ID: Log within the group for MCP server logs
+
+    Falls back to agent log group if MCP-specific not configured.
+    """
+    # Check if OCI Logging is enabled
+    if os.getenv("OCI_LOGGING_ENABLED", "true").lower() == "false":
+        logger.info("OCI Logging disabled by configuration")
+        return
+
+    # MCP server uses its own log group (different from agent logs)
+    log_group_id = os.getenv("OCI_MCP_LOG_GROUP_ID") or os.getenv("OCI_LOG_GROUP_ID")
+    log_id = os.getenv("OCI_MCP_LOG_ID") or os.getenv("OCI_LOG_ID_COORDINATOR")
+
+    if not log_group_id or not log_id:
+        logger.warning(
+            "MCP OCI Logging not configured - set OCI_MCP_LOG_GROUP_ID and OCI_MCP_LOG_ID"
+        )
+        return
+
+    try:
+        # Import OCI Logging handler from observability module
+        from src.observability.oci_logging import OCILoggingHandler
+
+        handler = OCILoggingHandler(
+            log_group_id=log_group_id,
+            log_id=log_id,
+            agent_name="mcp-server",
+            profile="DEFAULT",
+        )
+
+        # Attach to root logger for trace correlation
+        root_logger = logging.getLogger()
+        root_logger.addHandler(handler)
+
+        logger.info(
+            f"MCP OCI Logging initialized - log_id: {log_id[:40]}..."
+        )
+
+    except ImportError:
+        logger.warning("OCI Logging handler not available - using console only")
+    except Exception as e:
+        logger.error(f"MCP OCI Logging init failed: {e}")
+
+
 def _init_mcp_observability():
-    """Initialize observability for the MCP server."""
+    """Initialize observability for the MCP server.
+
+    Includes:
+    - OTEL tracing to OCI APM (for distributed tracing)
+    - OCI Logging with trace_id/span_id correlation (for log-trace linking)
+    """
+    # Initialize OCI Logging first (so trace IDs are captured in logs)
+    _init_mcp_oci_logging()
+
     # Check if OTEL is disabled
     if os.getenv("MCP_OTEL_SDK_DISABLED", "false").lower() == "true":
         logger.info("MCP OTEL SDK disabled by configuration")
@@ -263,6 +320,7 @@ from src.mcp.server.tools.cost import register_cost_tools
 from src.mcp.server.tools.database import register_database_tools
 from src.mcp.server.tools.discovery import register_discovery_tools
 from src.mcp.server.tools.identity import register_identity_tools
+from src.mcp.server.tools.logan import register_logan_tools
 from src.mcp.server.tools.network import register_network_tools
 from src.mcp.server.tools.observability import register_observability_tools
 from src.mcp.server.tools.opsi import register_opsi_tools
@@ -276,6 +334,7 @@ register_network_tools(mcp)
 register_cost_tools(mcp)
 register_security_tools(mcp)
 register_observability_tools(mcp)
+register_logan_tools(mcp)  # Log Analytics tools
 register_database_tools(mcp)  # DB Management tools
 register_opsi_tools(mcp)  # Operations Insights tools
 register_discovery_tools(mcp)  # ShowOCI-style discovery tools

@@ -109,17 +109,27 @@ class ContextManager:
         """Estimate token count for text."""
         return int(len(text) * self.TOKENS_PER_CHAR)
 
-    def _estimate_message_tokens(self, messages: list[dict[str, Any]]) -> int:
-        """Estimate total tokens for a list of messages."""
+    def _estimate_message_tokens(self, messages: list[dict[str, Any] | str]) -> int:
+        """Estimate total tokens for a list of messages.
+
+        Handles both dict messages (with 'content' key) and plain string messages.
+        """
         total = 0
         for msg in messages:
-            content = msg.get("content", "")
-            if isinstance(content, str):
-                total += self._estimate_tokens(content)
-            elif isinstance(content, dict):
-                total += self._estimate_tokens(json.dumps(content))
-            # Add overhead for role, metadata
-            total += 10
+            # Handle string messages (legacy format)
+            if isinstance(msg, str):
+                total += self._estimate_tokens(msg)
+                total += 10  # overhead
+                continue
+            # Handle dict messages
+            if isinstance(msg, dict):
+                content = msg.get("content", "")
+                if isinstance(content, str):
+                    total += self._estimate_tokens(content)
+                elif isinstance(content, dict):
+                    total += self._estimate_tokens(json.dumps(content))
+                # Add overhead for role, metadata
+                total += 10
         return total
 
     async def get_context(
@@ -502,9 +512,13 @@ Provide a structured summary that captures the essential context needed to conti
         if context_window.recent_messages:
             parts.append("=== RECENT MESSAGES ===")
             for msg in context_window.recent_messages:
-                role = msg.get("role", "user")
-                content = msg.get("content", "")
-                parts.append(f"[{role}]: {content}")
+                # Handle both dict messages and string messages (defensive)
+                if isinstance(msg, dict):
+                    role = msg.get("role", "user")
+                    content = msg.get("content", "")
+                    parts.append(f"[{role}]: {content}")
+                elif isinstance(msg, str):
+                    parts.append(f"[user]: {msg}")
 
         return "\n".join(parts)
 

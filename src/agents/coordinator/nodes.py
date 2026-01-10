@@ -128,7 +128,7 @@ class CoordinatorNodes:
             "db-health-agent": "database_troubleshoot",
             "log-analytics-agent": "log_analysis",
             "error-analysis-agent": "error_analysis",
-            "security-agent": "security_audit",
+            "security-threat-agent": "security_audit",
             "finops-agent": "cost_analysis",
             "infrastructure-agent": "infrastructure_check",
         }
@@ -275,7 +275,29 @@ class CoordinatorNodes:
                     )
                 return {"intent": self._enrich_intent(pre_classified, state)}
 
-            # 3. Check database listing queries (generic database queries)
+            # 3. Check SelectAI queries (tables, profiles, natural language SQL)
+            pre_classified = self._pre_classify_selectai_query(state.query)
+            if pre_classified:
+                span.set_attribute("pre_classification", "selectai")
+                self._logger.info(
+                    "Pre-classified SelectAI query",
+                    intent=pre_classified.intent,
+                    workflow=pre_classified.suggested_workflow,
+                )
+                if thinking_trace:
+                    thinking_trace.add_step(
+                        ThinkingPhase.CLASSIFIED,
+                        f"Detected SelectAI query → Intent: {pre_classified.intent}",
+                        {
+                            "method": "pre-classification",
+                            "intent": pre_classified.intent,
+                            "confidence": pre_classified.confidence,
+                            "domains": pre_classified.domains,
+                        },
+                    )
+                return {"intent": self._enrich_intent(pre_classified, state)}
+
+            # 4. Check database listing queries (generic database queries)
             pre_classified = self._pre_classify_database_query(state.query)
             if pre_classified:
                 span.set_attribute("pre_classification", "database_listing")
@@ -364,7 +386,30 @@ class CoordinatorNodes:
                     )
                 return {"intent": self._enrich_intent(pre_classified, state)}
 
-            # 7. Check compute/infrastructure queries (create instance, list shapes)
+            # 7. Check error analysis queries (error messages, exceptions)
+            # This MUST come before compute to avoid misrouting errors mentioning "server"
+            pre_classified = self._pre_classify_error_query(state.query)
+            if pre_classified:
+                span.set_attribute("pre_classification", "error_analysis")
+                self._logger.info(
+                    "Pre-classified error analysis query",
+                    intent=pre_classified.intent,
+                    workflow=pre_classified.suggested_workflow,
+                )
+                if thinking_trace:
+                    thinking_trace.add_step(
+                        ThinkingPhase.CLASSIFIED,
+                        f"Detected error analysis query → Intent: {pre_classified.intent}",
+                        {
+                            "method": "pre-classification",
+                            "intent": pre_classified.intent,
+                            "confidence": pre_classified.confidence,
+                            "domains": pre_classified.domains,
+                        },
+                    )
+                return {"intent": self._enrich_intent(pre_classified, state)}
+
+            # 8. Check compute/infrastructure queries (create instance, list shapes)
             pre_classified = self._pre_classify_compute_query(state.query)
             if pre_classified:
                 span.set_attribute("pre_classification", "compute")
@@ -399,6 +444,28 @@ class CoordinatorNodes:
                     thinking_trace.add_step(
                         ThinkingPhase.CLASSIFIED,
                         f"Detected security query → Intent: {pre_classified.intent}",
+                        {
+                            "method": "pre-classification",
+                            "intent": pre_classified.intent,
+                            "confidence": pre_classified.confidence,
+                            "domains": pre_classified.domains,
+                        },
+                    )
+                return {"intent": self._enrich_intent(pre_classified, state)}
+
+            # 9. Check observability queries (alarms, metrics)
+            pre_classified = self._pre_classify_observability_query(state.query)
+            if pre_classified:
+                span.set_attribute("pre_classification", "observability")
+                self._logger.info(
+                    "Pre-classified observability query",
+                    intent=pre_classified.intent,
+                    workflow=pre_classified.suggested_workflow,
+                )
+                if thinking_trace:
+                    thinking_trace.add_step(
+                        ThinkingPhase.CLASSIFIED,
+                        f"Detected observability query → Intent: {pre_classified.intent}",
                         {
                             "method": "pre-classification",
                             "intent": pre_classified.intent,
@@ -700,6 +767,66 @@ class CoordinatorNodes:
         if not is_cost_query:
             return None
 
+        # === DETERMINISTIC COST WORKFLOWS - Check these FIRST ===
+        # These specific patterns should always route to their workflows
+
+        # Monthly trend patterns
+        trend_patterns = ["cost trend", "spending trend", "monthly trend", "month over month"]
+        if any(p in query_lower for p in trend_patterns):
+            return IntentClassification(
+                intent="monthly_trend",
+                category=IntentCategory.QUERY,
+                confidence=0.98,
+                domains=["cost"],
+                entities={},
+                suggested_workflow="monthly_trend",
+                suggested_agent=None,
+            )
+
+        # Cost comparison patterns (compare months)
+        import re
+        month_pattern = r'\b(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec)\b'
+        months_found = re.findall(month_pattern, query_lower)
+        compare_keywords = ["compare", "vs", "versus", "comparison", " vs "]
+        if len(months_found) >= 2 and any(kw in query_lower for kw in compare_keywords):
+            return IntentClassification(
+                intent="cost_comparison",
+                category=IntentCategory.QUERY,
+                confidence=0.98,
+                domains=["cost"],
+                entities={"months": " vs ".join(months_found)},
+                suggested_workflow="cost_comparison",
+                suggested_agent=None,
+            )
+
+        # Cost by service patterns
+        service_breakdown_patterns = ["by service", "service breakdown", "service drilldown", "costs by service"]
+        if any(p in query_lower for p in service_breakdown_patterns):
+            return IntentClassification(
+                intent="cost_by_service",
+                category=IntentCategory.QUERY,
+                confidence=0.98,
+                domains=["cost"],
+                entities={},
+                suggested_workflow="cost_by_service",
+                suggested_agent=None,
+            )
+
+        # Cost by compartment patterns
+        compartment_patterns = ["by compartment", "compartment breakdown", "costs by compartment", "compartment spending"]
+        if any(p in query_lower for p in compartment_patterns):
+            return IntentClassification(
+                intent="cost_by_compartment_direct",
+                category=IntentCategory.QUERY,
+                confidence=0.98,
+                domains=["cost"],
+                entities={},
+                suggested_workflow="cost_by_compartment_direct",
+                suggested_agent=None,
+            )
+
+        # === END DETERMINISTIC COST WORKFLOWS ===
+
         # Extract date range from query (e.g., "November", "last month")
         date_entities = self._extract_date_range(query)
 
@@ -948,6 +1075,70 @@ class CoordinatorNodes:
 
         return None
 
+    def _pre_classify_selectai_query(self, query: str) -> IntentClassification | None:
+        """
+        Pre-classify SelectAI-related queries.
+
+        This catches queries like:
+        - "show SQL tables on SelectAI" → list_tables
+        - "list tables on MY_PROFILE" → list_tables
+        - "what tables does SelectAI profile have" → list_tables
+        - "ask SelectAI about sales" → selectai_query
+
+        Returns None if not a SelectAI query.
+        """
+        query_lower = query.lower()
+
+        # SelectAI profile/table patterns
+        selectai_keywords = ["selectai", "select ai", "profile", "ai profile"]
+        table_keywords = ["table", "tables", "schema", "objects"]
+        listing_keywords = ["show", "list", "get", "what", "display"]
+
+        has_selectai = any(kw in query_lower for kw in selectai_keywords)
+        has_tables = any(kw in query_lower for kw in table_keywords)
+        has_listing = any(kw in query_lower for kw in listing_keywords)
+
+        # Pattern 1: List tables on a profile (e.g., "show SQL tables on SelectAI")
+        if has_tables and (has_selectai or has_listing):
+            # Extract profile name
+            import re
+            entities: dict[str, Any] = {}
+
+            # Try to extract profile name from patterns like "on ProfileName", "for ProfileName"
+            profile_match = re.search(
+                r'(?:on|for|profile)\s+([a-zA-Z][a-zA-Z0-9_]*)',
+                query, re.IGNORECASE
+            )
+            if profile_match:
+                entities["profile_name"] = profile_match.group(1)
+
+            return IntentClassification(
+                intent="list_tables",
+                category=IntentCategory.QUERY,
+                confidence=0.95,
+                domains=["database"],
+                entities=entities,
+                suggested_workflow="list_tables",
+                suggested_agent=None,
+            )
+
+        # Pattern 2: Ask SelectAI (natural language query)
+        ask_keywords = ["ask", "query", "tell me", "what is", "show me"]
+        has_ask = any(kw in query_lower for kw in ask_keywords)
+
+        if has_selectai and has_ask:
+            return IntentClassification(
+                intent="selectai_query",
+                category=IntentCategory.QUERY,
+                confidence=0.90,
+                domains=["database"],
+                entities={"user_query": query},
+                suggested_workflow="selectai_query",
+                suggested_agent=None,
+            )
+
+        return None
+
     def _pre_classify_resource_cost_query(self, query: str) -> IntentClassification | None:
         """
         Pre-classify resource-cost mapping queries.
@@ -1176,15 +1367,16 @@ class CoordinatorNodes:
                     entities["oci_profile"] = profiles[0]
             return IntentClassification(
                 intent="blocking_sessions",
-                category=IntentCategory.ANALYSIS,
+                category=IntentCategory.QUERY,  # Changed from ANALYSIS to use workflow
                 confidence=0.95,
                 domains=["database"],
                 entities=entities,
                 suggested_workflow="blocking_sessions",
-                suggested_agent="db-troubleshoot-agent",
+                suggested_agent=None,  # Remove agent to force workflow
             )
 
         # SQL monitoring patterns (running/active SQL)
+        # Uses DB Management API (oci_dbmgmt_get_sql_report) for deterministic execution
         sql_monitor_keywords = ["running sql", "show running sql", "active sql", "sql monitor", "executing sql", "current sql", "active queries"]
         if any(kw in query_lower for kw in sql_monitor_keywords):
             entities = {}
@@ -1198,15 +1390,16 @@ class CoordinatorNodes:
                     entities["oci_profile"] = profiles[0]
             return IntentClassification(
                 intent="sql_monitoring",
-                category=IntentCategory.ANALYSIS,
+                category=IntentCategory.QUERY,  # Changed from ANALYSIS to use workflow
                 confidence=0.95,
                 domains=["database"],
                 entities=entities,
                 suggested_workflow="sql_monitoring",
-                suggested_agent="db-troubleshoot-agent",
+                suggested_agent=None,  # No fallback - workflow should handle it
             )
 
         # Parallelism check patterns
+        # Uses OPSI API for deterministic parallel query analysis
         parallelism_keywords = ["check parallelism", "parallelism", "px stats", "parallel query", "px downgrade", "parallel execution", "degree of parallelism"]
         if any(kw in query_lower for kw in parallelism_keywords):
             entities = {}
@@ -1220,12 +1413,12 @@ class CoordinatorNodes:
                     entities["oci_profile"] = profiles[0]
             return IntentClassification(
                 intent="parallelism_stats",
-                category=IntentCategory.ANALYSIS,
+                category=IntentCategory.QUERY,  # Changed from ANALYSIS to use workflow
                 confidence=0.95,
                 domains=["database"],
                 entities=entities,
                 suggested_workflow="parallelism_stats",
-                suggested_agent="db-troubleshoot-agent",
+                suggested_agent=None,  # No fallback - workflow should handle it
             )
 
         # Long running operations patterns
@@ -1456,6 +1649,9 @@ class CoordinatorNodes:
 
         This avoids LLM classification for common identity queries,
         reducing response time by 1-3 seconds.
+
+        IMPORTANT: Does NOT match when compartment is used as a filter
+        (e.g., "list instances in compartment X" should route to list_instances)
         """
         query_lower = query.lower()
 
@@ -1466,7 +1662,20 @@ class CoordinatorNodes:
         has_listing = any(kw in query_lower for kw in listing_keywords)
         has_compartment = any(kw in query_lower for kw in compartment_keywords)
 
-        if has_listing and has_compartment:
+        # Check if compartment is used as a FILTER (not the target resource)
+        # e.g., "instances in compartment X" → NOT a compartment listing
+        resource_keywords = [
+            "instance", "instances", "vm", "vms", "server", "servers",
+            "database", "databases", "adb", "atp", "adw",
+            "vcn", "vcns", "subnet", "subnets",
+            "bucket", "buckets", "storage",
+            "function", "functions",
+            "resource", "resources",
+        ]
+        has_other_resource = any(kw in query_lower for kw in resource_keywords)
+
+        # Only match compartment listing if no other resource is mentioned
+        if has_listing and has_compartment and not has_other_resource:
             return IntentClassification(
                 intent="list_compartments",
                 category=IntentCategory.QUERY,
@@ -1526,50 +1735,25 @@ class CoordinatorNodes:
         - "start instance web-server-01" → start_instance
         - "stop instance web-server-01" → stop_instance
         - "restart instance web-server-01" → restart_instance
+        - "start Caldera in Adrian_Birzu compartment" → start_instance (action-first)
 
         This avoids LLM classification for common compute operations.
         """
         query_lower = query.lower()
+        import re
 
-        # Provision/create instance patterns
-        provision_keywords = ["provision", "create", "launch", "spin up", "deploy", "new"]
-        instance_keywords = ["instance", "vm", "server", "virtual machine", "compute"]
+        # Define keyword groups
+        instance_keywords = ["instance", "instances", "vm", "vms", "server", "servers", "virtual machine", "compute"]
+        listing_keywords = ["list", "show", "get", "display", "what", "which", "find", "all"]
 
-        has_provision = any(kw in query_lower for kw in provision_keywords)
         has_instance = any(kw in query_lower for kw in instance_keywords)
+        has_listing = any(kw in query_lower for kw in listing_keywords)
 
-        if has_provision and has_instance:
-            # Extract instance name if provided (e.g., "create instance my-server")
-            entities: dict[str, Any] = {}
-            # Simple name extraction: look for words after the instance keyword
-            import re
-            name_match = re.search(
-                r'(?:instance|vm|server)\s+named?\s*([a-zA-Z][a-zA-Z0-9_-]*)',
-                query_lower,
-            )
-            if name_match:
-                entities["instance_name"] = name_match.group(1)
-
-            # Check for size selection (1, 2, 3, 4)
-            size_match = re.search(r'\b([1-4])\b', query)
-            if size_match:
-                entities["size_selection"] = size_match.group(1)
-
-            return IntentClassification(
-                intent="provision_instance",
-                category=IntentCategory.ACTION,
-                confidence=0.95,
-                domains=["compute", "infrastructure"],
-                entities=entities,
-                suggested_workflow="provision_instance",
-                suggested_agent="infrastructure-agent",
-            )
+        # IMPORTANT: Check listing patterns FIRST (takes precedence over provisioning)
+        # This handles "show me last 10 created instances" correctly as list, not provision
 
         # List shapes patterns
         shape_keywords = ["shape", "shapes", "instance type", "instance types"]
-        listing_keywords = ["list", "show", "get", "available", "what"]
-
-        has_listing = any(kw in query_lower for kw in listing_keywords)
         has_shape = any(kw in query_lower for kw in shape_keywords)
 
         if has_listing and has_shape:
@@ -1598,16 +1782,73 @@ class CoordinatorNodes:
                 suggested_agent=None,
             )
 
-        # List instances patterns
+        # List instances patterns (MUST come before provision check!)
         if has_listing and has_instance:
+            # Extract compartment name if mentioned - support multiple patterns:
+            # - "instances in compartment Adrian_Birzu"
+            # - "instances from Adrian_Birzu"
+            # - "instances in Adrian_Birzu"
+            # - "Adrian_Birzu instances"
+            entities: dict[str, Any] = {}
+            compartment_patterns = [
+                r'(?:in|from)\s+compartment\s+([a-zA-Z][a-zA-Z0-9_-]*)',  # "in/from compartment NAME"
+                r'compartment\s+([a-zA-Z][a-zA-Z0-9_-]*)',  # "compartment NAME"
+                r'(?:in|from)\s+([a-zA-Z][a-zA-Z0-9_-]*)\s+(?:compartment|with)',  # "from NAME compartment/with"
+                r'(?:in|from)\s+([a-zA-Z][a-zA-Z0-9_-]+)(?:\s|$)',  # "from NAME" at end or before space
+            ]
+            for pattern in compartment_patterns:
+                comp_match = re.search(pattern, query_lower, re.IGNORECASE)
+                if comp_match:
+                    comp_name = comp_match.group(1)
+                    # Skip common words that aren't compartment names
+                    skip_words = {"the", "a", "an", "all", "my", "our", "this", "that", "current", "status"}
+                    if comp_name.lower() not in skip_words:
+                        entities["compartment_name"] = comp_name
+                        break
+
+            # Extract limit if mentioned (e.g., "last 10 instances")
+            limit_match = re.search(r'(?:last|top|first)\s+(\d+)', query_lower)
+            if limit_match:
+                entities["limit"] = int(limit_match.group(1))
+
             return IntentClassification(
                 intent="list_instances",
                 category=IntentCategory.QUERY,
                 confidence=0.95,
                 domains=["compute"],
-                entities={},
+                entities=entities,
                 suggested_workflow="list_instances",
                 suggested_agent=None,
+            )
+
+        # Provision/create instance patterns (use word boundary to avoid matching "created")
+        # Only match if not a listing query
+        provision_pattern = r'\b(provision|create|launch|deploy|new)\b'
+        has_provision = bool(re.search(provision_pattern, query_lower))
+
+        if has_provision and has_instance:
+            # Extract instance name if provided (e.g., "create instance my-server")
+            entities: dict[str, Any] = {}
+            name_match = re.search(
+                r'(?:instance|vm|server)\s+named?\s*([a-zA-Z][a-zA-Z0-9_-]*)',
+                query_lower,
+            )
+            if name_match:
+                entities["instance_name"] = name_match.group(1)
+
+            # Check for size selection (1, 2, 3, 4)
+            size_match = re.search(r'\b([1-4])\b', query)
+            if size_match:
+                entities["size_selection"] = size_match.group(1)
+
+            return IntentClassification(
+                intent="provision_instance",
+                category=IntentCategory.ACTION,
+                confidence=0.95,
+                domains=["compute", "infrastructure"],
+                entities=entities,
+                suggested_workflow="provision_instance",
+                suggested_agent="infrastructure-agent",
             )
 
         # Get/describe specific instance
@@ -1630,19 +1871,74 @@ class CoordinatorNodes:
         if not has_listing:
             import re
 
+            # Helper function to extract instance name from query
+            def extract_instance_name(query_text: str, action_keywords: list[str]) -> str | None:
+                """Extract instance name from various patterns."""
+                # Pattern 1: "instance/vm/server <name>"
+                match = re.search(
+                    r'(?:instance|vm|server)\s+([a-zA-Z][a-zA-Z0-9_-]*)',
+                    query_text,
+                )
+                if match:
+                    return match.group(1)
+                
+                # Pattern 2: "<action> <name>" (action-first, e.g., "start Caldera")
+                # Build pattern with all action keywords
+                action_pattern = '|'.join(re.escape(kw) for kw in action_keywords)
+                match = re.search(
+                    rf'(?:{action_pattern})\s+([a-zA-Z][a-zA-Z0-9_-]+)',
+                    query_text,
+                )
+                if match:
+                    # Exclude common words that might follow action
+                    excluded_words = {'the', 'my', 'a', 'an', 'this', 'that', 'all', 'instance', 'vm', 'server', 'compartment', 'in'}
+                    name = match.group(1)
+                    if name.lower() not in excluded_words:
+                        return name
+                
+                # Pattern 3: "named <name>"
+                match = re.search(r'named\s+([a-zA-Z][a-zA-Z0-9_-]+)', query_text)
+                if match:
+                    return match.group(1)
+                
+                return None
+
+            # Helper function to extract compartment name from query
+            def extract_compartment_name(query_text: str) -> str | None:
+                """Extract compartment name from patterns like 'in Adrian_Birzu compartment'."""
+                # Pattern 1: "in <name> compartment"
+                match = re.search(
+                    r'in\s+([a-zA-Z][a-zA-Z0-9_-]+)\s+compartment',
+                    query_text,
+                    re.IGNORECASE,
+                )
+                if match:
+                    return match.group(1)
+                
+                # Pattern 2: "compartment <name>"
+                match = re.search(
+                    r'compartment\s+([a-zA-Z][a-zA-Z0-9_-]+)',
+                    query_text,
+                    re.IGNORECASE,
+                )
+                if match:
+                    return match.group(1)
+                
+                return None
+
             # Check restart first (since "restart" contains "start")
             restart_keywords = ["restart", "reboot", "reset"]
             has_restart = any(kw in query_lower for kw in restart_keywords)
 
-            if has_restart and has_instance:
-                # Extract instance name
+            if has_restart:
+                # Don't require has_instance - allow action-first patterns
                 entities: dict[str, Any] = {}
-                name_match = re.search(
-                    r'(?:instance|vm|server)\s+([a-zA-Z][a-zA-Z0-9_-]*)',
-                    query_lower,
-                )
-                if name_match:
-                    entities["instance_name"] = name_match.group(1)
+                instance_name = extract_instance_name(query_lower, restart_keywords)
+                if instance_name:
+                    entities["instance_name"] = instance_name
+                compartment_name = extract_compartment_name(query_lower)
+                if compartment_name:
+                    entities["compartment_name"] = compartment_name
 
                 return IntentClassification(
                     intent="restart_instance",
@@ -1658,15 +1954,15 @@ class CoordinatorNodes:
             stop_keywords = ["stop", "shutdown", "shut down", "power off", "turn off", "halt"]
             has_stop = any(kw in query_lower for kw in stop_keywords)
 
-            if has_stop and has_instance:
-                # Extract instance name
+            if has_stop:
+                # Don't require has_instance - allow action-first patterns
                 entities = {}
-                name_match = re.search(
-                    r'(?:instance|vm|server)\s+([a-zA-Z][a-zA-Z0-9_-]*)',
-                    query_lower,
-                )
-                if name_match:
-                    entities["instance_name"] = name_match.group(1)
+                instance_name = extract_instance_name(query_lower, stop_keywords)
+                if instance_name:
+                    entities["instance_name"] = instance_name
+                compartment_name = extract_compartment_name(query_lower)
+                if compartment_name:
+                    entities["compartment_name"] = compartment_name
 
                 return IntentClassification(
                     intent="stop_instance",
@@ -1682,15 +1978,15 @@ class CoordinatorNodes:
             start_keywords = ["start", "boot", "power on", "turn on"]
             has_start = any(kw in query_lower for kw in start_keywords)
 
-            if has_start and has_instance:
-                # Extract instance name
+            if has_start:
+                # Don't require has_instance - allow action-first patterns
                 entities = {}
-                name_match = re.search(
-                    r'(?:instance|vm|server)\s+([a-zA-Z][a-zA-Z0-9_-]*)',
-                    query_lower,
-                )
-                if name_match:
-                    entities["instance_name"] = name_match.group(1)
+                instance_name = extract_instance_name(query_lower, start_keywords)
+                if instance_name:
+                    entities["instance_name"] = instance_name
+                compartment_name = extract_compartment_name(query_lower)
+                if compartment_name:
+                    entities["compartment_name"] = compartment_name
 
                 return IntentClassification(
                     intent="start_instance",
@@ -1733,7 +2029,7 @@ class CoordinatorNodes:
                 domains=["security"],
                 entities={},
                 suggested_workflow="security_problems",
-                suggested_agent="security-agent",
+                suggested_agent="security-threat-agent",
             )
 
         # Vulnerability scanning patterns
@@ -1749,7 +2045,7 @@ class CoordinatorNodes:
                 domains=["security"],
                 entities={},
                 suggested_workflow="vulnerability_scan",
-                suggested_agent="security-agent",
+                suggested_agent="security-threat-agent",
             )
 
         # Security score/posture patterns
@@ -1762,7 +2058,7 @@ class CoordinatorNodes:
                 domains=["security"],
                 entities={},
                 suggested_workflow="security_score",
-                suggested_agent="security-agent",
+                suggested_agent="security-threat-agent",
             )
 
         # Threat detection patterns
@@ -1779,7 +2075,7 @@ class CoordinatorNodes:
                 domains=["security"],
                 entities={},
                 suggested_workflow="security_threats",
-                suggested_agent="security-agent",
+                suggested_agent="security-threat-agent",
             )
 
         # Bastion/secure access patterns
@@ -1792,7 +2088,181 @@ class CoordinatorNodes:
                 domains=["security"],
                 entities={},
                 suggested_workflow="bastion_sessions",
-                suggested_agent="security-agent",
+                suggested_agent="security-threat-agent",
+            )
+
+        # Security overview patterns (summary, general security status)
+        overview_keywords = ["security overview", "security summary", "security status"]
+        if any(kw in query_lower for kw in overview_keywords):
+            return IntentClassification(
+                intent="security_overview",
+                category=IntentCategory.QUERY,
+                confidence=0.95,
+                domains=["security"],
+                entities={},
+                suggested_workflow="security_overview",
+                suggested_agent="security-threat-agent",
+            )
+
+        # Audit events patterns
+        audit_keywords = ["audit event", "audit events", "audit log", "audit trail", "recent audit"]
+        if any(kw in query_lower for kw in audit_keywords):
+            return IntentClassification(
+                intent="audit_events",
+                category=IntentCategory.QUERY,
+                confidence=0.95,
+                domains=["security"],
+                entities={},
+                suggested_workflow="audit_events",
+                suggested_agent="security-threat-agent",
+            )
+
+        return None
+
+
+    def _pre_classify_error_query(self, query: str) -> IntentClassification | None:
+        """
+        Pre-classify error analysis queries.
+
+        Catches queries where the user is asking about an error message or exception.
+        This MUST run before compute classification to avoid misrouting error queries
+        that happen to mention "server" or other instance keywords.
+
+        Examples:
+        - "What is this error: TypeError: Cannot read property..."
+        - "Help me understand this exception"
+        - "I got this error from my Next.js app: ..."
+        - "What does this error mean: Connection refused to server..."
+        """
+        query_lower = query.lower()
+
+        # Error analysis indicator patterns
+        # These strongly suggest the user wants error interpretation, not OCI operations
+        error_indicators = [
+            "what is this error",
+            "what does this error",
+            "help me understand this error",
+            "explain this error",
+            "what's this error",
+            "getting this error",
+            "got this error",
+            "seeing this error",
+            "this exception",
+            "this stack trace",
+            "stacktrace",
+            "typeerror",
+            "syntaxerror",
+            "referenceerror",
+            "valueerror",
+            "keyerror",
+            "attributeerror",
+            "runtime error",
+            "build error",
+            "compilation error",
+            "failed to compile",
+            "traceback",
+            "at line",  # Common in stack traces
+            "node_modules",  # Node.js errors
+            "npm error",
+            "yarn error",
+            "next.js",
+            "react error",
+            "webpack error",
+        ]
+
+        # Check for error interpretation patterns
+        has_error_indicator = any(indicator in query_lower for indicator in error_indicators)
+
+        # Also check for patterns like "error: <message>" or "Error <code>"
+        import re
+        error_message_pattern = re.search(
+            r'(error|exception|failed|failure)[\s:]+(.*?)(\n|$)',
+            query_lower,
+            re.IGNORECASE,
+        )
+
+        if has_error_indicator or (error_message_pattern and len(error_message_pattern.group(2)) > 10):
+            return IntentClassification(
+                intent="error_analysis",
+                category=IntentCategory.ANALYSIS,
+                confidence=0.95,
+                domains=["observability", "logs"],
+                entities={
+                    "error_message": query,  # Pass the full query as the error message
+                },
+                suggested_workflow="error_analysis",
+                suggested_agent="error-analysis-agent",
+            )
+
+        return None
+
+    def _pre_classify_observability_query(self, query: str) -> IntentClassification | None:
+        """
+        Pre-classify observability queries using keyword matching.
+
+        Catches queries like:
+        - "list active alarms" → list_alarms
+        - "show alarms" → list_alarms
+        - "check alarms" → list_alarms
+        - "monitoring alerts" → list_alarms
+        - "get metrics" → get_metrics
+
+        This avoids LLM classification for common observability queries.
+        """
+        query_lower = query.lower()
+
+        # Alarm patterns - route to observability workflow
+        alarm_keywords = [
+            "alarm", "alarms", "alert", "alerts", "monitoring alert",
+        ]
+        if any(kw in query_lower for kw in alarm_keywords):
+            return IntentClassification(
+                intent="list_alarms",
+                category=IntentCategory.QUERY,
+                confidence=0.95,
+                domains=["observability"],
+                entities={},
+                suggested_workflow="list_alarms",
+                suggested_agent=None,  # Use workflow, not agent
+            )
+
+        # Metrics patterns
+        metrics_keywords = ["metric", "metrics", "monitoring data", "performance data"]
+        if any(kw in query_lower for kw in metrics_keywords):
+            return IntentClassification(
+                intent="get_metrics",
+                category=IntentCategory.QUERY,
+                confidence=0.90,
+                domains=["observability"],
+                entities={},
+                suggested_workflow="get_metrics",
+                suggested_agent=None,
+            )
+
+        # Log summary patterns
+        log_summary_keywords = ["log summary", "logging summary", "log analytics", "logs overview"]
+        if any(kw in query_lower for kw in log_summary_keywords):
+            return IntentClassification(
+                intent="log_summary",
+                category=IntentCategory.QUERY,
+                confidence=0.95,
+                domains=["observability"],
+                entities={},
+                suggested_workflow="log_summary",
+                suggested_agent=None,
+            )
+
+        # Log search / error logs patterns
+        log_search_keywords = ["search log", "search logs", "find log", "find logs", "error log", "error logs"]
+        if any(kw in query_lower for kw in log_search_keywords):
+            return IntentClassification(
+                intent="log_search",
+                category=IntentCategory.QUERY,
+                confidence=0.95,
+                domains=["observability"],
+                entities={},
+                suggested_workflow="log_search",
+                suggested_agent=None,
             )
 
         return None

@@ -312,20 +312,28 @@ async def _summarize_sql_statistics_logic(
     category: str | None = None,
     limit: int = 10,  # Reduced from 20 to minimize context
     include_subtree: bool = True,
+    hours_back: int = 24,  # Default to last 24 hours
     profile: str | None = None,
     region: str | None = None,
 ) -> str:
     """Get SQL statistics for performance analysis."""
     import oci
+    from datetime import UTC, datetime, timedelta
 
     try:
         client = get_opsi_client(profile=profile, region=region)
         config = client.base_client.config
         compartment = compartment_id or config.get("tenancy")
 
+        # Calculate time interval (required by OCI OPSI API)
+        end_time = datetime.now(UTC)
+        start_time = end_time - timedelta(hours=hours_back)
+
         kwargs: dict[str, Any] = {
             "compartment_id": compartment,
             "compartment_id_in_subtree": include_subtree,
+            "time_interval_start": start_time,
+            "time_interval_end": end_time,
             "sort_by": sort_by,
             "sort_order": "DESC",
             "limit": limit,
@@ -433,24 +441,38 @@ async def _summarize_addm_findings_logic(
     include_subtree: bool = True,
     finding_type: str | None = None,
     limit: int = 15,  # Reduced from 20 to minimize context
+    days_back: int = 7,  # Default to last 7 days
     profile: str | None = None,
     region: str | None = None,
 ) -> str:
     """Get ADDM findings for performance issues."""
     import oci
+    from datetime import UTC, datetime, timedelta
 
     try:
         client = get_opsi_client(profile=profile, region=region)
         config = client.base_client.config
         compartment = compartment_id or config.get("tenancy")
 
+        # Calculate time interval (required by OCI OPSI API)
+        end_time = datetime.now(UTC)
+        start_time = end_time - timedelta(days=days_back)
+
         kwargs: dict[str, Any] = {
             "compartment_id": compartment,
             "compartment_id_in_subtree": include_subtree,
+            "time_interval_start": start_time,
+            "time_interval_end": end_time,
             "limit": limit,
         }
         if database_id:
-            kwargs["id"] = [database_id]
+            # Use appropriate parameter based on OCID type:
+            # - "id" for database insight OCIDs (ocid1.databaseinsight...)
+            # - "database_id" for database OCIDs (ocid1.database..., ocid1.autonomousdatabase...)
+            if "databaseinsight" in database_id.lower():
+                kwargs["id"] = [database_id]
+            else:
+                kwargs["database_id"] = [database_id]
         if finding_type:
             kwargs["finding_type"] = finding_type
 
@@ -537,24 +559,38 @@ async def _summarize_addm_recommendations_logic(
     finding_id: str | None = None,
     include_subtree: bool = True,
     limit: int = 10,  # Reduced from 20 to minimize context
+    days_back: int = 7,  # Default to last 7 days
     profile: str | None = None,
     region: str | None = None,
 ) -> str:
     """Get ADDM recommendations for performance improvements."""
     import oci
+    from datetime import UTC, datetime, timedelta
 
     try:
         client = get_opsi_client(profile=profile, region=region)
         config = client.base_client.config
         compartment = compartment_id or config.get("tenancy")
 
+        # Calculate time interval (required by OCI OPSI API)
+        end_time = datetime.now(UTC)
+        start_time = end_time - timedelta(days=days_back)
+
         kwargs: dict[str, Any] = {
             "compartment_id": compartment,
             "compartment_id_in_subtree": include_subtree,
+            "time_interval_start": start_time,
+            "time_interval_end": end_time,
             "limit": limit,
         }
         if database_id:
-            kwargs["id"] = [database_id]
+            # Use appropriate parameter based on OCID type:
+            # - "id" for database insight OCIDs (ocid1.databaseinsight...)
+            # - "database_id" for database OCIDs (ocid1.database..., ocid1.autonomousdatabase...)
+            if "databaseinsight" in database_id.lower():
+                kwargs["id"] = [database_id]
+            else:
+                kwargs["database_id"] = [database_id]
         if finding_id:
             kwargs["finding_id"] = [finding_id]
 
@@ -882,6 +918,7 @@ def register_opsi_tools(mcp: FastMCP) -> None:
         category: str | None = None,
         limit: int = 20,
         include_subtree: bool = True,
+        hours_back: int = 24,
         profile: str | None = None,
         region: str | None = None,
     ) -> str:
@@ -898,6 +935,7 @@ def register_opsi_tools(mcp: FastMCP) -> None:
             category: Filter by category (DEGRADING, VARIANT, INEFFICIENT, etc.)
             limit: Maximum SQLs to return (default 20)
             include_subtree: Include sub-compartments (default True)
+            hours_back: Number of hours to look back (default 24)
             profile: OCI profile name
             region: OCI region override
 
@@ -905,7 +943,7 @@ def register_opsi_tools(mcp: FastMCP) -> None:
             SQL statistics with performance metrics
         """
         return await _summarize_sql_statistics_logic(
-            compartment_id, database_id, sql_identifier, sort_by, category, limit, include_subtree, profile, region
+            compartment_id, database_id, sql_identifier, sort_by, category, limit, include_subtree, hours_back, profile, region
         )
 
     @mcp.tool()
@@ -915,6 +953,7 @@ def register_opsi_tools(mcp: FastMCP) -> None:
         include_subtree: bool = True,
         finding_type: str | None = None,
         limit: int = 20,
+        days_back: int = 7,
         profile: str | None = None,
         region: str | None = None,
     ) -> str:
@@ -928,6 +967,7 @@ def register_opsi_tools(mcp: FastMCP) -> None:
             include_subtree: Include sub-compartments (default True)
             finding_type: Filter by finding type
             limit: Maximum findings to return (default 20)
+            days_back: Number of days to look back (default 7)
             profile: OCI profile name
             region: OCI region override
 
@@ -935,7 +975,7 @@ def register_opsi_tools(mcp: FastMCP) -> None:
             ADDM findings with impact analysis
         """
         return await _summarize_addm_findings_logic(
-            compartment_id, database_id, include_subtree, finding_type, limit, profile, region
+            compartment_id, database_id, include_subtree, finding_type, limit, days_back, profile, region
         )
 
     @mcp.tool()
@@ -945,6 +985,7 @@ def register_opsi_tools(mcp: FastMCP) -> None:
         finding_id: str | None = None,
         include_subtree: bool = True,
         limit: int = 20,
+        days_back: int = 7,
         profile: str | None = None,
         region: str | None = None,
     ) -> str:
@@ -958,6 +999,7 @@ def register_opsi_tools(mcp: FastMCP) -> None:
             finding_id: Filter by specific finding
             include_subtree: Include sub-compartments (default True)
             limit: Maximum recommendations to return (default 20)
+            days_back: Number of days to look back (default 7)
             profile: OCI profile name
             region: OCI region override
 
@@ -965,7 +1007,7 @@ def register_opsi_tools(mcp: FastMCP) -> None:
             ADDM recommendations with benefit analysis
         """
         return await _summarize_addm_recommendations_logic(
-            compartment_id, database_id, finding_id, include_subtree, limit, profile, region
+            compartment_id, database_id, finding_id, include_subtree, limit, days_back, profile, region
         )
 
     @mcp.tool()
@@ -1049,3 +1091,129 @@ def register_opsi_tools(mcp: FastMCP) -> None:
         return await _list_awr_hubs_logic(
             compartment_id, include_subtree, limit, profile, region
         )
+
+    # Alias tools for backward compatibility with agent expectations
+    @mcp.tool()
+    async def oci_opsi_search_databases(
+        name_pattern: str | None = None,
+        database_type: str | None = None,
+        compartment_id: str | None = None,
+        include_subtree: bool = True,
+        status: str | None = None,
+        limit: int = 20,
+        profile: str | None = None,
+        region: str | None = None,
+    ) -> str:
+        """Search for databases registered with Operations Insights.
+
+        This is an alias for oci_opsi_list_database_insights with name filtering.
+        Use this to find databases by name pattern, type, or status.
+
+        Args:
+            name_pattern: Optional pattern to filter database names (case-insensitive substring match)
+            database_type: Filter by type (ADW-D, ADW-S, ATP-D, ATP-S, EXTERNAL-PDB, etc.)
+            compartment_id: Filter by compartment (defaults to tenancy)
+            include_subtree: Include sub-compartments (default True)
+            status: Filter by status (ENABLED, DISABLED)
+            limit: Maximum databases to return (default 20)
+            profile: OCI profile name
+            region: OCI region override
+
+        Returns:
+            List of matching databases with OPSI insights
+        """
+        # Get full list and filter by name pattern
+        result = await _list_database_insights_logic(
+            compartment_id, include_subtree, database_type, status, limit * 2, profile, region
+        )
+
+        # Parse and filter by name pattern if provided
+        import json
+        data = json.loads(result)
+        if name_pattern and "insights" in data:
+            pattern_lower = name_pattern.lower()
+            filtered = [
+                db for db in data["insights"]
+                if pattern_lower in (db.get("database_name") or "").lower()
+                or pattern_lower in (db.get("database_display_name") or "").lower()
+            ]
+            data["insights"] = filtered[:limit]
+            data["insight_count"] = len(data["insights"])
+            data["distilled_summary"] = _compute_insights_summary(data["insights"])
+            return json.dumps(data)
+
+        return result
+
+    @mcp.tool()
+    async def oci_opsi_get_fleet_summary(
+        compartment_id: str | None = None,
+        include_subtree: bool = True,
+        profile: str | None = None,
+        region: str | None = None,
+    ) -> str:
+        """Get a summary overview of the database fleet monitored by Operations Insights.
+
+        Provides counts, health status, and resource utilization summary across all
+        databases in the compartment.
+
+        Args:
+            compartment_id: Filter by compartment (defaults to tenancy)
+            include_subtree: Include sub-compartments (default True)
+            profile: OCI profile name
+            region: OCI region override
+
+        Returns:
+            Fleet summary with database counts, health status, and resource stats
+        """
+        import json
+
+        # Get database insights for count and health
+        insights_result = await _list_database_insights_logic(
+            compartment_id, include_subtree, None, None, 100, profile, region
+        )
+        insights_data = json.loads(insights_result)
+
+        # Get resource stats for CPU and storage
+        cpu_result = await _summarize_database_resource_statistics_logic(
+            compartment_id, "CPU", include_subtree, 90, profile, region
+        )
+        cpu_data = json.loads(cpu_result)
+
+        storage_result = await _summarize_database_resource_statistics_logic(
+            compartment_id, "STORAGE", include_subtree, 90, profile, region
+        )
+        storage_data = json.loads(storage_result)
+
+        # Build fleet summary
+        insights = insights_data.get("insights", [])
+        total_count = len(insights)
+        enabled_count = sum(1 for i in insights if i.get("status") == "ENABLED")
+        disabled_count = total_count - enabled_count
+
+        by_type = {}
+        for i in insights:
+            db_type = i.get("database_type", "unknown")
+            by_type[db_type] = by_type.get(db_type, 0) + 1
+
+        # Health status
+        health = "healthy" if disabled_count == 0 and total_count > 0 else "degraded" if disabled_count > 0 else "unknown"
+
+        return json.dumps({
+            "type": "fleet_summary",
+            "compartment_id": insights_data.get("compartment_id"),
+            "summary": f"{total_count} databases in fleet: {enabled_count} enabled, {disabled_count} disabled",
+            "health_status": health,
+            "total_databases": total_count,
+            "enabled_databases": enabled_count,
+            "disabled_databases": disabled_count,
+            "databases_by_type": by_type,
+            "cpu_resource_summary": {
+                "databases_analyzed": cpu_data.get("database_count", 0),
+                "percentile": cpu_data.get("percentile", 90),
+            },
+            "storage_resource_summary": {
+                "databases_analyzed": storage_data.get("database_count", 0),
+                "percentile": storage_data.get("percentile", 90),
+            },
+            "next_action": "Check disabled databases" if disabled_count > 0 else "Fleet is healthy",
+        })

@@ -52,19 +52,22 @@ async def _list_compartments_logic(
             span.set_attribute("compartment_count", len(compartments))
 
             if format == "json":
-                return json.dumps(
-                    [
-                        {
-                            "name": c.name,
-                            "id": c.id,
-                            "description": c.description,
-                            "lifecycle_state": c.lifecycle_state,
-                            "parent_id": c.compartment_id,
-                        }
-                        for c in compartments
-                    ],
-                    indent=2,
-                )
+                # Return typed JSON for ResponseParser to format properly
+                compartment_list = [
+                    {
+                        "name": c.name,
+                        "id": c.id,
+                        "description": c.description,
+                        "lifecycle_state": c.lifecycle_state,
+                        "parent_id": c.compartment_id,
+                    }
+                    for c in compartments
+                ]
+                return json.dumps({
+                    "type": "compartments",
+                    "count": len(compartment_list),
+                    "compartments": compartment_list,
+                })
 
             # Markdown table for LLM efficiency
             lines = [

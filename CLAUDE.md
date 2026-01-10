@@ -13,9 +13,21 @@ poetry run python -m src.main     # Start (Slack + API on port 3001)
 
 ## Project Summary
 
-Python LangGraph orchestration for OCI operations. 6 agents, 4 MCP servers (395+ tools), 35+ workflows.
+Python LangGraph orchestration for OCI operations. 7 agents, 5 MCP servers (395+ tools), 40+ workflows.
 
 **Status**: Phase 4 - Production Readiness (Teams, OKE deployment)
+
+## Agents Overview
+
+| Agent | Module | Domain | Key Capabilities |
+|-------|--------|--------|------------------|
+| `DbTroubleshootAgent` | `database/troubleshoot.py` | Database | AWR, ASH, blocking, wait events, SQL tuning |
+| `LogAnalyticsAgent` | `log_analytics/agent.py` | Observability | Log queries, pattern detection, anomaly correlation |
+| `SecurityThreatAgent` | `security/agent.py` | Security | Cloud Guard, MITRE mapping, compliance |
+| `FinOpsAgent` | `finops/agent.py` | Cost | Cost analysis, anomaly detection, optimization |
+| `InfrastructureAgent` | `infrastructure/agent.py` | Compute/Network | Instance management, VCN, subnets |
+| `ErrorAnalysisAgent` | `error_analysis/agent.py` | Debugging | Error classification, root cause analysis |
+| `SelectAIAgent` | `selectai/agent.py` | Data/AI | NL2SQL, data chat, AI orchestration |
 
 ## DB Troubleshooting Workflow
 
@@ -39,7 +51,7 @@ See `docs/DB_TROUBLESHOOTING_WORKFLOW.md` for full mapping.
 Slack/API → Coordinator (LangGraph) → Agents → MCP Servers → OCI
 ```
 
-**Agents**: DB Troubleshoot, Log Analytics, Security, FinOps, Infrastructure, Error Analysis
+**Agents** (7): DB Troubleshoot, Log Analytics, Security, FinOps, Infrastructure, Error Analysis, SelectAI
 
 ## Key Conventions
 
@@ -93,10 +105,37 @@ REDIS_URL=redis://localhost:6379
 
 | Server | Tools | Domains | Primary Use |
 |--------|-------|---------|-------------|
-| `oci-unified` | 51 | identity, compute, network, database, dbmgmt, opsi | Core OCI + DB Mgmt |
+| `oci-unified` | 77 | identity, compute, network, database, dbmgmt, opsi, logan | Core OCI + DB Mgmt + Log Analytics |
 | `database-observatory` | 50+ | database, opsi, logan, observability | SQLcl/Logan queries |
 | `oci-infrastructure` | 44 | compute, network, security, database | Full OCI SDK |
 | `finopsai` | 33 | cost, budget, finops, anomaly | FinOps analysis |
+| `oci-mcp-security` | 60+ | security, cloud-guard, waf, kms, bastion, datasafe | Comprehensive security |
+
+**Environment Variables for External MCP Servers**:
+```bash
+DB_OBSERVATORY_PATH=/path/to/mcp-oci-database-observatory
+OCI_INFRASTRUCTURE_PATH=/path/to/mcp-oci
+FINOPSAI_PATH=/path/to/finopsai-mcp
+OCI_SECURITY_PATH=/path/to/oci-mcp-security
+```
+
+## Observability
+
+OpenTelemetry integration with OCI APM for full tracing:
+
+```python
+from src.observability import init_observability, get_tracer, OracleCodeAssistInstrumentor
+
+# Initialize on startup
+init_observability(agent_name="coordinator")
+
+# Instrument LLM calls with GenAI semantic conventions
+with OracleCodeAssistInstrumentor.chat_span(model="oca/gpt5") as llm_ctx:
+    llm_ctx.set_prompt(content, role="user")
+    llm_ctx.set_tokens(input=100, output=50)
+```
+
+**Key Tracers**: `oci-coordinator`, `mcp-oci-unified`, `mcp-oci-logan`, `oca-llm`
 
 ## Reference
 
@@ -105,3 +144,4 @@ For detailed documentation, read Serena memories or see:
 - `docs/ARCHITECTURE.md` - Full architecture
 - `docs/FEATURE_MAPPING.md` - Tool mapping
 - `docs/DB_TROUBLESHOOTING_WORKFLOW.md` - DB workflow mapping
+- `docs/agents.md` - Agent implementation guide
