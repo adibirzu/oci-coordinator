@@ -19,12 +19,58 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import re
+
 import structlog
 import yaml
 
 from src.mcp.client import MCPServerConfig, TransportType
 
 logger = structlog.get_logger(__name__)
+
+
+def expand_bash_vars(value: str) -> str:
+    """Expand bash-style environment variables with default values.
+
+    Handles the following patterns:
+    - $VAR or ${VAR} - standard variable expansion
+    - ${VAR:-default} - use default if VAR is unset or empty
+    - ${VAR-default} - use default if VAR is unset (but not if empty)
+
+    Args:
+        value: String potentially containing bash variable references
+
+    Returns:
+        String with all variables expanded
+    """
+    if not value or "$" not in value:
+        return value
+
+    # Pattern for ${VAR:-default} or ${VAR-default}
+    pattern = r"\$\{([^}:]+)(:-?)?([^}]*)?\}"
+
+    def replace_var(match: re.Match) -> str:
+        var_name = match.group(1)
+        operator = match.group(2)  # :- or - or None
+        default = match.group(3) or ""
+
+        env_value = os.environ.get(var_name)
+
+        if operator == ":-":
+            # Use default if unset or empty
+            return env_value if env_value else default
+        elif operator == "-":
+            # Use default only if unset
+            return env_value if env_value is not None else default
+        else:
+            # No default, just expand
+            return env_value or ""
+
+    # First expand ${VAR:-default} patterns
+    result = re.sub(pattern, replace_var, value)
+
+    # Then use standard expandvars for remaining $VAR patterns
+    return os.path.expandvars(result)
 
 
 @dataclass
@@ -48,18 +94,18 @@ class ServerConfigEntry:
 
     def to_mcp_config(self) -> MCPServerConfig:
         """Convert to MCPServerConfig for use with MCP client."""
-        # Expand environment variables and ~ in paths
+        # Expand environment variables (including bash-style ${VAR:-default}) and ~ in paths
         env = {}
         for key, value in self.env.items():
-            env[key] = os.path.expandvars(os.path.expanduser(value))
+            env[key] = expand_bash_vars(os.path.expanduser(value))
 
         command = self.command
         if command:
-            command = os.path.expandvars(os.path.expanduser(command))
+            command = expand_bash_vars(os.path.expanduser(command))
 
         working_dir = self.working_dir
         if working_dir:
-            working_dir = os.path.expandvars(os.path.expanduser(working_dir))
+            working_dir = expand_bash_vars(os.path.expanduser(working_dir))
 
         return MCPServerConfig(
             server_id=self.server_id,

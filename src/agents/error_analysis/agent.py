@@ -46,7 +46,7 @@ if TYPE_CHECKING:
     from src.memory.manager import SharedMemoryManager
 
 logger = structlog.get_logger(__name__)
-tracer = trace.get_tracer(__name__)
+tracer = trace.get_tracer("oci-error-analysis-agent")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

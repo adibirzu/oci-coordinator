@@ -981,11 +981,84 @@ def _parse_tnsnames(tns_admin: str) -> list[str]:
     return aliases
 
 
-async def _list_database_connections_logic() -> str:
+async def _get_database_name_for_connection(
+    connection_name: str,
+    sqlcl_path: str,
+    sqlcl_tns_admin: str,
+    sqlcl_username: str,
+    sqlcl_password: str,
+    timeout_seconds: int = 10,
+) -> str | None:
+    """Query the database name for a SQLcl connection.
+
+    Executes SELECT NAME FROM V$DATABASE to get the actual database name.
+
+    Args:
+        connection_name: TNS alias to connect to
+        sqlcl_path: Path to SQLcl executable
+        sqlcl_tns_admin: TNS_ADMIN directory path
+        sqlcl_username: Database username
+        sqlcl_password: Database password
+        timeout_seconds: Query timeout (default 10s for quick check)
+
+    Returns:
+        Database name or None if query fails
+    """
+    import os
+    import subprocess
+
+    if not sqlcl_password:
+        return None
+
+    try:
+        sqlcl_path_expanded = os.path.expanduser(sqlcl_path)
+        tns_admin_expanded = os.path.expanduser(sqlcl_tns_admin)
+
+        # Quick query to get database name
+        sql_script = """
+SET PAGESIZE 0
+SET LINESIZE 200
+SET FEEDBACK OFF
+SET HEADING OFF
+SELECT NAME FROM V$DATABASE;
+EXIT;
+"""
+        conn_string = f"{sqlcl_username}/{sqlcl_password}@{connection_name}"
+        env = os.environ.copy()
+        env["TNS_ADMIN"] = tns_admin_expanded
+
+        result = await asyncio.to_thread(
+            subprocess.run,
+            [sqlcl_path_expanded, "-S", conn_string],
+            input=sql_script,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            env=env,
+        )
+
+        if result.returncode == 0 and result.stdout.strip():
+            # Extract database name from output (handle leading/trailing whitespace)
+            lines = [line.strip() for line in result.stdout.strip().split('\n') if line.strip()]
+            if lines:
+                db_name = lines[0]
+                if db_name and not db_name.startswith(('ORA-', 'SP2-', 'Error', 'WARNING')):
+                    return db_name
+
+    except Exception:
+        pass  # Silently fail - database name is optional
+
+    return None
+
+
+async def _list_database_connections_logic(include_db_names: bool = True) -> str:
     """Internal logic for listing available database connections.
 
     Checks environment variables for ATP wallet-based connections,
     SQLcl CLI availability, and parses tnsnames.ora for all available aliases.
+
+    Args:
+        include_db_names: If True, query each connection for its database name
     """
     import os
 
@@ -1000,6 +1073,7 @@ async def _list_database_connections_logic() -> str:
     sqlcl_default_connection = os.environ.get("SQLCL_DB_CONNECTION")
     sqlcl_fallback_connection = os.environ.get("SQLCL_FALLBACK_CONNECTION")
     sqlcl_username = os.environ.get("SQLCL_DB_USERNAME", "ADMIN")
+    sqlcl_password = os.environ.get("SQLCL_DB_PASSWORD")
 
     # Parse tnsnames.ora from SQLcl wallet if available
     sqlcl_aliases = []
@@ -1058,6 +1132,50 @@ async def _list_database_connections_logic() -> str:
                 "status": "configured" if wallet_exists else "wallet_not_found",
                 "description": "ATP connection via wallet (oracledb)",
             })
+
+    # Query database names for available connections (in parallel for speed)
+    if include_db_names and sqlcl_exists and sqlcl_tns_admin and sqlcl_password:
+        # Get connections that can be queried (sqlcl_tns type with available status)
+        queryable_connections = [
+            c for c in connections
+            if c.get("type") == "sqlcl_tns" and c.get("status") == "available"
+        ]
+
+        if queryable_connections:
+            # Create tasks for parallel execution
+            async def get_db_name_for_conn(conn: dict) -> tuple[str, str | None]:
+                conn_name = conn.get("tns_alias") or conn.get("name")
+                db_name = await _get_database_name_for_connection(
+                    connection_name=conn_name,
+                    sqlcl_path=sqlcl_path,
+                    sqlcl_tns_admin=sqlcl_tns_admin,
+                    sqlcl_username=sqlcl_username,
+                    sqlcl_password=sqlcl_password,
+                    timeout_seconds=10,
+                )
+                return (conn_name, db_name)
+
+            # Execute all queries in parallel
+            try:
+                results = await asyncio.gather(
+                    *[get_db_name_for_conn(c) for c in queryable_connections],
+                    return_exceptions=True,
+                )
+
+                # Build a map of connection name -> database name
+                db_name_map = {}
+                for result in results:
+                    if isinstance(result, tuple) and result[1]:
+                        db_name_map[result[0]] = result[1]
+
+                # Update connections with database names
+                for conn in connections:
+                    conn_name = conn.get("tns_alias") or conn.get("name")
+                    if conn_name in db_name_map:
+                        conn["database_name"] = db_name_map[conn_name]
+
+            except Exception:
+                pass  # Don't fail if db name queries fail
 
     # Default connection preference
     default_connection = None

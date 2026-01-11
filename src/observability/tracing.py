@@ -47,8 +47,11 @@ SERVICE_NAMES = {
     "security-threat-agent": "oci-security-threat-agent",
     "finops-agent": "oci-finops-agent",
     "infrastructure-agent": "oci-infrastructure-agent",
+    "error-analysis-agent": "oci-error-analysis-agent",
     "mcp-executor": "oci-mcp-executor",
     "slack-handler": "oci-slack-handler",
+    "streamlit-chat": "oci-streamlit-chat",
+    "database-observatory": "oci-database-observatory",  # External MCP server
 }
 
 # Global state

@@ -117,7 +117,7 @@ def get_llm_config(channel_type: str | None = None) -> dict:
         # Oracle Code Assist - uses shared token cache from ~/.oca/token.json
         # Authentication is handled externally via oca-langchain-client OAuth flow
         config["provider"] = "oca"
-        config["model_name"] = _env_with_channel("OCA_MODEL", channel_type) or "oca/gpt-4.1"
+        config["model_name"] = _env_with_channel("OCA_MODEL", channel_type) or "oca/gpt5"
         config["temperature"] = float(_env_with_channel("LLM_TEMPERATURE", channel_type) or "0.7")
         config["max_tokens"] = int(_env_with_channel("LLM_MAX_TOKENS", channel_type) or "4096")
 
@@ -250,7 +250,7 @@ async def get_llm_with_auto_fallback(
                 config["base_url"] = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
                 config["model_name"] = os.getenv("OLLAMA_MODEL", "llama3.1")
             elif provider == "oca":
-                config["model_name"] = os.getenv("OCA_MODEL", "oca/gpt-4.1")
+                config["model_name"] = os.getenv("OCA_MODEL", "oca/gpt5")
             elif provider == "anthropic":
                 config["api_key"] = os.getenv("ANTHROPIC_API_KEY")
                 config["model_name"] = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-20250514")
@@ -273,7 +273,7 @@ def get_llm(channel_type: str | None = None) -> BaseChatModel:
 
     Environment Variables:
         LLM_PROVIDER: Provider name (oca, anthropic, openai, lm_studio, ollama, oci_genai)
-        OCA_MODEL: Oracle Code Assist model (e.g., oca/gpt-4.1)
+        OCA_MODEL: Oracle Code Assist model (e.g., oca/gpt5)
         ANTHROPIC_API_KEY: API key for Anthropic
         OPENAI_API_KEY: API key for OpenAI
         LM_STUDIO_BASE_URL: LM Studio API endpoint (default: http://localhost:1234/v1)

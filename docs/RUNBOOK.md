@@ -4,7 +4,7 @@
 
 This runbook provides operational procedures for the OCI AI Agent Coordinator, covering common issues, diagnostics, and recovery procedures.
 
-**Last Updated**: 2026-01-01
+**Last Updated**: 2026-01-11
 
 ---
 
@@ -109,6 +109,63 @@ export FINOPS_COORDINATOR_ENDPOINT=http://localhost:3001
 poetry run python -c "import asyncio; from finopsai_mcp.coordinator import register_with_coordinator; print(asyncio.run(register_with_coordinator(force=True)))"
 ```
 Note: The current FinOps registration stores metadata locally; a coordinator HTTP callback is a future integration.
+
+### 1.5 SQLcl Database Connectivity
+
+**Environment Variables Required** (`.env.local`):
+```bash
+SQLCL_PATH=/Applications/sqlcl/bin/sql
+SQLCL_TNS_ADMIN=~/oci_wallets_unified
+SQLCL_DB_USERNAME=ADMIN
+SQLCL_DB_PASSWORD="<password>"
+SQLCL_DB_CONNECTION=th_high
+SQLCL_FALLBACK_CONNECTION=ATPAdi
+```
+
+**Symptoms:**
+- "No database connection available" errors
+- SQL execution timeouts
+- Empty connection list from `oci_database_list_connections`
+
+**Diagnosis:**
+```bash
+# List available connections
+poetry run python -c "
+import asyncio
+from src.mcp.server.tools.database import _list_database_connections_logic
+result = asyncio.run(_list_database_connections_logic())
+print(result)
+"
+
+# Test SQL execution
+poetry run python -c "
+import asyncio
+from src.mcp.server.tools.database import _execute_sql_logic
+result = asyncio.run(_execute_sql_logic(
+    sql='SELECT NAME FROM V\$DATABASE',
+    connection_name='th_high',
+    timeout_seconds=30
+))
+print(result)
+"
+```
+
+**Available Connections** (after unified wallet setup):
+| Connection | Database | Status |
+|------------|----------|--------|
+| `th_high` | FCEK9UA6 | Default |
+| `th_medium` | FCEK9UA6 | Available |
+| `th_low` | FCEK9UA6 | Available |
+| `ATPAdi_high` | FCECIC39 | Available |
+| `ATPAdi` | FCECIC39 | Available |
+| `SelectAI_high` | FCECIC39 | Available |
+| `SelectAI` | FCECIC39 | Available |
+
+**Recovery:**
+1. Verify wallet files exist: `ls ~/oci_wallets_unified/`
+2. Verify tnsnames.ora has entries: `cat ~/oci_wallets_unified/tnsnames.ora`
+3. Export environment variables: `set -a && source .env.local && set +a`
+4. Test SQLcl directly: `$SQLCL_PATH -L ADMIN/<password>@th_high`
 
 ---
 

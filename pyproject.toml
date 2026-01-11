@@ -75,6 +75,7 @@ neo4j = ">=5.0.0"
 # Channel Integrations
 slack-sdk = ">=3.26.0"
 slack-bolt = ">=1.18.0"
+streamlit = ">=1.30.0"
 # botbuilder-core = ">=4.14.0"  # Optional: Microsoft Teams
 fastmcp = "^2.14.1"
 

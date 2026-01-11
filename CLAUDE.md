@@ -101,6 +101,21 @@ USE_LANGGRAPH_COORDINATOR=true
 REDIS_URL=redis://localhost:6379
 ```
 
+## SQLcl Database Connectivity
+
+Direct SQL execution via SQLcl requires wallet configuration:
+
+```bash
+SQLCL_PATH=/Applications/sqlcl/bin/sql
+SQLCL_TNS_ADMIN=~/oci_wallets_unified  # Unified wallet with all connections
+SQLCL_DB_USERNAME=ADMIN
+SQLCL_DB_PASSWORD="<password>"
+SQLCL_DB_CONNECTION=th_high            # Default connection
+SQLCL_FALLBACK_CONNECTION=ATPAdi       # Fallback if default fails
+```
+
+**Available Connections**: `th_high`, `th_medium`, `th_low`, `ATPAdi_high`, `ATPAdi`, `SelectAI_high`, `SelectAI`
+
 ## MCP Servers
 
 | Server | Tools | Domains | Primary Use |

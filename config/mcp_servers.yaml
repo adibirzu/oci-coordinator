@@ -57,20 +57,30 @@ servers:
   # Set DB_OBSERVATORY_PATH environment variable or replace path below
   database-observatory:
     transport: stdio
-    command: python
+    command: node
     args:
-      - "-m"
-      - "src.mcp_server"
+      - "dist/index.js"
     working_dir: ${DB_OBSERVATORY_PATH:-/path/to/mcp-oci-database-observatory}
     env:
       OCI_CONFIG_FILE: "~/.oci/config"
       OCI_CLI_PROFILE: "DEFAULT"
-      # SQLcl configuration - uses values from .env.local
+      # Force stdio transport (override database-observatory's .env.local which may set HTTP)
+      MCP_TRANSPORT: "stdio"
+      # SQLcl configuration - unified wallet with all connections
       SQLCL_PATH: ${SQLCL_PATH:-/Applications/sqlcl/bin/sql}
-      SQLCL_TNS_ADMIN: ${SQLCL_TNS_ADMIN:-~/Downloads/Wallet_th}
+      SQLCL_TNS_ADMIN: ${SQLCL_TNS_ADMIN:-~/oci_wallets_unified}
       SQLCL_DB_USERNAME: ${SQLCL_DB_USERNAME:-ADMIN}
       SQLCL_DB_CONNECTION: ${SQLCL_DB_CONNECTION:-th_high}
+      SQLCL_FALLBACK_CONNECTION: ${SQLCL_FALLBACK_CONNECTION:-ATPAdi_high}
+      # OCI APM / OpenTelemetry configuration - pass through from parent environment
       MCP_OTEL_SDK_DISABLED: "false"  # Enable OTEL for observability
+      OTEL_SERVICE_NAME: "oci-database-observatory"
+      OCI_APM_ENDPOINT: ${OCI_APM_ENDPOINT:-}
+      OCI_APM_PRIVATE_DATA_KEY: ${OCI_APM_PRIVATE_DATA_KEY:-}
+      OCI_APM_PUBLIC_DATA_KEY: ${OCI_APM_PUBLIC_DATA_KEY:-}
+      OCI_APM_DATA_UPLOAD_ENDPOINT: ${OCI_APM_DATA_UPLOAD_ENDPOINT:-}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      OTEL_EXPORTER_OTLP_HEADERS: ${OTEL_EXPORTER_OTLP_HEADERS:-}
     enabled: true
     domains:
       - database
@@ -96,7 +106,7 @@ servers:
       ALLOW_MUTATIONS: "false"  # Set to "true" to enable write operations
       MCP_SERVER_ID: "oci-infrastructure"
       MCP_OTEL_SDK_DISABLED: "false"  # Enable OTEL for observability
-    enabled: true
+    enabled: false  # Disabled - requires clone of https://github.com/adibirzu/mcp-oci
     domains:
       - compute
       - network
@@ -121,7 +131,7 @@ servers:
       OCI_CLI_PROFILE: "DEFAULT"
       PYTHONPATH: "src"
       MCP_OTEL_SDK_DISABLED: "false"  # Enable OTEL for observability
-    enabled: true
+    enabled: false  # Disabled - requires clone of oci-mcp-security repo
     domains:
       - security
       - cloudguard
@@ -171,7 +181,7 @@ servers:
       OCI_CLI_PROFILE: "DEFAULT"
       PYTHONPATH: "src"
       MCP_OTEL_SDK_DISABLED: "false"  # Enable OTEL for observability
-    enabled: true
+    enabled: false  # Disabled - requires clone of https://github.com/adibirzu/finopsai-mcp
     domains:
       - cost
       - budget

@@ -17,7 +17,7 @@ Usage:
 
     # Record LLM usage (called after each LLM call)
     publisher.record_llm_usage(
-        model="oca/gpt-4.1",
+        model="oca/gpt5",
         operation="chat",
         input_tokens=150,
         output_tokens=250,
@@ -40,7 +40,7 @@ Metrics Published:
     - llm_cost_estimate_usd: Estimated cost in USD
 
 Dimensions (for filtering/grouping):
-    - model: LLM model identifier (e.g., "oca/gpt-4.1")
+    - model: LLM model identifier (e.g., "oca/gpt5")
     - operation: Operation type (chat, completion, embedding)
     - agent: Agent name (coordinator, db-troubleshoot, etc.)
     - system: LLM provider (oracle_code_assist, anthropic, openai)
@@ -94,8 +94,8 @@ class LLMMetricsPublisher:
 
     # Token cost estimates per 1K tokens (approximate)
     TOKEN_COSTS = {
-        "oca/gpt-4.1": {"input": 0.001, "output": 0.002},
-        "oca/gpt-4.1": {"input": 0.001, "output": 0.002},
+        "oca/gpt5": {"input": 0.001, "output": 0.002},
+        "oca/gpt5": {"input": 0.001, "output": 0.002},
         "claude-sonnet-4-20250514": {"input": 0.003, "output": 0.015},
         "claude-3-opus": {"input": 0.015, "output": 0.075},
         "gpt-4-turbo": {"input": 0.01, "output": 0.03},
@@ -204,7 +204,7 @@ class LLMMetricsPublisher:
         """Record LLM usage for metric publishing.
 
         Args:
-            model: LLM model identifier (e.g., "oca/gpt-4.1")
+            model: LLM model identifier (e.g., "oca/gpt5")
             operation: Operation type (chat, completion, embedding, classification)
             input_tokens: Number of input tokens
             output_tokens: Number of output tokens

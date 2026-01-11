@@ -634,20 +634,69 @@ class ResponseParser:
         connections = data.get("connections", [])
         count = data.get("count", len(connections))
         message = data.get("message")
+        default_connection = data.get("default_connection")
+        tns_admin = data.get("tns_admin")
+
+        # Build subtitle with default connection info
+        subtitle_parts = []
+        if count:
+            subtitle_parts.append(f"{count} connection(s) available")
+        else:
+            subtitle_parts.append(message or "No connections")
+        if default_connection:
+            subtitle_parts.append(f"Default: {default_connection}")
 
         response = StructuredResponse(
             header=ResponseHeader(
                 title="Database Connections",
                 icon="🔗",
-                subtitle=f"{count} connection(s) found" if count else message or "No connections",
+                subtitle=" | ".join(subtitle_parts),
                 agent_name=agent_name,
                 severity=Severity.INFO,
             ),
         )
 
         if connections:
-            table = self._list_to_table(connections, title="Connections")
+            # Check if any connections have database names
+            has_db_names = any(conn.get("database_name") for conn in connections)
+
+            if has_db_names:
+                # Create table with database name column
+                table = TableData(
+                    title="Connections",
+                    headers=["Name", "Database", "Connection Type", "Status", "Default"],
+                    rows=[
+                        TableRow(cells=[
+                            conn.get("name", "N/A"),
+                            conn.get("database_name", "-"),
+                            conn.get("connection_type", "N/A"),
+                            conn.get("status", "N/A"),
+                            "✓" if conn.get("is_default") else ("fallback" if conn.get("is_fallback") else "-"),
+                        ])
+                        for conn in connections
+                    ],
+                )
+            else:
+                # Create table without database name column
+                table = TableData(
+                    title="Connections",
+                    headers=["Name", "Connection Type", "Status", "User", "Default"],
+                    rows=[
+                        TableRow(cells=[
+                            conn.get("name", "N/A"),
+                            conn.get("connection_type", "N/A"),
+                            conn.get("status", "N/A"),
+                            conn.get("user", "-"),
+                            "✓" if conn.get("is_default") else ("fallback" if conn.get("is_fallback") else "-"),
+                        ])
+                        for conn in connections
+                    ],
+                )
             response.add_section(table=table)
+
+            # Add TNS admin path if available
+            if tns_admin:
+                response.add_section(content=f"_TNS Admin: {tns_admin}_")
         elif message:
             response.add_section(content=message)
 

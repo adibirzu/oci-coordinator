@@ -1,11 +1,55 @@
 # Database Troubleshooting Workflow Mapping
 
-**Version**: 1.0
-**Last Updated**: 2026-01-08
+**Version**: 1.1
+**Last Updated**: 2026-01-11
 
 ## Overview
 
 This document maps the end-to-end database troubleshooting workflow to available MCP tools, agents, and workflows in the OCI AI Agent Coordinator system.
+
+---
+
+## SQLcl Database Connections
+
+### Available Connections
+
+The following databases are configured for direct SQL execution via SQLcl:
+
+| Connection Name | Database ID | Type | Description |
+|----------------|-------------|------|-------------|
+| `th_high` | FCEK9UA6 | ADB-S | Default connection - high performance tier |
+| `th_medium` | FCEK9UA6 | ADB-S | Medium performance tier |
+| `th_low` | FCEK9UA6 | ADB-S | Low performance tier |
+| `ATPAdi_high` | FCECIC39 | ATP | Autonomous Transaction Processing - high |
+| `ATPAdi_medium` | FCECIC39 | ATP | Autonomous Transaction Processing - medium |
+| `ATPAdi_low` | FCECIC39 | ATP | Autonomous Transaction Processing - low |
+| `SelectAI_high` | FCECIC39 | ATP | SelectAI alias (same as ATPAdi) |
+| `SelectAI` | FCECIC39 | ATP | SelectAI alias (same as ATPAdi) |
+| `ATPAdi` | FCECIC39 | ATP | Direct alias for SQL Developer compatibility |
+
+### Configuration
+
+**Environment Variables** (`.env.local`):
+```bash
+SQLCL_PATH=/Applications/sqlcl/bin/sql
+SQLCL_TNS_ADMIN=~/oci_wallets_unified
+SQLCL_DB_USERNAME=ADMIN
+SQLCL_DB_PASSWORD="<password>"
+SQLCL_DB_CONNECTION=th_high
+SQLCL_FALLBACK_CONNECTION=ATPAdi
+```
+
+**Unified Wallet Location**: `~/oci_wallets_unified/`
+- Contains combined TNS entries from multiple OCI wallet downloads
+- Supports all SQL Developer connection names as TNS aliases
+
+### MCP Server Routing
+
+| Tool Type | MCP Server | Use Case |
+|-----------|------------|----------|
+| Direct SQL (`oci_database_execute_sql`) | database-observatory | Real-time v$ queries |
+| DB Management APIs (`oci_dbmgmt_*`) | oci-unified | AWR, wait events, fleet health |
+| OPSI APIs (`oci_opsi_*`) | oci-unified | Resource stats, ADDM findings |
 
 ---
 
@@ -206,13 +250,13 @@ This document maps the end-to-end database troubleshooting workflow to available
 
 | Step | Tool Available | Workflow Exists | Intent Mapped | Test Status |
 |------|---------------|-----------------|---------------|-------------|
-| Blocking Sessions | ✅ | ✅ | ✅ | ⚠️ Pending |
-| CPU/Wait Analysis | ✅ | ✅ | ✅ | ⚠️ Pending |
-| SQL Monitoring | ✅ | ✅ | ✅ | ⚠️ Pending |
-| Long Running Ops | ✅ | ✅ | ✅ | ⚠️ Pending |
-| Parallelism Check | ✅ | ✅ | ✅ | ⚠️ Pending |
-| Full Table Scan | ✅ | ✅ | ✅ | ⚠️ Pending |
-| AWR Report | ✅ | ✅ | ✅ | ⚠️ Pending |
+| Blocking Sessions | ✅ | ✅ | ✅ | ✅ Passed |
+| CPU/Wait Analysis | ✅ | ✅ | ✅ | ✅ Passed |
+| SQL Monitoring | ✅ | ✅ | ✅ | ✅ Passed |
+| Long Running Ops | ✅ | ✅ | ✅ | ✅ Passed |
+| Parallelism Check | ✅ | ✅ | ✅ | ✅ Passed |
+| Full Table Scan | ✅ | ✅ | ✅ | ✅ Passed |
+| AWR Report | ✅ | ✅ | ✅ | ✅ Passed |
 | Report Generation | ✅ | ✅ | ✅ | ✅ Passed |
 
 ---

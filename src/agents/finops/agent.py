@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 from langgraph.graph import END, StateGraph
+from opentelemetry import trace
 
 from src.agents.base import (
     AgentDefinition,
@@ -30,6 +31,7 @@ if TYPE_CHECKING:
     from src.memory.manager import SharedMemoryManager
 
 logger = structlog.get_logger(__name__)
+tracer = trace.get_tracer("oci-finops-agent")
 
 
 @dataclass
@@ -1112,16 +1114,20 @@ Keep your response concise (3-4 bullet points max). Focus on actionable insights
 
     async def invoke(self, query: str, context: dict[str, Any] | None = None) -> str:
         """Execute FinOps analysis workflow."""
-        context = context or {}
-        metadata = context.get("metadata", {}) if isinstance(context, dict) else {}
+        with tracer.start_as_current_span("finops.invoke") as span:
+            context = context or {}
+            metadata = context.get("metadata", {}) if isinstance(context, dict) else {}
 
-        graph = self.build_graph()
-        initial_state = FinOpsState(
-            query=query,
-            compartment_id=context.get("compartment_id"),
-            service_filter=context.get("service_filter"),
-            oci_profile=metadata.get("oci_profile"),
-        )
+            span.set_attribute("query", query[:200] if query else "")
+            span.set_attribute("compartment_id", context.get("compartment_id", ""))
 
-        result = await graph.ainvoke(initial_state)
-        return result.get("result", "No cost data available.")
+            graph = self.build_graph()
+            initial_state = FinOpsState(
+                query=query,
+                compartment_id=context.get("compartment_id"),
+                service_filter=context.get("service_filter"),
+                oci_profile=metadata.get("oci_profile"),
+            )
+
+            result = await graph.ainvoke(initial_state)
+            return result.get("result", "No cost data available.")

@@ -372,29 +372,83 @@ def _format_database_connections(raw_result: str) -> str:
         data = json.loads(raw_result)
 
         if isinstance(data, dict):
-            connections_str = data.get("connections", "")
-            success = data.get("success", True)
+            # Check if this is the new rich format from MCP tool
+            connections_raw = data.get("connections", [])
+            default_connection = data.get("default_connection")
+            sqlcl_available = data.get("sqlcl_available", False)
+            tns_admin = data.get("tns_admin")
 
-            if not success:
-                return json.dumps({
-                    "type": "database_connections",
-                    "error": "Failed to list connections",
-                    "count": 0,
-                    "connections": [],
-                })
+            # Handle both list of dicts (new format) and comma-separated string (legacy)
+            if isinstance(connections_raw, list) and connections_raw:
+                # Check if it's list of dicts (rich format) or list of strings
+                if isinstance(connections_raw[0], dict):
+                    # Rich format from MCP tool - use all available data
+                    connections = []
+                    for conn in connections_raw:
+                        name = conn.get("name", "unknown")
+                        conn_type = conn.get("type", "")
+                        status = conn.get("status", "unknown")
+                        description = conn.get("description", "")
+                        is_default = conn.get("is_default", False)
+                        is_fallback = conn.get("is_fallback", False)
+                        user = conn.get("user", "")
+                        tns_alias = conn.get("tns_alias", name)
+                        database_name = conn.get("database_name", "")
 
-            # Parse comma-separated connection names
-            if isinstance(connections_str, str) and connections_str:
-                connection_names = [c.strip() for c in connections_str.split(",") if c.strip()]
-            elif isinstance(connections_str, list):
-                # Handle list of strings or list of dicts
-                connection_names = [
-                    _safe_str_value(c) if isinstance(c, dict) else str(c)
-                    for c in connections_str
-                ]
+                        # Determine display connection type
+                        if conn_type == "sqlcl_tns":
+                            connection_type = _detect_connection_type(name)
+                        elif conn_type == "oracledb_wallet":
+                            connection_type = "Autonomous Transaction Process"
+                        elif conn_type == "sqlcl_cli":
+                            connection_type = "SQLcl CLI"
+                        else:
+                            connection_type = _detect_connection_type(name)
+
+                        # Build connection entry with all useful info
+                        entry = {
+                            "name": name,
+                            "connection_type": connection_type,
+                            "status": status,
+                        }
+
+                        # Add database name if available (from V$DATABASE query)
+                        if database_name:
+                            entry["database_name"] = database_name
+
+                        # Add optional fields if present
+                        if user:
+                            entry["user"] = user
+                        if is_default:
+                            entry["is_default"] = True
+                        if is_fallback:
+                            entry["is_fallback"] = True
+
+                        connections.append(entry)
+
+                    result = {
+                        "type": "database_connections",
+                        "count": len([c for c in connections if c.get("status") in ("available", "configured")]),
+                        "connections": connections,
+                    }
+
+                    if default_connection:
+                        result["default_connection"] = default_connection
+                    if tns_admin:
+                        result["tns_admin"] = tns_admin
+
+                    return json.dumps(result)
+
+                else:
+                    # List of strings - convert to dicts
+                    connection_names = [str(c) for c in connections_raw if c]
+            elif isinstance(connections_raw, str) and connections_raw:
+                # Legacy comma-separated string
+                connection_names = [c.strip() for c in connections_raw.split(",") if c.strip()]
             else:
                 connection_names = []
 
+            # Handle legacy/simple format
             if not connection_names:
                 return json.dumps({
                     "type": "database_connections",
@@ -403,10 +457,9 @@ def _format_database_connections(raw_result: str) -> str:
                     "message": "No database connections configured",
                 })
 
-            # Build structured connection list
+            # Build structured connection list from names only
             connections = []
             for name in connection_names:
-                # Ensure name is a string (handle any remaining dict values)
                 name_str = _safe_str_value(name) if isinstance(name, dict) else str(name)
                 connections.append({
                     "name": name_str,
@@ -2278,23 +2331,24 @@ async def list_databases_workflow(
                 logger.info("list_databases: using root compartment as default")
 
         # ── Extract Profiles ──────────────────────────────────────────────────
-        # Extract profiles from entities or metadata (supports multi-tenancy: EMDEMO, Default, etc.)
-        # Priority: entities.profiles > entities.oci_profile > metadata.oci_profile
+        # Extract profiles from entities only (profiles explicitly mentioned in query text)
+        # For "list databases", we want comprehensive results across ALL profiles by default
+        # Only limit to specific profile if user explicitly mentions it in query
+        # Priority: entities.profiles > entities.oci_profile > query ALL configured profiles
         profiles_to_query: list[str] = []
 
-        # Check entities first (extracted from query text)
+        # Check entities first (extracted from query text - user explicitly mentioned profile)
         if entities.get("profiles"):
             profiles_to_query = entities["profiles"]
             logger.info(f"list_databases: found profiles {profiles_to_query} from query")
         elif entities.get("oci_profile"):
             profiles_to_query = [entities["oci_profile"]]
             logger.info(f"list_databases: using profile '{profiles_to_query[0]}' from entities")
-        # Fall back to metadata (user's active profile)
-        elif metadata and metadata.get("oci_profile"):
-            profiles_to_query = [metadata["oci_profile"]]
-            logger.info(f"list_databases: using profile '{profiles_to_query[0]}' from metadata")
+        # NOTE: We intentionally don't use metadata.oci_profile here because for listing
+        # databases, users want to see ALL their databases, not just the current profile's.
+        # The metadata profile is used for other workflows where profile context matters.
 
-        # If no profiles specified, query both DEFAULT and EMDEMO for comprehensive results
+        # If no profiles explicitly requested, query ALL configured profiles for comprehensive results
         # This ensures multi-tenancy users see all their databases
         if not profiles_to_query:
             import os
@@ -3089,6 +3143,7 @@ async def db_fleet_health_workflow(
     entities: dict[str, Any],
     tool_catalog: ToolCatalog,
     memory: SharedMemoryManager,
+    metadata: dict[str, Any] | None = None,
 ) -> str:
     """
     Get fleet-wide database health summary.
@@ -3100,12 +3155,17 @@ async def db_fleet_health_workflow(
     """
     try:
         compartment_id = entities.get("compartment_id")
+        # Extract profile from entities or fall back to metadata (Slack passes profile via metadata)
+        profile = entities.get("oci_profile") or (metadata.get("oci_profile") if metadata else None)
+
         if not compartment_id:
-            compartment_id = _get_root_compartment()
+            # Get profile-specific compartment for DB Management
+            dbmgmt_compartment, _ = _get_profile_compartment(profile, "dbmgmt")
+            compartment_id = dbmgmt_compartment or _get_root_compartment()
 
         result = await tool_catalog.execute(
             "oci_dbmgmt_get_fleet_health",
-            {"compartment_id": compartment_id, "include_subtree": True},
+            {"compartment_id": compartment_id, "include_subtree": True, "profile": profile},
         )
         return _extract_result(result)
 
@@ -3119,6 +3179,7 @@ async def db_top_sql_workflow(
     entities: dict[str, Any],
     tool_catalog: ToolCatalog,
     memory: SharedMemoryManager,
+    metadata: dict[str, Any] | None = None,
 ) -> str:
     """
     Get top SQL statements by CPU activity for a database.
@@ -3130,6 +3191,9 @@ async def db_top_sql_workflow(
                      sql_performance, sql_cpu_usage
     """
     try:
+        # Extract profile from entities or fall back to metadata (Slack passes profile via metadata)
+        profile = entities.get("oci_profile") or (metadata.get("oci_profile") if metadata else None)
+
         # First try direct ID, then resolve from name
         managed_database_id = entities.get("managed_database_id") or entities.get("database_id")
 
@@ -3138,7 +3202,7 @@ async def db_top_sql_workflow(
             if db_name:
                 logger.info("Resolving database name for top SQL", name=db_name)
                 managed_database_id = await _resolve_managed_database(
-                    db_name, tool_catalog, entities.get("compartment_id")
+                    db_name, tool_catalog, entities.get("compartment_id"), profile=profile
                 )
 
         if not managed_database_id:
@@ -3157,6 +3221,7 @@ async def db_top_sql_workflow(
                 "managed_database_id": managed_database_id,
                 "hours_back": hours_back,
                 "limit": limit,
+                "profile": profile,
             },
         )
         return _extract_result(result)
@@ -3171,6 +3236,7 @@ async def db_wait_events_workflow(
     entities: dict[str, Any],
     tool_catalog: ToolCatalog,
     memory: SharedMemoryManager,
+    metadata: dict[str, Any] | None = None,
 ) -> str:
     """
     Get top wait events from AWR data for a database.
@@ -3182,6 +3248,9 @@ async def db_wait_events_workflow(
                      database_waits, performance_bottlenecks
     """
     try:
+        # Extract profile from entities or fall back to metadata (Slack passes profile via metadata)
+        profile = entities.get("oci_profile") or (metadata.get("oci_profile") if metadata else None)
+
         # First try direct ID, then resolve from name
         managed_database_id = entities.get("managed_database_id") or entities.get("database_id")
 
@@ -3190,7 +3259,7 @@ async def db_wait_events_workflow(
             if db_name:
                 logger.info("Resolving database name for wait events", name=db_name)
                 managed_database_id = await _resolve_managed_database(
-                    db_name, tool_catalog, entities.get("compartment_id")
+                    db_name, tool_catalog, entities.get("compartment_id"), profile=profile
                 )
 
         if not managed_database_id:
@@ -3209,6 +3278,7 @@ async def db_wait_events_workflow(
                 "managed_database_id": managed_database_id,
                 "hours_back": hours_back,
                 "top_n": top_n,
+                "profile": profile,
             },
         )
         return _extract_result(result)
@@ -3223,6 +3293,7 @@ async def db_awr_report_workflow(
     entities: dict[str, Any],
     tool_catalog: ToolCatalog,
     memory: SharedMemoryManager,
+    metadata: dict[str, Any] | None = None,
 ) -> str:
     """
     Generate AWR or ASH report for a managed database.
@@ -3234,6 +3305,9 @@ async def db_awr_report_workflow(
                      db_performance_report, database_report
     """
     try:
+        # Extract profile from entities or fall back to metadata (Slack passes profile via metadata)
+        profile = entities.get("oci_profile") or (metadata.get("oci_profile") if metadata else None)
+
         # First try direct ID, then resolve from name
         managed_database_id = entities.get("managed_database_id") or entities.get("database_id")
 
@@ -3243,7 +3317,7 @@ async def db_awr_report_workflow(
             if db_name:
                 logger.info("Resolving database name to ID", name=db_name)
                 managed_database_id = await _resolve_managed_database(
-                    db_name, tool_catalog, entities.get("compartment_id")
+                    db_name, tool_catalog, entities.get("compartment_id"), profile=profile
                 )
 
         if not managed_database_id:
@@ -3275,6 +3349,7 @@ async def db_awr_report_workflow(
                 "hours_back": hours_back,
                 "report_type": report_type,
                 "report_format": report_format,
+                "profile": profile,
             },
         )
         return _extract_result(result)
@@ -3289,6 +3364,7 @@ async def db_sql_plan_baselines_workflow(
     entities: dict[str, Any],
     tool_catalog: ToolCatalog,
     memory: SharedMemoryManager,
+    metadata: dict[str, Any] | None = None,
 ) -> str:
     """
     List SQL Plan Baselines for a database.
@@ -3299,9 +3375,21 @@ async def db_sql_plan_baselines_workflow(
                      plan_stability, sql_plans
     """
     try:
+        # Extract profile from entities or fall back to metadata (Slack passes profile via metadata)
+        profile = entities.get("oci_profile") or (metadata.get("oci_profile") if metadata else None)
+
         managed_database_id = entities.get("managed_database_id") or entities.get("database_id")
+
+        # Try to resolve from database name if ID not provided
         if not managed_database_id:
-            return "Error: Please provide a managed_database_id or database_id to list SQL Plan Baselines."
+            db_name = entities.get("database_name")
+            if db_name:
+                managed_database_id = await _resolve_managed_database(
+                    db_name, tool_catalog, entities.get("compartment_id"), profile=profile
+                )
+
+        if not managed_database_id:
+            return "Error: Please provide a managed_database_id, database_id, or database_name to list SQL Plan Baselines."
 
         limit = entities.get("limit", 50)
 
@@ -3310,6 +3398,7 @@ async def db_sql_plan_baselines_workflow(
             {
                 "managed_database_id": managed_database_id,
                 "limit": limit,
+                "profile": profile,
             },
         )
         return _extract_result(result)
@@ -3324,6 +3413,7 @@ async def db_managed_databases_workflow(
     entities: dict[str, Any],
     tool_catalog: ToolCatalog,
     memory: SharedMemoryManager,
+    metadata: dict[str, Any] | None = None,
 ) -> str:
     """
     List managed databases in Database Management service.
@@ -3334,9 +3424,14 @@ async def db_managed_databases_workflow(
                      db_management_list, registered_databases
     """
     try:
+        # Extract profile from entities or fall back to metadata (Slack passes profile via metadata)
+        profile = entities.get("oci_profile") or (metadata.get("oci_profile") if metadata else None)
+
         compartment_id = entities.get("compartment_id")
         if not compartment_id:
-            compartment_id = _get_root_compartment()
+            # Get profile-specific compartment for DB Management
+            dbmgmt_compartment, _ = _get_profile_compartment(profile, "dbmgmt")
+            compartment_id = dbmgmt_compartment or _get_root_compartment()
 
         database_type = entities.get("database_type")  # EXTERNAL_SIDB, EXTERNAL_RAC, etc.
         deployment_type = entities.get("deployment_type")  # ONPREMISE, BM, etc.
@@ -3344,6 +3439,7 @@ async def db_managed_databases_workflow(
         params = {
             "compartment_id": compartment_id,
             "include_subtree": True,
+            "profile": profile,
         }
         if database_type:
             params["database_type"] = database_type
@@ -3449,6 +3545,7 @@ async def db_sql_monitoring_workflow(
     entities: dict[str, Any],
     tool_catalog: ToolCatalog,
     memory: SharedMemoryManager,
+    metadata: dict[str, Any] | None = None,
 ) -> str:
     """
     Get SQL Monitoring Report for active or recent SQL statements.
@@ -3461,7 +3558,8 @@ async def db_sql_monitoring_workflow(
     """
     try:
         database_name = entities.get("connection_name") or entities.get("database_name")
-        profile = entities.get("oci_profile")
+        # Extract profile from entities or fall back to metadata (Slack passes profile via metadata)
+        profile = entities.get("oci_profile") or (metadata.get("oci_profile") if metadata else None)
 
         # First, try to find the managed database OCID
         managed_db_id = None
@@ -3528,6 +3626,7 @@ async def db_long_running_ops_workflow(
     entities: dict[str, Any],
     tool_catalog: ToolCatalog,
     memory: SharedMemoryManager,
+    metadata: dict[str, Any] | None = None,
 ) -> str:
     """
     Check long-running operations from v$session_longops.
@@ -3583,6 +3682,7 @@ async def db_parallelism_stats_workflow(
     entities: dict[str, Any],
     tool_catalog: ToolCatalog,
     memory: SharedMemoryManager,
+    metadata: dict[str, Any] | None = None,
 ) -> str:
     """
     Compare requested vs actual parallelism degree for SQL statements.
@@ -3595,7 +3695,8 @@ async def db_parallelism_stats_workflow(
     """
     try:
         database_name = entities.get("connection_name") or entities.get("database_name")
-        profile = entities.get("oci_profile")
+        # Extract profile from entities or fall back to metadata (Slack passes profile via metadata)
+        profile = entities.get("oci_profile") or (metadata.get("oci_profile") if metadata else None)
 
         # Try OPSI SQL statistics for parallel query analysis
         logger.info("Using OPSI for parallelism analysis", database=database_name)
@@ -3668,6 +3769,7 @@ async def db_full_table_scan_workflow(
     entities: dict[str, Any],
     tool_catalog: ToolCatalog,
     memory: SharedMemoryManager,
+    metadata: dict[str, Any] | None = None,
 ) -> str:
     """
     Detect full table scans on large tables.
@@ -3742,6 +3844,7 @@ async def db_blocking_sessions_workflow(
     entities: dict[str, Any],
     tool_catalog: ToolCatalog,
     memory: SharedMemoryManager,
+    metadata: dict[str, Any] | None = None,
 ) -> str:
     """
     Check for blocking sessions / lock contention in the database.
@@ -3754,7 +3857,10 @@ async def db_blocking_sessions_workflow(
     """
     try:
         database_name = entities.get("connection_name") or entities.get("database_name")
-        profile = _auto_select_db_profile(entities.get("oci_profile"))
+        # Extract profile from entities or fall back to metadata (Slack passes profile via metadata)
+        profile = _auto_select_db_profile(
+            entities.get("oci_profile") or (metadata.get("oci_profile") if metadata else None)
+        )
 
         # First, try to find the managed database OCID
         managed_db_id = None
@@ -4185,6 +4291,7 @@ async def db_performance_overview_workflow(
     entities: dict[str, Any],
     tool_catalog: ToolCatalog,
     memory: SharedMemoryManager,
+    metadata: dict[str, Any] | None = None,
 ) -> str:
     """
     Get comprehensive database performance overview.
@@ -4206,7 +4313,12 @@ async def db_performance_overview_workflow(
 
     try:
         # Extract profile - supports multi-tenancy (EMDEMO, DEFAULT, etc.)
-        profile = entities.get("profile") or entities.get("oci_profile")
+        # Priority: entities.profile > entities.oci_profile > metadata.oci_profile
+        profile = (
+            entities.get("profile")
+            or entities.get("oci_profile")
+            or (metadata.get("oci_profile") if metadata else None)
+        )
         compartment_id = entities.get("compartment_id")
 
         # Auto-select best profile for DB operations if none specified

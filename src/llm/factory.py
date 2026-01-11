@@ -74,7 +74,7 @@ class LLMFactory:
                     "OCA not authenticated - requests will fail until login"
                 )
             llm = ChatOCA(
-                model=config.get("model_name", "oca/gpt-4.1"),
+                model=config.get("model_name", "oca/gpt5"),
                 temperature=config.get("temperature", 0.7),
                 max_tokens=config.get("max_tokens", 4096),
             )
