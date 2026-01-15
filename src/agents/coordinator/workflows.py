@@ -5464,6 +5464,280 @@ async def selectai_generate_workflow(
         return f"Error executing SelectAI query: {e}"
 
 
+async def db_schema_tables_workflow(
+    query: str,
+    entities: dict[str, Any],
+    tool_catalog: ToolCatalog,
+    memory: SharedMemoryManager,
+) -> str:
+    """
+    List tables from a database schema via SQLcl connection.
+
+    Uses oci_database_get_schema (from database-observatory) to retrieve
+    tables, views, and other objects from a database schema accessible
+    via a SQLcl connection name.
+
+    This is different from SelectAI profile tables - this queries actual
+    database schema metadata using the Oracle data dictionary.
+
+    Matches intents: db_schema_tables, schema_tables, connection_tables,
+                     list_schema_objects, show_database_tables
+
+    Examples:
+        - "show me the tables from ATPAdi_high"
+        - "list tables on th_high"
+        - "what tables are in the ADMIN schema on ATPAdi"
+    """
+    try:
+        # Extract connection name and schema from entities or query
+        connection_name = (
+            entities.get("connection_name")
+            or entities.get("database_name")
+            or entities.get("profile_name")  # May be confused with SelectAI profile
+        )
+        schema_name = entities.get("schema_name", "")
+
+        if not connection_name:
+            # Try to extract connection name from query patterns
+            # Patterns: "from X", "on X", "in X connection", "connection X"
+            import re
+
+            # Look for known connection patterns (e.g., ATPAdi_high, th_high, SelectAI)
+            conn_patterns = [
+                r'(?:from|on|in|connection)\s+([a-zA-Z][a-zA-Z0-9_]*(?:_(?:high|medium|low|tp))?)',
+                r'([a-zA-Z][a-zA-Z0-9_]*(?:_(?:high|medium|low|tp)))\s+(?:database|connection|db)',
+            ]
+
+            for pattern in conn_patterns:
+                match = re.search(pattern, query, re.IGNORECASE)
+                if match:
+                    connection_name = match.group(1)
+                    break
+
+        if not connection_name:
+            # List available connections for user guidance
+            try:
+                connections_result = await tool_catalog.execute(
+                    "oci_database_list_connections",
+                    {},
+                )
+                conn_extracted = _extract_result(connections_result)
+
+                # Parse connections for helpful message
+                available_conns = []
+                try:
+                    conn_data = json.loads(conn_extracted)
+                    if isinstance(conn_data, dict):
+                        conns = conn_data.get("connections", [])
+                        if isinstance(conns, list):
+                            available_conns = [
+                                c.get("name", str(c)) if isinstance(c, dict) else str(c)
+                                for c in conns[:10]
+                            ]
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+                if available_conns:
+                    conn_list = ", ".join(f"`{c}`" for c in available_conns)
+                    return (
+                        f"Please specify a connection name. Available connections: {conn_list}\n\n"
+                        f"Example: 'show tables from ATPAdi_high'"
+                    )
+            except Exception:
+                pass
+
+            return (
+                "Please specify a database connection name.\n\n"
+                "Example: 'show tables from ATPAdi_high' or 'list tables on th_high'"
+            )
+
+        # Extract schema name if not provided
+        if not schema_name:
+            # Try to extract from query (e.g., "in ADMIN schema", "schema HR")
+            import re
+            schema_match = re.search(
+                r'(?:schema|in)\s+([A-Z][A-Z0-9_$#]*)',
+                query, re.IGNORECASE
+            )
+            if schema_match:
+                schema_name = schema_match.group(1).upper()
+            else:
+                # Default to common schema or use connected user's schema
+                # Most autonomous databases use ADMIN
+                schema_name = "ADMIN"
+
+        logger.info(
+            "db_schema_tables workflow",
+            connection=connection_name,
+            schema=schema_name
+        )
+
+        # Use oci_database_get_schema to get tables
+        result = await tool_catalog.execute(
+            "oci_database_get_schema",
+            {
+                "schema": schema_name,
+                "connection": connection_name,
+                "object_types": "TABLES,VIEWS",
+                "include_columns": True,
+                "include_comments": True,
+            },
+        )
+
+        extracted = _extract_result(result)
+
+        if extracted and not extracted.startswith("Error"):
+            # Try to parse and format nicely
+            try:
+                data = json.loads(extracted)
+
+                # Handle the schema info response format
+                if isinstance(data, dict):
+                    tables = data.get("tables", [])
+                    views = data.get("views", [])
+                    error = data.get("error")
+
+                    if error:
+                        return f"Error querying schema on `{connection_name}`: {error}"
+
+                    lines = [
+                        f"**Database Schema: `{schema_name}` on `{connection_name}`**\n"
+                    ]
+
+                    if tables:
+                        lines.append(f"\n### Tables ({len(tables)})\n")
+                        for i, table in enumerate(tables, 1):
+                            if isinstance(table, dict):
+                                name = table.get("name", table.get("table_name", "unknown"))
+                                comment = table.get("comment", "")
+                                cols = table.get("columns", [])
+                                col_count = len(cols) if cols else ""
+                                col_info = f" ({col_count} columns)" if col_count else ""
+
+                                lines.append(f"{i}. `{name}`{col_info}")
+                                if comment:
+                                    lines.append(f"   - {comment}")
+                            else:
+                                lines.append(f"{i}. `{table}`")
+
+                    if views:
+                        lines.append(f"\n### Views ({len(views)})\n")
+                        for i, view in enumerate(views, 1):
+                            if isinstance(view, dict):
+                                name = view.get("name", view.get("view_name", "unknown"))
+                                lines.append(f"{i}. `{name}`")
+                            else:
+                                lines.append(f"{i}. `{view}`")
+
+                    if not tables and not views:
+                        lines.append(f"\nNo tables or views found in schema `{schema_name}`.")
+                        lines.append(
+                            "\nTip: Try a different schema name or check if "
+                            "the connection has access to this schema."
+                        )
+
+                    return "\n".join(lines)
+
+            except json.JSONDecodeError:
+                # Not JSON, return raw result formatted
+                pass
+
+            return (
+                f"**Tables in `{schema_name}` on `{connection_name}`**\n\n{extracted}"
+            )
+
+        return f"Error getting schema for `{connection_name}`: {extracted}"
+
+    except Exception as e:
+        logger.error("db_schema_tables workflow failed", error=str(e))
+        return f"Error listing database tables: {e}"
+
+
+async def db_execute_sql_workflow(
+    query: str,
+    entities: dict[str, Any],
+    tool_catalog: ToolCatalog,
+    memory: SharedMemoryManager,
+) -> str:
+    """
+    Execute a SQL query against a database via SQLcl connection.
+
+    Uses oci_database_execute_sql (from database-observatory) to run
+    arbitrary SQL queries against an Oracle database.
+
+    This enables direct SQL access similar to what the Cline MCP SQLcl
+    server provides.
+
+    Matches intents: execute_sql, run_sql, sql_query, database_query
+
+    Examples:
+        - "run SELECT * FROM employees on ATPAdi_high"
+        - "execute SQL: SELECT COUNT(*) FROM orders"
+    """
+    try:
+        # Extract SQL and connection from entities
+        sql_query = entities.get("sql") or entities.get("sql_query", "")
+        connection_name = (
+            entities.get("connection_name")
+            or entities.get("database_name")
+        )
+
+        if not sql_query:
+            # Try to extract SQL from the query itself
+            import re
+            # Look for SQL patterns after keywords like "run", "execute"
+            sql_match = re.search(
+                r'(?:run|execute|sql:?)\s*(SELECT\s+.+?)(?:\s+on\s+|\s*$)',
+                query, re.IGNORECASE | re.DOTALL
+            )
+            if sql_match:
+                sql_query = sql_match.group(1).strip()
+
+        if not sql_query:
+            return (
+                "Please provide a SQL query to execute.\n\n"
+                "Example: 'run SELECT * FROM employees FETCH FIRST 10 ROWS ONLY on ATPAdi_high'"
+            )
+
+        # Extract connection if not in entities
+        if not connection_name:
+            import re
+            conn_match = re.search(
+                r'(?:on|using|connection)\s+([a-zA-Z][a-zA-Z0-9_]*(?:_(?:high|medium|low|tp))?)',
+                query, re.IGNORECASE
+            )
+            if conn_match:
+                connection_name = conn_match.group(1)
+
+        logger.info(
+            "db_execute_sql workflow",
+            connection=connection_name,
+            sql_length=len(sql_query)
+        )
+
+        # Build parameters
+        params = {"sql": sql_query}
+        if connection_name:
+            params["connection"] = connection_name
+
+        result = await tool_catalog.execute(
+            "oci_database_execute_sql",
+            params,
+        )
+
+        extracted = _extract_result(result)
+
+        if extracted and not extracted.startswith("Error"):
+            conn_info = f" (on `{connection_name}`)" if connection_name else ""
+            return f"**SQL Results{conn_info}**\n\n{extracted}"
+
+        return f"Error executing SQL: {extracted}"
+
+    except Exception as e:
+        logger.error("db_execute_sql workflow failed", error=str(e))
+        return f"Error executing SQL query: {e}"
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Anomaly Detection Workflows (Logs/Metrics Correlation)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -6018,6 +6292,23 @@ WORKFLOW_REGISTRY: dict[str, Any] = {
     "ask_database": selectai_generate_workflow,
     "ask_selectai": selectai_generate_workflow,
     "selectai_generate": selectai_generate_workflow,
+
+    # SQLcl Direct - Schema Tables (via database-observatory)
+    # Different from SelectAI profile tables - queries actual Oracle data dictionary
+    "db_schema_tables": db_schema_tables_workflow,
+    "schema_tables": db_schema_tables_workflow,
+    "connection_tables": db_schema_tables_workflow,
+    "list_schema_objects": db_schema_tables_workflow,
+    "show_database_tables": db_schema_tables_workflow,
+    "sqlcl_tables": db_schema_tables_workflow,
+    "show_schema": db_schema_tables_workflow,
+
+    # SQLcl Direct - Execute SQL (via database-observatory)
+    "execute_sql": db_execute_sql_workflow,
+    "run_sql": db_execute_sql_workflow,
+    "sql_query": db_execute_sql_workflow,
+    "database_query": db_execute_sql_workflow,
+    "run_query": db_execute_sql_workflow,
 
     # Observability - Alarms and Monitoring
     "list_alarms": list_alarms_workflow,

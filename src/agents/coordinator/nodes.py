@@ -1077,32 +1077,82 @@ class CoordinatorNodes:
 
     def _pre_classify_selectai_query(self, query: str) -> IntentClassification | None:
         """
-        Pre-classify SelectAI-related queries.
+        Pre-classify SelectAI-related queries AND SQLcl connection table queries.
 
         This catches queries like:
-        - "show SQL tables on SelectAI" → list_tables
-        - "list tables on MY_PROFILE" → list_tables
-        - "what tables does SelectAI profile have" → list_tables
+        - "show SQL tables on SelectAI" → list_tables (SelectAI profile)
+        - "list tables on MY_PROFILE" → list_tables (SelectAI profile)
+        - "what tables does SelectAI profile have" → list_tables (SelectAI profile)
         - "ask SelectAI about sales" → selectai_query
 
-        Returns None if not a SelectAI query.
+        AND SQLcl connection-based queries (route to db_schema_tables):
+        - "show me tables from ATPAdi_high" → db_schema_tables
+        - "list tables on th_high" → db_schema_tables
+        - "what tables are in the database ATPAdi" → db_schema_tables
+
+        Returns None if not a database table or SelectAI query.
         """
         query_lower = query.lower()
+        import re
 
-        # SelectAI profile/table patterns
-        selectai_keywords = ["selectai", "select ai", "profile", "ai profile"]
+        # Common patterns
         table_keywords = ["table", "tables", "schema", "objects"]
         listing_keywords = ["show", "list", "get", "what", "display"]
 
-        has_selectai = any(kw in query_lower for kw in selectai_keywords)
         has_tables = any(kw in query_lower for kw in table_keywords)
         has_listing = any(kw in query_lower for kw in listing_keywords)
 
-        # Pattern 1: List tables on a profile (e.g., "show SQL tables on SelectAI")
-        if has_tables and (has_selectai or has_listing):
-            # Extract profile name
-            import re
-            entities: dict[str, Any] = {}
+        # ────────────────────────────────────────────────────────────────────
+        # First: Check for SQLcl connection patterns (NOT SelectAI profiles)
+        # Connection names typically have patterns like:
+        # - _high, _medium, _low, _tp (service levels)
+        # - ATP, ADW, ADB (autonomous database prefixes)
+        # ────────────────────────────────────────────────────────────────────
+
+        # SQLcl connection name patterns
+        connection_patterns = [
+            # Explicit service level suffixes
+            r'(?:from|on|in|connection)\s+([a-zA-Z][a-zA-Z0-9_]*_(?:high|medium|low|tp))',
+            # ATP/ADW/ADB prefixes
+            r'(?:from|on|in|connection|database)\s+((?:ATP|ADW|ADB)[a-zA-Z0-9_]*)',
+            # th_ prefix (common test/dev pattern)
+            r'(?:from|on|in|connection)\s+(th_[a-zA-Z0-9_]+)',
+        ]
+
+        for pattern in connection_patterns:
+            conn_match = re.search(pattern, query, re.IGNORECASE)
+            if conn_match and has_tables:
+                connection_name = conn_match.group(1)
+                entities: dict[str, Any] = {"connection_name": connection_name}
+
+                # Try to extract schema name
+                schema_match = re.search(
+                    r'(?:schema|in)\s+([A-Z][A-Z0-9_$#]*)',
+                    query, re.IGNORECASE
+                )
+                if schema_match:
+                    entities["schema_name"] = schema_match.group(1).upper()
+
+                return IntentClassification(
+                    intent="db_schema_tables",
+                    category=IntentCategory.QUERY,
+                    confidence=0.95,
+                    domains=["database"],
+                    entities=entities,
+                    suggested_workflow="db_schema_tables",
+                    suggested_agent=None,
+                )
+
+        # ────────────────────────────────────────────────────────────────────
+        # Second: Check for explicit SelectAI keywords
+        # ────────────────────────────────────────────────────────────────────
+
+        selectai_keywords = ["selectai", "select ai", "profile", "ai profile"]
+        has_selectai = any(kw in query_lower for kw in selectai_keywords)
+
+        # Pattern: List tables on a SelectAI profile (e.g., "show SQL tables on SelectAI")
+        if has_tables and has_selectai:
+            entities = {}
 
             # Try to extract profile name from patterns like "on ProfileName", "for ProfileName"
             profile_match = re.search(
@@ -1122,7 +1172,7 @@ class CoordinatorNodes:
                 suggested_agent=None,
             )
 
-        # Pattern 2: Ask SelectAI (natural language query)
+        # Pattern: Ask SelectAI (natural language query)
         ask_keywords = ["ask", "query", "tell me", "what is", "show me"]
         has_ask = any(kw in query_lower for kw in ask_keywords)
 
@@ -1136,6 +1186,31 @@ class CoordinatorNodes:
                 suggested_workflow="selectai_query",
                 suggested_agent=None,
             )
+
+        # ────────────────────────────────────────────────────────────────────
+        # Third: Generic table listing without connection/profile specified
+        # Route to db_schema_tables which will ask for a connection
+        # ────────────────────────────────────────────────────────────────────
+
+        if has_tables and has_listing:
+            # Check if there's any identifier after "from/on/in"
+            generic_conn_match = re.search(
+                r'(?:from|on|in)\s+([a-zA-Z][a-zA-Z0-9_]+)',
+                query, re.IGNORECASE
+            )
+            if generic_conn_match:
+                potential_conn = generic_conn_match.group(1)
+                # If it's not a SelectAI keyword, treat as connection name
+                if potential_conn.lower() not in ['selectai', 'profile', 'database', 'the', 'my']:
+                    return IntentClassification(
+                        intent="db_schema_tables",
+                        category=IntentCategory.QUERY,
+                        confidence=0.85,
+                        domains=["database"],
+                        entities={"connection_name": potential_conn},
+                        suggested_workflow="db_schema_tables",
+                        suggested_agent=None,
+                    )
 
         return None
 
