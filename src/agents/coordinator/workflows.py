@@ -6276,22 +6276,24 @@ WORKFLOW_REGISTRY: dict[str, Any] = {
     "comprehensive_db_status": db_performance_overview_workflow,
     "full_db_analysis": db_performance_overview_workflow,
 
-    # SelectAI - List Tables
-    "list_tables": selectai_list_tables_workflow,
-    "show_tables": selectai_list_tables_workflow,
-    "selectai_tables": selectai_list_tables_workflow,
-    "profile_tables": selectai_list_tables_workflow,
-    "database_tables": selectai_list_tables_workflow,
-    "get_tables": selectai_list_tables_workflow,
-    "tables_on": selectai_list_tables_workflow,
-
-    # SelectAI - Natural Language Query
-    "selectai_query": selectai_generate_workflow,
-    "nl_query": selectai_generate_workflow,
-    "natural_language_sql": selectai_generate_workflow,
-    "ask_database": selectai_generate_workflow,
-    "ask_selectai": selectai_generate_workflow,
-    "selectai_generate": selectai_generate_workflow,
+    # =========================================================================
+    # SelectAI - DISABLED (using DB Observatory + SQLcl instead)
+    # Uncomment these lines to re-enable SelectAI profile-based workflows
+    # =========================================================================
+    # "list_tables": selectai_list_tables_workflow,
+    # "show_tables": selectai_list_tables_workflow,
+    # "selectai_tables": selectai_list_tables_workflow,
+    # "profile_tables": selectai_list_tables_workflow,
+    # "database_tables": selectai_list_tables_workflow,
+    # "get_tables": selectai_list_tables_workflow,
+    # "tables_on": selectai_list_tables_workflow,
+    # "selectai_query": selectai_generate_workflow,
+    # "nl_query": selectai_generate_workflow,
+    # "natural_language_sql": selectai_generate_workflow,
+    # "ask_database": selectai_generate_workflow,
+    # "ask_selectai": selectai_generate_workflow,
+    # "selectai_generate": selectai_generate_workflow,
+    # =========================================================================
 
     # SQLcl Direct - Schema Tables (via database-observatory)
     # Different from SelectAI profile tables - queries actual Oracle data dictionary

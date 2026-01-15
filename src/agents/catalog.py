@@ -103,15 +103,20 @@ DOMAIN_CAPABILITIES = {
         "subnet-management",
         "instance-lifecycle",
     ],
-    "selectai": [
-        "nl2sql",
-        "data-chat",
-        "text-summarization",
-        "ai-agent-orchestration",
-        "database-qa",
-        "natural-language-query",
-        "report-generation",
-    ],
+    # =========================================================================
+    # SelectAI - DISABLED (using DB Observatory + SQLcl instead)
+    # Uncomment to re-enable SelectAI agent capabilities
+    # =========================================================================
+    # "selectai": [
+    #     "nl2sql",
+    #     "data-chat",
+    #     "text-summarization",
+    #     "ai-agent-orchestration",
+    #     "database-qa",
+    #     "natural-language-query",
+    #     "report-generation",
+    # ],
+    # =========================================================================
 }
 
 # MCP Server to domain mapping
@@ -160,13 +165,17 @@ MCP_SERVER_DOMAINS = {
         "logan",
         "tenancy",
     ],
-    # selectai: Natural language to SQL and AI agents
-    "selectai": [
-        "selectai",
-        "nl2sql",
-        "database",
-        "data-chat",
-    ],
+    # =========================================================================
+    # SelectAI MCP Server - DISABLED (using DB Observatory + SQLcl instead)
+    # Uncomment to re-enable SelectAI MCP server domain mapping
+    # =========================================================================
+    # "selectai": [
+    #     "selectai",
+    #     "nl2sql",
+    #     "database",
+    #     "data-chat",
+    # ],
+    # =========================================================================
     # Legacy server names for backward compatibility
     "oci-unified": ["discovery", "infrastructure", "observability", "security", "finops"],
     "oci-infrastructure": ["infrastructure", "observability", "database", "security", "finops"],
@@ -259,10 +268,15 @@ DOMAIN_PRIORITY = {
     "infrastructure": {
         "infrastructure-agent": 100,
     },
-    "selectai": {
-        "selectai-agent": 100,
-        "db-troubleshoot-agent": 20,
-    },
+    # =========================================================================
+    # SelectAI - DISABLED (using DB Observatory + SQLcl instead)
+    # Uncomment to re-enable SelectAI domain-to-agent mapping
+    # =========================================================================
+    # "selectai": {
+    #     "selectai-agent": 100,
+    #     "db-troubleshoot-agent": 20,
+    # },
+    # =========================================================================
 }
 
 

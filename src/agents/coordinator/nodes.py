@@ -1144,52 +1144,52 @@ class CoordinatorNodes:
                 )
 
         # ────────────────────────────────────────────────────────────────────
-        # Second: Check for explicit SelectAI keywords
+        # Second: SelectAI keywords - DISABLED, route to db_schema_tables
+        # Uncomment the block below to re-enable SelectAI profile routing
         # ────────────────────────────────────────────────────────────────────
 
-        selectai_keywords = ["selectai", "select ai", "profile", "ai profile"]
-        has_selectai = any(kw in query_lower for kw in selectai_keywords)
-
-        # Pattern: List tables on a SelectAI profile (e.g., "show SQL tables on SelectAI")
-        if has_tables and has_selectai:
-            entities = {}
-
-            # Try to extract profile name from patterns like "on ProfileName", "for ProfileName"
-            profile_match = re.search(
-                r'(?:on|for|profile)\s+([a-zA-Z][a-zA-Z0-9_]*)',
-                query, re.IGNORECASE
-            )
-            if profile_match:
-                entities["profile_name"] = profile_match.group(1)
-
-            return IntentClassification(
-                intent="list_tables",
-                category=IntentCategory.QUERY,
-                confidence=0.95,
-                domains=["database"],
-                entities=entities,
-                suggested_workflow="list_tables",
-                suggested_agent=None,
-            )
-
-        # Pattern: Ask SelectAI (natural language query)
-        ask_keywords = ["ask", "query", "tell me", "what is", "show me"]
-        has_ask = any(kw in query_lower for kw in ask_keywords)
-
-        if has_selectai and has_ask:
-            return IntentClassification(
-                intent="selectai_query",
-                category=IntentCategory.QUERY,
-                confidence=0.90,
-                domains=["database"],
-                entities={"user_query": query},
-                suggested_workflow="selectai_query",
-                suggested_agent=None,
-            )
+        # SelectAI is disabled - route all table queries to db_schema_tables
+        # which uses DB Observatory + SQLcl for direct database access
+        #
+        # selectai_keywords = ["selectai", "select ai", "profile", "ai profile"]
+        # has_selectai = any(kw in query_lower for kw in selectai_keywords)
+        #
+        # # Pattern: List tables on a SelectAI profile
+        # if has_tables and has_selectai:
+        #     entities = {}
+        #     profile_match = re.search(
+        #         r'(?:on|for|profile)\s+([a-zA-Z][a-zA-Z0-9_]*)',
+        #         query, re.IGNORECASE
+        #     )
+        #     if profile_match:
+        #         entities["profile_name"] = profile_match.group(1)
+        #     return IntentClassification(
+        #         intent="list_tables",
+        #         category=IntentCategory.QUERY,
+        #         confidence=0.95,
+        #         domains=["database"],
+        #         entities=entities,
+        #         suggested_workflow="list_tables",
+        #         suggested_agent=None,
+        #     )
+        #
+        # # Pattern: Ask SelectAI (natural language query)
+        # ask_keywords = ["ask", "query", "tell me", "what is", "show me"]
+        # has_ask = any(kw in query_lower for kw in ask_keywords)
+        #
+        # if has_selectai and has_ask:
+        #     return IntentClassification(
+        #         intent="selectai_query",
+        #         category=IntentCategory.QUERY,
+        #         confidence=0.90,
+        #         domains=["database"],
+        #         entities={"user_query": query},
+        #         suggested_workflow="selectai_query",
+        #         suggested_agent=None,
+        #     )
 
         # ────────────────────────────────────────────────────────────────────
-        # Third: Generic table listing without connection/profile specified
-        # Route to db_schema_tables which will ask for a connection
+        # Route all table listing queries to db_schema_tables (DB Observatory)
         # ────────────────────────────────────────────────────────────────────
 
         if has_tables and has_listing:
@@ -1200,8 +1200,9 @@ class CoordinatorNodes:
             )
             if generic_conn_match:
                 potential_conn = generic_conn_match.group(1)
-                # If it's not a SelectAI keyword, treat as connection name
-                if potential_conn.lower() not in ['selectai', 'profile', 'database', 'the', 'my']:
+                # Route to db_schema_tables for all connection names
+                # (including "selectai" and "profile" which are now treated as connection names)
+                if potential_conn.lower() not in ['database', 'the', 'my']:
                     return IntentClassification(
                         intent="db_schema_tables",
                         category=IntentCategory.QUERY,
