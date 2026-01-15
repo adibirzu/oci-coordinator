@@ -569,6 +569,11 @@ class ResponseParser:
         summary = data.get("summary", {}) or {}
         statistics = data.get("statistics", [])
 
+        # Helper to safely get count values (None -> 0)
+        def safe_count(key: str) -> int | str:
+            val = summary.get(key)
+            return val if val is not None else 0
+
         response = StructuredResponse(
             header=ResponseHeader(
                 title="Database Fleet Health",
@@ -578,31 +583,48 @@ class ResponseParser:
             ),
         )
 
+        # Check if we have any databases
+        db_count = safe_count("database_count")
+        has_databases = db_count and db_count > 0
+
         # Add health metrics
         metrics = [
-            MetricValue(label="Databases", value=summary.get("database_count", "N/A")),
+            MetricValue(label="Databases", value=db_count),
             MetricValue(
                 label="Healthy",
-                value=summary.get("healthy_count", "N/A"),
+                value=safe_count("healthy_count"),
                 severity=Severity.SUCCESS,
             ),
             MetricValue(
                 label="Warning",
-                value=summary.get("warning_count", "N/A"),
+                value=safe_count("warning_count"),
                 severity=Severity.MEDIUM,
             ),
             MetricValue(
                 label="Critical",
-                value=summary.get("critical_count", "N/A"),
+                value=safe_count("critical_count"),
                 severity=Severity.CRITICAL,
             ),
             MetricValue(
                 label="Unavailable",
-                value=summary.get("unavailable_count", "N/A"),
+                value=safe_count("unavailable_count"),
                 severity=Severity.HIGH,
             ),
         ]
         response.add_metrics("Health Status", metrics, divider_after=True)
+
+        # Add guidance if no databases found
+        if not has_databases:
+            response.add_section(
+                title="No Databases Found",
+                content=(
+                    "No databases are registered with the OCI Database Management Service.\n\n"
+                    "*To enable database monitoring:*\n"
+                    "1. Enable Database Management on your databases in OCI Console\n"
+                    "2. Ensure databases have the management agent installed\n"
+                    "3. Verify the compartment ID and region are correct"
+                ),
+            )
 
         # Add statistics table
         if statistics:

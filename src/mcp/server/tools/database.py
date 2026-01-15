@@ -765,12 +765,13 @@ async def _get_fleet_health_logic(
         )
 
         data = response.data
+        # Use 0 as default for count fields to avoid None in output
         fleet_summary = {
-            "database_count": getattr(data, "database_count", None),
-            "healthy_count": getattr(data, "healthy_count", None),
-            "warning_count": getattr(data, "warning_count", None),
-            "critical_count": getattr(data, "critical_count", None),
-            "unavailable_count": getattr(data, "unavailable_count", None),
+            "database_count": getattr(data, "database_count", None) or 0,
+            "healthy_count": getattr(data, "healthy_count", None) or 0,
+            "warning_count": getattr(data, "warning_count", None) or 0,
+            "critical_count": getattr(data, "critical_count", None) or 0,
+            "unavailable_count": getattr(data, "unavailable_count", None) or 0,
         }
 
         # Get fleet statistics
