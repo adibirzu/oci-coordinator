@@ -61,6 +61,21 @@ from src.observability.tracing import (
     shutdown_tracing,
     truncate,
 )
+from src.observability.visualizer import (
+    EXAMPLE_QUERIES,
+    GRAPH_EDGES,
+    GRAPH_NODES,
+    EdgeType,
+    ExecutionStep,
+    NodeStatus,
+    WorkflowEdge,
+    WorkflowNode,
+    WorkflowVisualization,
+    WorkflowVisualizer,
+    generate_execution_trace_diagram,
+    generate_mermaid_diagram,
+    get_visualization_data,
+)
 
 
 def init_observability(
@@ -130,4 +145,18 @@ __all__ = [
     "get_trace_context",
     "build_apm_link",
     "AGENT_LOG_IDS",
+    # Workflow Visualizer
+    "WorkflowVisualizer",
+    "WorkflowVisualization",
+    "WorkflowNode",
+    "WorkflowEdge",
+    "ExecutionStep",
+    "NodeStatus",
+    "EdgeType",
+    "generate_mermaid_diagram",
+    "generate_execution_trace_diagram",
+    "get_visualization_data",
+    "GRAPH_NODES",
+    "GRAPH_EDGES",
+    "EXAMPLE_QUERIES",
 ]

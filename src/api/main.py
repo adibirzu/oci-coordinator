@@ -108,6 +108,9 @@ class AppState:
         self.active_threads: dict[str, dict] = {}
         self._coordinator = None
         self._coordinator_lock = asyncio.Lock()
+        # Track active executions for visualization
+        self.active_executions: dict[str, dict] = {}
+        self.execution_subscribers: dict[str, list] = {}
 
     async def get_coordinator(self):
         """Get or create the coordinator (cached)."""
@@ -121,6 +124,29 @@ class AppState:
                     self._coordinator = await create_coordinator(llm=llm)
                     logger.info("Coordinator initialized for API")
         return self._coordinator
+
+    @property
+    def coordinator(self):
+        """Synchronous access to coordinator (may be None if not initialized)."""
+        return self._coordinator
+
+    def track_execution(self, execution_id: str, data: dict) -> None:
+        """Track an active execution for visualization."""
+        self.active_executions[execution_id] = {
+            **data,
+            "started_at": datetime.utcnow().isoformat(),
+        }
+
+    def update_execution(self, execution_id: str, data: dict) -> None:
+        """Update an active execution with new state."""
+        if execution_id in self.active_executions:
+            self.active_executions[execution_id].update(data)
+            self.active_executions[execution_id]["updated_at"] = datetime.utcnow().isoformat()
+
+    def complete_execution(self, execution_id: str) -> None:
+        """Mark an execution as complete and remove from active."""
+        if execution_id in self.active_executions:
+            del self.active_executions[execution_id]
 
 
 app_state = AppState()
@@ -1107,3 +1133,822 @@ async def get_statistics() -> dict[str, Any]:
         "active_threads": len(app_state.active_threads),
         "timestamp": datetime.utcnow().isoformat(),
     }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Workflow Visualizer Endpoints
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+@app.get("/visualizer", tags=["Observability"])
+async def get_workflow_visualizer() -> dict[str, Any]:
+    """
+    Get the LangGraph workflow visualization data.
+
+    Returns:
+        - nodes: List of workflow nodes with descriptions
+        - edges: List of edges with types (sequential, conditional, loop)
+        - mermaid_diagram: Mermaid flowchart syntax for rendering
+        - example_queries: Sample queries for each routing path
+    """
+    from src.observability.visualizer import get_visualization_data
+
+    try:
+        return get_visualization_data(
+            coordinator=app_state.coordinator,
+            include_examples=True,
+        )
+    except Exception as e:
+        logger.error("Visualizer data fetch failed", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e),
+        )
+
+
+@app.get("/visualizer/diagram", tags=["Observability"])
+async def get_workflow_diagram(
+    routing_type: str | None = None,
+    format: str = "mermaid",
+) -> dict[str, Any]:
+    """
+    Get the workflow diagram in various formats.
+
+    Args:
+        routing_type: Highlight a specific routing path (workflow, parallel, agent, escalate)
+        format: Output format (mermaid, svg, png - only mermaid supported currently)
+
+    Returns:
+        Mermaid diagram string and metadata
+    """
+    from src.observability.visualizer import generate_mermaid_diagram
+
+    try:
+        diagram = generate_mermaid_diagram(routing_type=routing_type)
+
+        return {
+            "format": format,
+            "diagram": diagram,
+            "routing_type": routing_type,
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+    except Exception as e:
+        logger.error("Diagram generation failed", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e),
+        )
+
+
+@app.get("/visualizer/examples", tags=["Observability"])
+async def get_example_queries() -> dict[str, Any]:
+    """
+    Get example queries for each routing path.
+
+    Returns categorized example queries that demonstrate:
+    - workflow: Deterministic workflow execution
+    - parallel: Multi-agent parallel execution
+    - agent: LLM-powered agent reasoning
+    - escalate: Human escalation scenarios
+    """
+    from src.observability.visualizer import EXAMPLE_QUERIES
+
+    return {
+        "examples": EXAMPLE_QUERIES,
+        "timestamp": datetime.utcnow().isoformat(),
+    }
+
+
+from fastapi.responses import HTMLResponse
+
+
+@app.get("/visualizer/widget", response_class=HTMLResponse, tags=["Observability"])
+async def get_visualizer_widget() -> HTMLResponse:
+    """
+    Serve the interactive LangGraph workflow visualizer widget.
+
+    Returns an HTML page with:
+    - Interactive Mermaid diagram of the workflow
+    - Real-time execution tracing (when available)
+    - Example query testing
+    - Agent selection visualization
+    """
+    html_content = '''<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OCI Coordinator - LangGraph Workflow Visualizer</title>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <style>
+        :root {
+            --primary: #4f46e5;
+            --primary-light: #818cf8;
+            --success: #22c55e;
+            --warning: #f59e0b;
+            --error: #ef4444;
+            --bg: #0f172a;
+            --bg-card: #1e293b;
+            --text: #f1f5f9;
+            --text-muted: #94a3b8;
+            --border: #334155;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            min-height: 100vh;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 2rem;
+        }
+
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 2rem;
+            padding-bottom: 1rem;
+            border-bottom: 1px solid var(--border);
+        }
+
+        h1 {
+            font-size: 1.75rem;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }
+
+        h1 .icon {
+            font-size: 2rem;
+        }
+
+        .status-badge {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.5rem 1rem;
+            background: var(--bg-card);
+            border-radius: 9999px;
+            font-size: 0.875rem;
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--success);
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: 1fr 400px;
+            gap: 1.5rem;
+        }
+
+        @media (max-width: 1024px) {
+            .grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .card {
+            background: var(--bg-card);
+            border-radius: 1rem;
+            border: 1px solid var(--border);
+            overflow: hidden;
+        }
+
+        .card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 1rem 1.5rem;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .card-title {
+            font-size: 1rem;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .card-body {
+            padding: 1.5rem;
+        }
+
+        .diagram-container {
+            background: #fff;
+            border-radius: 0.5rem;
+            padding: 1rem;
+            min-height: 400px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .mermaid {
+            width: 100%;
+        }
+
+        .tabs {
+            display: flex;
+            gap: 0.5rem;
+            margin-bottom: 1rem;
+        }
+
+        .tab {
+            padding: 0.5rem 1rem;
+            background: transparent;
+            border: 1px solid var(--border);
+            border-radius: 0.5rem;
+            color: var(--text-muted);
+            cursor: pointer;
+            transition: all 0.2s;
+            font-size: 0.875rem;
+        }
+
+        .tab:hover {
+            background: var(--border);
+            color: var(--text);
+        }
+
+        .tab.active {
+            background: var(--primary);
+            border-color: var(--primary);
+            color: white;
+        }
+
+        .example-list {
+            display: flex;
+            flex-direction: column;
+            gap: 0.75rem;
+        }
+
+        .example-item {
+            padding: 1rem;
+            background: var(--bg);
+            border-radius: 0.5rem;
+            cursor: pointer;
+            transition: all 0.2s;
+            border: 1px solid transparent;
+        }
+
+        .example-item:hover {
+            border-color: var(--primary);
+            transform: translateX(4px);
+        }
+
+        .example-query {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.875rem;
+            color: var(--primary-light);
+            margin-bottom: 0.5rem;
+        }
+
+        .example-description {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+        }
+
+        .example-badge {
+            display: inline-block;
+            padding: 0.125rem 0.5rem;
+            background: var(--primary);
+            border-radius: 9999px;
+            font-size: 0.625rem;
+            text-transform: uppercase;
+            margin-top: 0.5rem;
+        }
+
+        .node-list {
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+        }
+
+        .node-item {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            padding: 0.75rem;
+            background: var(--bg);
+            border-radius: 0.5rem;
+        }
+
+        .node-icon {
+            width: 32px;
+            height: 32px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: var(--primary);
+            border-radius: 0.5rem;
+            font-size: 1rem;
+        }
+
+        .node-info {
+            flex: 1;
+        }
+
+        .node-name {
+            font-weight: 500;
+            font-size: 0.875rem;
+        }
+
+        .node-desc {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+        }
+
+        .agent-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 0.75rem;
+        }
+
+        .agent-card {
+            padding: 1rem;
+            background: var(--bg);
+            border-radius: 0.5rem;
+            text-align: center;
+        }
+
+        .agent-icon {
+            font-size: 1.5rem;
+            margin-bottom: 0.5rem;
+        }
+
+        .agent-name {
+            font-size: 0.75rem;
+            font-weight: 500;
+        }
+
+        .agent-domain {
+            font-size: 0.625rem;
+            color: var(--text-muted);
+        }
+
+        .refresh-btn {
+            padding: 0.5rem 1rem;
+            background: var(--primary);
+            border: none;
+            border-radius: 0.5rem;
+            color: white;
+            cursor: pointer;
+            font-size: 0.875rem;
+            transition: background 0.2s;
+        }
+
+        .refresh-btn:hover {
+            background: var(--primary-light);
+        }
+
+        .loading {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 200px;
+            color: var(--text-muted);
+        }
+
+        .spinner {
+            width: 32px;
+            height: 32px;
+            border: 3px solid var(--border);
+            border-top-color: var(--primary);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-right: 0.75rem;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .legend {
+            display: flex;
+            gap: 1rem;
+            flex-wrap: wrap;
+            padding: 1rem;
+            background: var(--bg);
+            border-radius: 0.5rem;
+            margin-top: 1rem;
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-size: 0.75rem;
+        }
+
+        .legend-line {
+            width: 24px;
+            height: 2px;
+        }
+
+        .legend-line.sequential {
+            background: var(--text-muted);
+        }
+
+        .legend-line.conditional {
+            background: var(--primary);
+            background: linear-gradient(90deg, var(--primary) 50%, transparent 50%);
+            background-size: 8px 2px;
+        }
+
+        .legend-line.loop {
+            background: var(--warning);
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>
+                <span class="icon">🔄</span>
+                LangGraph Workflow Visualizer
+            </h1>
+            <div class="status-badge">
+                <div class="status-dot"></div>
+                <span>OCI Coordinator Active</span>
+            </div>
+        </header>
+
+        <div class="grid">
+            <!-- Main Diagram -->
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title">
+                        📊 Workflow Graph
+                    </span>
+                    <button class="refresh-btn" onclick="loadVisualization()">
+                        ↻ Refresh
+                    </button>
+                </div>
+                <div class="card-body">
+                    <div class="tabs">
+                        <button class="tab active" data-route="all" onclick="filterRoute('all')">All Paths</button>
+                        <button class="tab" data-route="workflow" onclick="filterRoute('workflow')">Workflow</button>
+                        <button class="tab" data-route="parallel" onclick="filterRoute('parallel')">Parallel</button>
+                        <button class="tab" data-route="agent" onclick="filterRoute('agent')">Agent</button>
+                    </div>
+                    <div id="diagram-container" class="diagram-container">
+                        <div class="loading">
+                            <div class="spinner"></div>
+                            Loading workflow diagram...
+                        </div>
+                    </div>
+                    <div class="legend">
+                        <div class="legend-item">
+                            <div class="legend-line sequential"></div>
+                            <span>Sequential</span>
+                        </div>
+                        <div class="legend-item">
+                            <div class="legend-line conditional"></div>
+                            <span>Conditional</span>
+                        </div>
+                        <div class="legend-item">
+                            <div class="legend-line loop"></div>
+                            <span>Loop</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Sidebar -->
+            <div style="display: flex; flex-direction: column; gap: 1.5rem;">
+                <!-- Nodes Reference -->
+                <div class="card">
+                    <div class="card-header">
+                        <span class="card-title">📋 Graph Nodes</span>
+                    </div>
+                    <div class="card-body">
+                        <div id="node-list" class="node-list">
+                            <!-- Populated by JS -->
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Agents -->
+                <div class="card">
+                    <div class="card-header">
+                        <span class="card-title">🤖 Available Agents</span>
+                    </div>
+                    <div class="card-body">
+                        <div class="agent-grid">
+                            <div class="agent-card">
+                                <div class="agent-icon">🗄️</div>
+                                <div class="agent-name">DbTroubleshoot</div>
+                                <div class="agent-domain">Database</div>
+                            </div>
+                            <div class="agent-card">
+                                <div class="agent-icon">📊</div>
+                                <div class="agent-name">LogAnalytics</div>
+                                <div class="agent-domain">Observability</div>
+                            </div>
+                            <div class="agent-card">
+                                <div class="agent-icon">🛡️</div>
+                                <div class="agent-name">SecurityThreat</div>
+                                <div class="agent-domain">Security</div>
+                            </div>
+                            <div class="agent-card">
+                                <div class="agent-icon">💰</div>
+                                <div class="agent-name">FinOps</div>
+                                <div class="agent-domain">Cost</div>
+                            </div>
+                            <div class="agent-card">
+                                <div class="agent-icon">🖥️</div>
+                                <div class="agent-name">Infrastructure</div>
+                                <div class="agent-domain">Compute</div>
+                            </div>
+                            <div class="agent-card">
+                                <div class="agent-icon">🔍</div>
+                                <div class="agent-name">ErrorAnalysis</div>
+                                <div class="agent-domain">Debugging</div>
+                            </div>
+                            <div class="agent-card">
+                                <div class="agent-icon">🤖</div>
+                                <div class="agent-name">SelectAI</div>
+                                <div class="agent-domain">Data/AI</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Example Queries -->
+                <div class="card">
+                    <div class="card-header">
+                        <span class="card-title">💡 Example Queries</span>
+                    </div>
+                    <div class="card-body">
+                        <div id="example-list" class="example-list">
+                            <!-- Populated by JS -->
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Initialize Mermaid
+        mermaid.initialize({
+            startOnLoad: false,
+            theme: 'base',
+            themeVariables: {
+                primaryColor: '#4f46e5',
+                primaryTextColor: '#fff',
+                primaryBorderColor: '#4338ca',
+                lineColor: '#6366f1',
+                secondaryColor: '#f0fdf4',
+                tertiaryColor: '#fef3c7'
+            },
+            flowchart: {
+                useMaxWidth: true,
+                htmlLabels: true,
+                curve: 'basis'
+            }
+        });
+
+        let currentData = null;
+        let currentRoute = 'all';
+
+        // Node icons
+        const nodeIcons = {
+            'input': '📥',
+            'classifier': '🎯',
+            'router': '🔀',
+            'workflow': '⚡',
+            'parallel': '🔄',
+            'agent': '🤖',
+            'action': '🔧',
+            'output': '📤'
+        };
+
+        async function loadVisualization() {
+            const container = document.getElementById('diagram-container');
+            container.innerHTML = '<div class="loading"><div class="spinner"></div>Loading workflow diagram...</div>';
+
+            try {
+                const response = await fetch('/visualizer');
+                currentData = await response.json();
+
+                renderDiagram(currentData.mermaid_diagram);
+                renderNodes(currentData.nodes);
+                renderExamples(currentData.example_queries);
+            } catch (error) {
+                container.innerHTML = '<div class="loading">Error loading visualization: ' + error.message + '</div>';
+            }
+        }
+
+        async function renderDiagram(mermaidCode) {
+            const container = document.getElementById('diagram-container');
+
+            try {
+                const { svg } = await mermaid.render('mermaid-diagram', mermaidCode);
+                container.innerHTML = '<div class="mermaid">' + svg + '</div>';
+            } catch (error) {
+                container.innerHTML = '<pre style="color: #333; font-size: 12px; overflow: auto;">' + mermaidCode + '</pre>';
+            }
+        }
+
+        function renderNodes(nodes) {
+            const container = document.getElementById('node-list');
+            const filteredNodes = nodes.filter(n => !n.id.startsWith('__'));
+
+            container.innerHTML = filteredNodes.map(node => `
+                <div class="node-item">
+                    <div class="node-icon">${nodeIcons[node.id] || '📌'}</div>
+                    <div class="node-info">
+                        <div class="node-name">${node.name}</div>
+                        <div class="node-desc">${node.description}</div>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        function renderExamples(examples) {
+            const container = document.getElementById('example-list');
+            const route = currentRoute === 'all' ? 'workflow' : currentRoute;
+            const routeExamples = examples[route] || [];
+
+            container.innerHTML = routeExamples.slice(0, 4).map(ex => `
+                <div class="example-item" onclick="highlightRoute('${route}')">
+                    <div class="example-query">"${ex.query}"</div>
+                    <div class="example-description">${ex.description}</div>
+                    <span class="example-badge">${route}</span>
+                </div>
+            `).join('');
+        }
+
+        async function filterRoute(route) {
+            // Update tab state
+            document.querySelectorAll('.tab').forEach(tab => {
+                tab.classList.toggle('active', tab.dataset.route === route);
+            });
+
+            currentRoute = route;
+
+            // Reload diagram with route highlighting
+            try {
+                const url = route === 'all' ? '/visualizer/diagram' : `/visualizer/diagram?routing_type=${route}`;
+                const response = await fetch(url);
+                const data = await response.json();
+                renderDiagram(data.diagram);
+
+                // Update examples for this route
+                if (currentData && currentData.example_queries) {
+                    renderExamples(currentData.example_queries);
+                }
+            } catch (error) {
+                console.error('Failed to filter route:', error);
+            }
+        }
+
+        function highlightRoute(route) {
+            filterRoute(route);
+        }
+
+        // Load on page ready
+        document.addEventListener('DOMContentLoaded', loadVisualization);
+    </script>
+</body>
+</html>'''
+    return HTMLResponse(content=html_content)
+
+
+@app.get("/visualizer/executions", tags=["Observability"])
+async def get_active_executions() -> dict[str, Any]:
+    """
+    Get currently active workflow executions.
+
+    Returns:
+        List of active executions with their current state
+    """
+    return {
+        "executions": list(app_state.active_executions.values()),
+        "count": len(app_state.active_executions),
+        "timestamp": datetime.utcnow().isoformat(),
+    }
+
+
+@app.get("/visualizer/trace/{execution_id}", tags=["Observability"])
+async def get_execution_trace(execution_id: str) -> dict[str, Any]:
+    """
+    Get the execution trace for a specific execution.
+
+    Args:
+        execution_id: The execution ID to get trace for
+
+    Returns:
+        Execution trace with visualization data
+    """
+    from src.observability.visualizer import WorkflowVisualizer
+
+    if execution_id not in app_state.active_executions:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Execution {execution_id} not found",
+        )
+
+    execution = app_state.active_executions[execution_id]
+    visualizer = WorkflowVisualizer(app_state.coordinator)
+
+    # Get live visualization if thinking_trace is available
+    thinking_trace = execution.get("thinking_trace")
+    routing_type = execution.get("routing_type")
+    current_agent = execution.get("current_agent")
+
+    viz = visualizer.get_live_visualization(
+        thinking_trace=thinking_trace,
+        routing_type=routing_type,
+        current_agent=current_agent,
+    )
+
+    return {
+        "execution_id": execution_id,
+        "visualization": viz.to_dict(),
+        "started_at": execution.get("started_at"),
+        "updated_at": execution.get("updated_at"),
+    }
+
+
+import json
+
+
+@app.get("/visualizer/stream", tags=["Observability"])
+async def stream_executions():
+    """
+    Server-Sent Events stream for real-time execution updates.
+
+    Streams updates whenever execution state changes.
+    Use this endpoint to build real-time visualizations.
+
+    Example usage (JavaScript):
+        const eventSource = new EventSource('/visualizer/stream');
+        eventSource.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            updateVisualization(data);
+        };
+    """
+    async def event_generator():
+        """Generate SSE events for execution updates."""
+        last_state = {}
+
+        while True:
+            # Check for state changes
+            current_state = {
+                k: {
+                    "phase": v.get("phase"),
+                    "active_node": v.get("active_node"),
+                    "routing_type": v.get("routing_type"),
+                }
+                for k, v in app_state.active_executions.items()
+            }
+
+            if current_state != last_state:
+                # Send update
+                data = {
+                    "type": "execution_update",
+                    "executions": list(app_state.active_executions.values()),
+                    "count": len(app_state.active_executions),
+                    "timestamp": datetime.utcnow().isoformat(),
+                }
+                yield f"data: {json.dumps(data)}\n\n"
+                last_state = current_state
+
+            # Also send heartbeat every 30 seconds
+            yield f"data: {json.dumps({'type': 'heartbeat', 'timestamp': datetime.utcnow().isoformat()})}\n\n"
+
+            await asyncio.sleep(1)  # Check every second
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
