@@ -96,8 +96,17 @@ class ResponseParser:
         if table_data:
             return self._table_response(table_data, agent_name)
 
-        # Fall back to plain text response
+        # Fall back to markdown/plain text response
+        # Use MarkdownToSlack converter to properly handle markdown tables,
+        # formatting, etc. that LLMs often produce
         cleaned = self._clean_text(message)
+        if self._looks_like_markdown(cleaned):
+            from src.formatting.markdown_to_slack import MarkdownToSlackConverter
+            converter = MarkdownToSlackConverter()
+            response = converter.convert(cleaned, agent_name)
+            return ParseResult(response=response, raw_text=cleaned)
+
+        # Plain text without markdown features
         return ParseResult(
             response=StructuredResponse(
                 header=ResponseHeader(
@@ -1782,11 +1791,52 @@ class ResponseParser:
         if '"thought"' in message or message.strip().startswith("{"):
             message = re.sub(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', '', message)
 
-        # Clean up markdown
-        message = message.replace('```json', '').replace('```', '')
-        message = re.sub(r'\s+', ' ', message)
+        # Don't collapse whitespace for markdown - preserve structure
+        # Only remove ```json wrappers but keep code blocks
+        message = message.replace('```json', '```')
 
         return message.strip()
+
+    def _looks_like_markdown(self, text: str) -> bool:
+        """Check if text appears to contain markdown formatting.
+
+        Returns True if text contains:
+        - Markdown tables (| col | col |)
+        - Bold syntax (**text**)
+        - Headers (# or ## at start of line)
+        - Code blocks (```)
+        - Links ([text](url))
+
+        This helps decide whether to use the MarkdownToSlack converter.
+        """
+        if not text:
+            return False
+
+        # Check for markdown table pattern (| col | col |)
+        if re.search(r'\|[^|]+\|', text):
+            return True
+
+        # Check for bold syntax (**text**)
+        if re.search(r'\*\*[^*]+\*\*', text):
+            return True
+
+        # Check for headers (# at start of line)
+        if re.search(r'^#{1,6}\s+\S', text, re.MULTILINE):
+            return True
+
+        # Check for code blocks
+        if '```' in text:
+            return True
+
+        # Check for markdown links [text](url)
+        if re.search(r'\[[^\]]+\]\([^)]+\)', text):
+            return True
+
+        # Check for horizontal rules
+        if re.search(r'^[-*_]{3,}$', text, re.MULTILINE):
+            return True
+
+        return False
 
     def _health_severity(self, summary: dict) -> Severity:
         """Determine severity from health summary."""

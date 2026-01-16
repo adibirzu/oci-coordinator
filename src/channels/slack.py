@@ -2023,12 +2023,12 @@ class SlackHandler:
                         except Exception as mem_err:
                             logger.warning("Failed to update conversation memory", error=str(mem_err))
 
-                        # Send file attachments if present
-                        attachments = response.get("attachments", [])
+                        # Send file attachments if present (from formatted or raw response)
+                        attachments = formatted.get("attachments", []) or response.get("attachments", [])
                         if attachments:
                             for attachment in attachments:
                                 if isinstance(attachment, dict):
-                                    self._send_file_attachment(
+                                    await self._send_file_attachment(
                                         client=client,
                                         channel=channel,
                                         file_content=attachment.get("content", ""),
@@ -2039,10 +2039,10 @@ class SlackHandler:
                                     )
                                 else:
                                     # FileAttachment dataclass
-                                    self._send_file_attachment(
+                                    await self._send_file_attachment(
                                         client=client,
                                         channel=channel,
-                                        file_content=attachment.content,
+                                        file_content=attachment.get_content_bytes(),
                                         filename=attachment.filename,
                                         thread_ts=thread_ts,
                                         title=attachment.title,
@@ -2419,6 +2419,31 @@ class SlackHandler:
                     metadata={"query_type": routing_type}
                 )
                 await self._conversation_manager.update_query_type(thread_ts, routing_type)
+
+                # Send file attachments if present (e.g., AWR HTML reports)
+                attachments = formatted.get("attachments", []) or response.get("attachments", [])
+                for attachment in attachments:
+                    if isinstance(attachment, dict):
+                        await self._send_file_attachment(
+                            client=client,
+                            channel=channel,
+                            file_content=attachment.get("content", ""),
+                            filename=attachment.get("filename", "attachment"),
+                            thread_ts=thread_ts,
+                            title=attachment.get("title"),
+                            comment=attachment.get("comment"),
+                        )
+                    else:
+                        # FileAttachment dataclass
+                        await self._send_file_attachment(
+                            client=client,
+                            channel=channel,
+                            file_content=attachment.get_content_bytes(),
+                            filename=attachment.filename,
+                            thread_ts=thread_ts,
+                            title=attachment.title,
+                            comment=attachment.comment,
+                        )
             else:
                 # Error response with recovery suggestions
                 error_blocks = build_error_blocks(
@@ -3113,7 +3138,11 @@ class SlackHandler:
                     "text": {"type": "mrkdwn", "text": sec["content"][:2900]},
                 })
 
-        return {"blocks": blocks, "summary": summary}
+        # Propagate file attachments from StructuredResponse
+        # These are processed by the caller to send as separate file uploads
+        attachments = parse_result.response.attachments if parse_result.response.attachments else []
+
+        return {"blocks": blocks, "summary": summary, "attachments": attachments}
 
     def _generate_summary(self, response) -> str:
         """Generate plain text summary for Slack notifications.
