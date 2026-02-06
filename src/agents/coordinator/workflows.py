@@ -6278,6 +6278,18 @@ WORKFLOW_REGISTRY: dict[str, Any] = {
     "recent_audit": audit_events_workflow,
     "audit_log": audit_events_workflow,
 
+    # Security - Vulnerability Scanning (maps to Cloud Guard which includes vuln findings)
+    "vulnerability_scan": cloud_guard_problems_workflow,
+    "vulnerability_assessment": cloud_guard_problems_workflow,
+    "show_vulnerabilities": cloud_guard_problems_workflow,
+    "list_vulnerabilities": cloud_guard_problems_workflow,
+    "cve_scan": cloud_guard_problems_workflow,
+
+    # Security - Bastion / Secure Access (maps to security overview)
+    "bastion_sessions": security_overview_workflow,
+    "list_bastion_sessions": security_overview_workflow,
+    "secure_access": security_overview_workflow,
+
     # Security - Threats Analysis
     "security_threats": security_threats_workflow,
     "threat_analysis": security_threats_workflow,

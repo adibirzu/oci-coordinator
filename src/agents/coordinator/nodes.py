@@ -125,7 +125,6 @@ class CoordinatorNodes:
         # Map agent roles to workflow types
         role_to_workflow = {
             "db-troubleshoot-agent": "database_troubleshoot",
-            "db-health-agent": "database_troubleshoot",
             "log-analytics-agent": "log_analysis",
             "error-analysis-agent": "error_analysis",
             "security-threat-agent": "security_audit",
@@ -1022,6 +1021,13 @@ class CoordinatorNodes:
             perf_keywords = ["performance", "slow", "error", "problem", "issue", "troubleshoot"]
             if any(kw in query_lower for kw in perf_keywords):
                 return None  # Let LLM route to appropriate agent
+
+            # Make sure this isn't a knowledge/definition question
+            # e.g., "what is a database", "what happened to my database"
+            knowledge_patterns = ["what is a ", "what is an ", "what are ", "explain ",
+                                  "define ", "how does ", "how do ", "what happened"]
+            if any(kw in query_lower for kw in knowledge_patterns):
+                return None  # Let LLM handle general knowledge questions
 
             # Make sure this isn't a DB management query (SQL monitoring, blocking, etc.)
             # These should be routed to db_troubleshoot agent via _pre_classify_dbmgmt_query
@@ -2100,6 +2106,19 @@ class CoordinatorNodes:
                 suggested_agent="security-threat-agent",
             )
 
+        # Security alert patterns (must match before observability's "alert" keyword)
+        security_alert_keywords = ["security alert", "security alerts"]
+        if any(kw in query_lower for kw in security_alert_keywords):
+            return IntentClassification(
+                intent="security_problems",
+                category=IntentCategory.QUERY,
+                confidence=0.95,
+                domains=["security"],
+                entities={},
+                suggested_workflow="security_problems",
+                suggested_agent="security-threat-agent",
+            )
+
         # Security overview patterns (summary, general security status)
         overview_keywords = ["security overview", "security summary", "security status"]
         if any(kw in query_lower for kw in overview_keywords):
@@ -2235,16 +2254,18 @@ class CoordinatorNodes:
                 suggested_agent=None,  # Use workflow, not agent
             )
 
-        # Metrics patterns
-        metrics_keywords = ["metric", "metrics", "monitoring data", "performance data"]
+        # Metrics patterns - route to instance_metrics workflow
+        # (instance_metrics_workflow handles instance name extraction internally)
+        metrics_keywords = ["metric", "metrics", "monitoring data", "performance data",
+                            "cpu usage", "memory usage"]
         if any(kw in query_lower for kw in metrics_keywords):
             return IntentClassification(
-                intent="get_metrics",
+                intent="instance_metrics",
                 category=IntentCategory.QUERY,
                 confidence=0.90,
                 domains=["observability"],
                 entities={},
-                suggested_workflow="get_metrics",
+                suggested_workflow="instance_metrics",
                 suggested_agent=None,
             )
 
