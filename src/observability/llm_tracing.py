@@ -193,6 +193,9 @@ class LLMSpanContext:
 
     def set_tokens(self, input: int = 0, output: int = 0) -> None:
         """Set token counts for the span."""
+        # Guard against None values (OCA responses may omit prompt_tokens/completion_tokens)
+        input = input or 0
+        output = output or 0
         self.input_tokens = input
         self.output_tokens = output
         self.span.set_attribute(GenAIAttributes.USAGE_INPUT_TOKENS, input)
@@ -692,8 +695,8 @@ class LLMMetrics:
     ) -> None:
         """Record metrics from an LLM call."""
         self.total_requests += 1
-        self.total_input_tokens += input_tokens
-        self.total_output_tokens += output_tokens
+        self.total_input_tokens += input_tokens or 0
+        self.total_output_tokens += output_tokens or 0
         self.total_latency_ms += latency_ms
         self.total_tool_calls += tool_calls
         self.estimated_cost_usd += cost_usd

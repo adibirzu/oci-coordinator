@@ -575,8 +575,10 @@ class ChatOCA(BaseChatModel):
 
                     # Record token usage using GenAI semantic conventions
                     if token_usage:
-                        prompt_tokens = token_usage.get("prompt_tokens", 0)
-                        completion_tokens = token_usage.get("completion_tokens", 0)
+                        # Use `or 0` because .get() returns None when key exists with None value
+                        # (e.g., OCA responses may include "prompt_tokens": null)
+                        prompt_tokens = token_usage.get("prompt_tokens") or 0
+                        completion_tokens = token_usage.get("completion_tokens") or 0
 
                         llm_ctx.set_tokens(
                             input=prompt_tokens,

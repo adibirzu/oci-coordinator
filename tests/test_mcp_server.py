@@ -1,4 +1,6 @@
 
+import json
+
 import pytest
 from unittest.mock import MagicMock, patch
 from src.mcp.server.main import mcp, _search_capabilities_logic
@@ -121,11 +123,14 @@ async def test_list_users_logic():
 
 @pytest.mark.asyncio
 async def test_get_metrics_logic():
-    """Verify get_metrics tool logic."""
+    """Verify get_metrics tool logic returns structured JSON."""
     from src.mcp.server.tools.observability import _get_metrics_logic
-    
+
     mock_monitoring = MagicMock()
-    
+
     with patch("src.mcp.server.tools.observability.get_monitoring_client", return_value=mock_monitoring):
         result = await _get_metrics_logic(compartment_id="test-comp", namespace="oci_computeagent", query="CpuUtilization[1m].mean()")
-        assert "85% CPU Usage" in result
+        result_data = json.loads(result)
+        assert result_data["type"] == "metrics"
+        assert result_data["namespace"] == "oci_computeagent"
+        assert "time_range" in result_data

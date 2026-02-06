@@ -241,11 +241,13 @@ class TestSelectAIMCPTools:
             assert "response" in result_data
 
     @pytest.mark.asyncio
-    async def test_selectai_generate_no_ords_configured(self):
-        """Test error when ORDS is not configured."""
+    async def test_selectai_generate_no_connection_configured(self):
+        """Test error when no database connection is configured."""
         from src.mcp.server.tools.selectai import _selectai_generate_logic
 
-        with patch.dict("os.environ", {"SELECTAI_ORDS_BASE_URL": ""}, clear=False):
+        # Mock _execute_sql to simulate no connection available
+        with patch("src.mcp.server.tools.selectai._execute_sql",
+                    AsyncMock(return_value=({"error": "No database connection configured"}, "none"))):
             result = await _selectai_generate_logic(
                 prompt="show customers",
                 action="runsql",
@@ -253,25 +255,28 @@ class TestSelectAIMCPTools:
 
             result_data = json.loads(result)
             assert "error" in result_data
-            assert "ORDS not configured" in result_data["error"]
+            assert "No database connection configured" in result_data["error"]
 
     @pytest.mark.asyncio
     async def test_selectai_list_profiles_logic(self):
         """Test list profiles logic."""
         from src.mcp.server.tools.selectai import _selectai_list_profiles_logic
 
-        with patch("src.mcp.server.tools.selectai._execute_sql_via_ords") as mock_ords:
-            mock_ords.return_value = {
-                "items": [
-                    {
-                        "profile_name": "OCI_GENAI",
-                        "provider": "oci",
-                        "model": "cohere.command-r-plus",
-                        "status": "ENABLED",
-                    }
-                ]
-            }
-
+        # Mock _execute_sql to return controlled profile data
+        # (bypasses wallet-first logic that would hit real DB)
+        mock_result = {
+            "items": [
+                {
+                    "profile_name": "OCI_GENAI",
+                    "status": "ENABLED",
+                    "description": None,
+                    "created": "2026-01-07",
+                    "last_modified": "2026-01-07",
+                }
+            ]
+        }
+        with patch("src.mcp.server.tools.selectai._execute_sql",
+                    AsyncMock(return_value=(mock_result, "ords"))):
             result = await _selectai_list_profiles_logic(
                 ords_base_url="https://test.adb.region.oraclecloudapps.com",
                 ords_schema="ADMIN",
