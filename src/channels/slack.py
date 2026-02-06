@@ -974,12 +974,14 @@ class SlackHandler:
         self._recent_event_ids: dict[str, float] = {}
         self._event_dedupe_ttl = float(os.getenv("SLACK_EVENT_DEDUP_TTL_SECONDS", "120"))
 
-        # Initialize observability FIRST - sets up tracer provider with OCI APM export
-        # This MUST happen before getting the tracer to ensure spans are exported
+        # Ensure observability is initialized (safe to call multiple times -
+        # init_tracing() has a guard that returns existing tracer if already initialized)
+        # The coordinator typically initializes first in main.py, so this is usually a no-op.
         init_observability(agent_name="slack-handler")
 
-        # Now get tracer from the properly configured provider
-        self._tracer = trace.get_tracer("oci-slack-handler")
+        # Get tracer for slack handler - uses coordinator's TracerProvider service name
+        # but tracer name helps identify spans in code. Use our get_tracer helper.
+        self._tracer = get_tracer("slack-handler")
 
         # Register this instance globally for auth callback resumption
         set_slack_handler_instance(self)

@@ -25,11 +25,47 @@ import sys
 from pathlib import Path
 
 # Load environment from .env.local
+# Search multiple locations to support worktrees and different working directories
 from dotenv import load_dotenv
 
-env_file = Path(__file__).parent.parent / ".env.local"
-if env_file.exists():
-    load_dotenv(env_file, override=True)
+def _find_and_load_env():
+    """Find and load .env.local from multiple possible locations.
+
+    Search order:
+    1. Project root (relative to this file): ../../../.env.local or ../.env.local
+    2. Current working directory: ./.env.local
+    3. Main project directory (for worktrees): ~/dev/oci-coordinator/.env.local
+    4. Environment variable OCI_COORDINATOR_ENV_FILE
+    """
+    import os
+    from pathlib import Path
+
+    # Candidate paths to search
+    candidates = [
+        # Relative to this file (standard layout: src/main.py -> ../.env.local)
+        Path(__file__).parent.parent / ".env.local",
+        # Current working directory
+        Path.cwd() / ".env.local",
+        # Home-relative main project (for worktrees)
+        Path.home() / "dev" / "oci-coordinator" / ".env.local",
+        # Explicit override via environment variable
+        Path(os.environ.get("OCI_COORDINATOR_ENV_FILE", "")) if os.environ.get("OCI_COORDINATOR_ENV_FILE") else None,
+    ]
+
+    # Try each candidate
+    for env_file in candidates:
+        if env_file and env_file.exists():
+            load_dotenv(env_file, override=True)
+            # Log which file was loaded (before structlog is configured)
+            print(f"[startup] Loaded environment from: {env_file}")
+            return str(env_file)
+
+    # No .env.local found - warn but continue (might be using system env vars)
+    print("[startup] Warning: No .env.local found. Using system environment variables only.")
+    print(f"[startup] Searched: {[str(p) for p in candidates if p]}")
+    return None
+
+_loaded_env_file = _find_and_load_env()
 
 import structlog
 
@@ -122,6 +158,28 @@ def configure_logging() -> None:
 
 
 logger = structlog.get_logger(__name__)
+
+
+def is_coordinator_initialized() -> bool:
+    """Check if the coordinator has been initialized.
+
+    Used by API lifespan to avoid redundant initialization when running
+    in combined mode (start_both.py) where initialize_coordinator() is
+    called before the API server starts.
+
+    Returns:
+        True if initialize_coordinator() has completed successfully.
+    """
+    return _initialized
+
+
+def get_mcp_registry():
+    """Get the MCP server registry if initialized.
+
+    Returns:
+        The ServerRegistry instance, or None if not yet initialized.
+    """
+    return _registry
 
 
 async def initialize_coordinator() -> None:
@@ -423,6 +481,71 @@ async def _load_showoci_cache(cache_loader) -> None:
         logger.error("ShowOCI cache load failed", error=str(e))
 
 
+async def _check_oca_auth_status(log) -> None:
+    """Check OCA authentication status and prompt for re-auth if needed.
+
+    This is called at startup when LLM_PROVIDER is set to oca/oracle_code_assist.
+    If the token is expired and cannot be refreshed, it prints clear instructions
+    for the user to re-authenticate.
+    """
+    try:
+        from src.llm.oca import oca_token_manager
+
+        token_info = oca_token_manager.get_token_info()
+
+        if not token_info.get("has_token"):
+            log.warning(
+                "OCA not authenticated - no token found",
+                hint="Run: poetry run python scripts/oca_login.py",
+            )
+            _print_oca_auth_instructions("No OCA token found")
+            return
+
+        if token_info.get("is_valid"):
+            # Token is valid, nothing to do
+            expires_in = token_info.get("expires_in_seconds", 0)
+            log.info(
+                "OCA token valid",
+                expires_in_minutes=round(expires_in / 60, 1),
+            )
+            return
+
+        # Token expired - check if we can refresh
+        if token_info.get("can_refresh"):
+            log.info("OCA token expired, attempting refresh...")
+            new_token = await oca_token_manager.refresh_token()
+            if new_token:
+                log.info("OCA token refreshed successfully")
+                return
+            else:
+                log.warning("OCA token refresh failed")
+
+        # Cannot refresh - prompt for re-authentication
+        log.error(
+            "OCA token expired and cannot be refreshed",
+            hint="Run: poetry run python scripts/oca_login.py",
+        )
+        _print_oca_auth_instructions("OCA token expired")
+
+    except ImportError:
+        log.warning("OCA module not available")
+    except Exception as e:
+        log.warning("OCA auth check failed", error=str(e))
+
+
+def _print_oca_auth_instructions(reason: str) -> None:
+    """Print clear instructions for OCA re-authentication."""
+    print("\n" + "=" * 70)
+    print("  ORACLE CODE ASSIST AUTHENTICATION REQUIRED")
+    print("=" * 70)
+    print(f"\n  Reason: {reason}")
+    print("\n  To authenticate, run:")
+    print("\n    poetry run python scripts/oca_login.py")
+    print("\n  This will open a browser for OAuth login.")
+    print("  After authentication, restart the service.")
+    print("\n" + "=" * 70 + "\n")
+
+
 async def prewarm_coordinator() -> None:
     """Pre-warm the LangGraph coordinator to eliminate first-request latency.
 
@@ -457,6 +580,11 @@ async def prewarm_coordinator() -> None:
         from src.llm import get_llm_with_auto_fallback, print_llm_availability_report
         from src.mcp.catalog import ToolCatalog
         from src.memory.manager import SharedMemoryManager
+
+        # Check OCA authentication if configured
+        llm_provider = os.getenv("LLM_PROVIDER", "").lower()
+        if llm_provider in ("oca", "oracle_code_assist"):
+            await _check_oca_auth_status(log)
 
         # Print LLM availability report at startup
         log.info("Checking LLM provider availability...")
@@ -576,7 +704,7 @@ async def run_slack_mode(blocking: bool = True) -> None:
 
     if not bot_token:
         logger.error("SLACK_BOT_TOKEN not configured")
-        sys.exit(1)
+        raise RuntimeError("SLACK_BOT_TOKEN not configured - cannot start Slack mode")
 
     if not app_token:
         logger.warning("SLACK_APP_TOKEN not configured - Socket Mode disabled")

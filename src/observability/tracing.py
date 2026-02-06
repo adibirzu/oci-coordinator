@@ -1,13 +1,17 @@
-"""OCI APM / OpenTelemetry tracing configuration.
+"""OCI APM / OpenTelemetry tracing and log export configuration.
 
 Each agent has a unique service name but shares the same APM project.
 Traces are exported to OCI APM via OTLP or Zipkin format.
+Logs are exported to OCI APM via OTLP for trace-log correlation in span details.
 
 Usage:
     from src.observability.tracing import init_tracing, get_tracer
 
     # Initialize on startup
     tracer = init_tracing(component="coordinator")
+
+    # Initialize OTLP log export (sends logs to APM span "Logs" tab)
+    init_otlp_log_export(component="coordinator")
 
     # Get tracer for a specific component
     tracer = get_tracer("db-troubleshoot-agent")
@@ -18,6 +22,7 @@ Usage:
 """
 
 import json
+import logging
 import os
 from collections.abc import Sequence
 from typing import Any
@@ -54,10 +59,15 @@ SERVICE_NAMES = {
     "database-observatory": "oci-database-observatory",  # External MCP server
 }
 
-# Global state
+# Global state - Traces
 _tracer_provider: TracerProvider | None = None
 _otel_enabled: bool = False
 _current_tracer: trace.Tracer | None = None
+
+# Global state - OTLP Log Export (for APM span "Logs" tab correlation)
+_logger_provider: Any = None  # LoggerProvider (typed as Any to handle import failures)
+_otlp_log_handler: logging.Handler | None = None
+_otlp_logs_enabled: bool = False
 
 
 class OCIAPMZipkinExporter(SpanExporter):
@@ -224,6 +234,18 @@ def init_tracing(
     """
     global _tracer_provider, _otel_enabled, _current_tracer
 
+    # Guard against re-initialization - only initialize TracerProvider once per process
+    # Multiple components (coordinator, slack handler) may call init_tracing() but
+    # all should share the same TracerProvider to avoid overwriting/losing spans
+    if _tracer_provider is not None:
+        logger.debug(
+            "TracerProvider already initialized, returning existing tracer",
+            component=component,
+        )
+        # Return a tracer for this component from the existing provider
+        svc_name = service_name or SERVICE_NAMES.get(component, f"oci-{component}")
+        return trace.get_tracer(svc_name, "1.0.0")
+
     if not _should_enable_otel():
         logger.info(
             "Tracing disabled",
@@ -369,8 +391,11 @@ def is_otel_enabled() -> bool:
 
 
 def shutdown_tracing() -> None:
-    """Shutdown tracing and flush pending spans."""
+    """Shutdown tracing, OTLP log export, and flush pending data."""
     global _tracer_provider
+
+    # Shutdown OTLP log export first (it may emit logs during trace shutdown)
+    shutdown_otlp_log_export()
 
     if _tracer_provider:
         try:
@@ -400,3 +425,167 @@ def force_flush_traces(timeout_ms: int = 5000) -> bool:
         except Exception:
             return False
     return True
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# OTLP Log Export - Sends logs to OCI APM for span-level log correlation
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def init_otlp_log_export(
+    service_name: str | None = None,
+    component: str = "coordinator",
+    log_level: int | None = None,
+) -> bool:
+    """Initialize OTLP log export to OCI APM.
+
+    Sends Python log records to OCI APM via the OTLP logs endpoint so they
+    appear in the "Logs" tab of span details. The OpenTelemetry SDK automatically
+    injects trace_id and span_id from the active span context.
+
+    This works alongside the existing OCILoggingHandler which sends logs to
+    OCI Logging service for persistence and Log Analytics.
+
+    Args:
+        service_name: Override service name (defaults to component lookup)
+        component: Component type for service name lookup
+        log_level: Minimum log level to export (default: from OTLP_LOG_LEVEL env or INFO)
+
+    Returns:
+        True if OTLP log export was enabled
+    """
+    global _logger_provider, _otlp_log_handler, _otlp_logs_enabled
+
+    # Guard against re-initialization
+    if _logger_provider is not None:
+        logger.debug("OTLP log export already initialized", component=component)
+        return _otlp_logs_enabled
+
+    # Resolve log level from env or parameter
+    if log_level is None:
+        level_name = os.getenv("OTLP_LOG_LEVEL", "INFO").upper()
+        log_level = getattr(logging, level_name, logging.INFO)
+
+    if not _should_enable_otel():
+        logger.info("OTLP log export disabled (tracing not configured)")
+        return False
+
+    config = _get_apm_config()
+    endpoint = config["endpoint"] or config["data_upload_endpoint"]
+    private_key = config["private_data_key"]
+
+    if not endpoint or not private_key:
+        logger.warning("OTLP log export disabled: missing endpoint or private data key")
+        return False
+
+    try:
+        # Import OTEL Logs SDK components
+        from opentelemetry._logs import set_logger_provider
+        from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
+        from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler
+        from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
+
+        # Determine service name
+        svc_name = service_name or SERVICE_NAMES.get(component, f"oci-{component}")
+        deployment_env = os.getenv("DEPLOYMENT_ENV", "development")
+
+        # Create resource (shared attributes with trace provider)
+        resource = Resource.create({
+            ResourceAttributes.SERVICE_NAME: svc_name,
+            ResourceAttributes.SERVICE_VERSION: "1.0.0",
+            ResourceAttributes.DEPLOYMENT_ENVIRONMENT: deployment_env,
+            "oci.apm.project": "oci-ai-coordinator",
+            "cloud.provider": "oci",
+        })
+
+        # Build OTLP logs endpoint (parallel to traces endpoint)
+        otlp_endpoint = endpoint.rstrip("/")
+        if "/opentelemetry" in otlp_endpoint:
+            logs_url = f"{otlp_endpoint}/private/v1/logs"
+        elif "/20200101" in otlp_endpoint:
+            logs_url = f"{otlp_endpoint}/opentelemetry/private/v1/logs"
+        else:
+            logs_url = f"{otlp_endpoint}/20200101/opentelemetry/private/v1/logs"
+
+        headers = {"Authorization": f"dataKey {private_key}"}
+
+        # Create OTLP log exporter
+        log_exporter = OTLPLogExporter(
+            endpoint=logs_url,
+            headers=headers,
+        )
+
+        # Create logger provider with batch processor
+        _logger_provider = LoggerProvider(resource=resource)
+        _logger_provider.add_log_record_processor(
+            BatchLogRecordProcessor(log_exporter)
+        )
+
+        # Set as global logger provider
+        set_logger_provider(_logger_provider)
+
+        # Create a logging handler that bridges Python logging → OTLP
+        _otlp_log_handler = LoggingHandler(
+            level=log_level,
+            logger_provider=_logger_provider,
+        )
+
+        # Attach to Python root logger so all logs (including structlog) are captured
+        root_logger = logging.getLogger()
+        root_logger.addHandler(_otlp_log_handler)
+
+        _otlp_logs_enabled = True
+
+        logger.info(
+            "OTLP log export enabled",
+            service=svc_name,
+            endpoint=logs_url[:60] + "...",
+            log_level=logging.getLevelName(log_level),
+        )
+
+        return True
+
+    except ImportError as e:
+        logger.warning(
+            "OTLP log export unavailable: missing opentelemetry logs SDK",
+            error=str(e),
+            help="Ensure opentelemetry-exporter-otlp >= 1.22.0 is installed",
+        )
+        return False
+
+    except Exception as e:
+        logger.error("Failed to initialize OTLP log export", error=str(e))
+        return False
+
+
+def is_otlp_logs_enabled() -> bool:
+    """Check if OTLP log export is enabled."""
+    return _otlp_logs_enabled
+
+
+def shutdown_otlp_log_export() -> None:
+    """Shutdown OTLP log export and flush pending log records."""
+    global _logger_provider, _otlp_log_handler, _otlp_logs_enabled
+
+    if _otlp_log_handler:
+        # Remove from root logger
+        root_logger = logging.getLogger()
+        root_logger.removeHandler(_otlp_log_handler)
+        _otlp_log_handler = None
+
+    if _logger_provider:
+        try:
+            _logger_provider.force_flush(timeout_millis=5000)
+            logger.info("OTLP log export force flush complete")
+        except Exception as e:
+            logger.warning("OTLP log export flush failed", error=str(e))
+
+        try:
+            _logger_provider.shutdown()
+        except Exception:
+            pass
+
+        _logger_provider = None
+
+    _otlp_logs_enabled = False
+    logger.info("OTLP log export shutdown complete")

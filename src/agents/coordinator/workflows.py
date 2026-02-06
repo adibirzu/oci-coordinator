@@ -2297,8 +2297,9 @@ async def list_databases_workflow(
     CACHE_TTL = timedelta(minutes=5)
     CACHE_PREFIX = "workflow:list_databases"
 
-    # Timeout for each tool call (reduced from 30s to 15s for fail-fast)
-    TOOL_TIMEOUT = 15
+    # Timeout for each tool call - OPSI/DBMGMT APIs are slow (60-180s typical)
+    # Use 120s to allow for slow API responses while still failing reasonably fast
+    TOOL_TIMEOUT = 120
 
     async def safe_execute(tool_name: str, params: dict) -> tuple[str, str | None]:
         """Execute tool with timeout and error handling. Returns (source_name, result)."""
@@ -2308,15 +2309,39 @@ async def list_databases_workflow(
                 timeout=TOOL_TIMEOUT
             )
             result_str = _extract_result(result)
-            # Filter out error messages and validation errors
-            if result_str and not any(err in result_str.lower() for err in [
-                "error", "timeout", "validation error", "missing required"
-            ]):
-                return (tool_name, result_str)
+            if not result_str:
+                return (tool_name, None)
+
+            # Check for actual error responses (not just any mention of "error")
+            # These patterns indicate the tool call itself failed, not that data contains "error"
+            result_lower = result_str.lower()
+            is_actual_error = (
+                result_lower.startswith('{"error":')  # JSON error response
+                or result_lower.startswith("error:")  # Plain error message
+                or "validation error:" in result_lower  # Param validation failed
+                or "missing required parameter" in result_lower  # Missing param
+                or "timeout error" in result_lower  # Explicit timeout
+                or "connection refused" in result_lower  # Server not running
+                or "service unavailable" in result_lower  # OCI service down
+                or "authorization failed" in result_lower  # Auth issue
+            )
+            if is_actual_error:
+                logger.warning(f"Tool {tool_name} returned error", error=result_str[:200])
+                return (tool_name, None)
+
+            logger.info(
+                f"Tool {tool_name} succeeded",
+                result_length=len(result_str),
+                result_preview=result_str[:100] if result_str else None,
+            )
+            return (tool_name, result_str)
         except TimeoutError:
-            logger.warning(f"Tool {tool_name} timed out after {TOOL_TIMEOUT}s")
+            logger.warning(
+                f"Tool {tool_name} timed out after {TOOL_TIMEOUT}s - "
+                "consider increasing TOOL_TIMEOUT or checking MCP server health"
+            )
         except Exception as e:
-            logger.debug(f"Tool {tool_name} failed", error=str(e))
+            logger.warning(f"Tool {tool_name} failed", error=str(e), exc_info=True)
         return (tool_name, None)
 
     try:
@@ -3244,6 +3269,10 @@ async def db_wait_events_workflow(
     Shows what the database is waiting on most - useful for performance tuning.
     Supports resolution from database name (e.g., "wait events for FINANCE").
 
+    Primary: Uses DB Management API (oci_dbmgmt_get_wait_events) for managed databases.
+    Fallback: Uses SQLcl direct query (oci_database_execute_sql) against V$SYSTEM_EVENT
+              for databases not registered in DB Management.
+
     Matches intents: wait_events, db_wait_events, awr_wait_events,
                      database_waits, performance_bottlenecks
     """
@@ -3251,37 +3280,98 @@ async def db_wait_events_workflow(
         # Extract profile from entities or fall back to metadata (Slack passes profile via metadata)
         profile = entities.get("oci_profile") or (metadata.get("oci_profile") if metadata else None)
 
+        # Get database name for SQLcl connection fallback
+        database_name = entities.get("connection_name") or entities.get("database_name")
+        top_n = entities.get("top_n", 10)
+        hours_back = entities.get("hours_back", 1)
+
         # First try direct ID, then resolve from name
         managed_database_id = entities.get("managed_database_id") or entities.get("database_id")
 
-        if not managed_database_id:
-            db_name = entities.get("database_name")
-            if db_name:
-                logger.info("Resolving database name for wait events", name=db_name)
-                managed_database_id = await _resolve_managed_database(
-                    db_name, tool_catalog, entities.get("compartment_id"), profile=profile
-                )
-
-        if not managed_database_id:
-            db_name = entities.get("database_name", "")
-            return (
-                f"Error: Could not find database '{db_name}'. "
-                "Please provide a valid database name or managed_database_id."
+        if not managed_database_id and database_name:
+            logger.info("Resolving database name for wait events", name=database_name)
+            managed_database_id = await _resolve_managed_database(
+                database_name, tool_catalog, entities.get("compartment_id"), profile=profile
             )
 
-        hours_back = entities.get("hours_back", 1)
-        top_n = entities.get("top_n", 10)
+        # Try DB Management API if we have a managed database ID
+        if managed_database_id:
+            logger.info("Using DB Management API for wait events", database_id=managed_database_id[:50])
+            result = await tool_catalog.execute(
+                "oci_dbmgmt_get_wait_events",
+                {
+                    "managed_database_id": managed_database_id,
+                    "hours_back": hours_back,
+                    "top_n": top_n,
+                    "profile": profile,
+                },
+            )
+            extracted = _extract_result(result)
+            if extracted and not extracted.startswith("Error"):
+                return f"**Wait Events for {database_name or 'database'}** (Last {hours_back} Hour(s))\n\n{extracted}"
 
-        result = await tool_catalog.execute(
-            "oci_dbmgmt_get_wait_events",
-            {
-                "managed_database_id": managed_database_id,
-                "hours_back": hours_back,
-                "top_n": top_n,
-                "profile": profile,
-            },
+        # Fallback: Use SQLcl to directly query wait events via V$SYSTEM_EVENT
+        if database_name:
+            logger.info("Using SQLcl for direct wait events query", connection=database_name)
+            wait_events_sql = f"""
+SELECT event,
+       wait_class,
+       total_waits,
+       total_timeouts,
+       ROUND(time_waited_micro/1000000, 2) as time_waited_sec,
+       ROUND(average_wait * 10, 2) as avg_wait_ms
+FROM v$system_event
+WHERE wait_class != 'Idle'
+ORDER BY time_waited_micro DESC
+FETCH FIRST {top_n} ROWS ONLY;"""
+            result = await tool_catalog.execute(
+                "oci_database_execute_sql",
+                {"connection_name": database_name, "sql": wait_events_sql.strip()},
+            )
+            extracted = _extract_result(result)
+            if extracted and not extracted.startswith("Error"):
+                header = f"**Wait Events for {database_name}** (System-wide, Top {top_n})\n\n"
+                header += "ℹ️ *Queried via SQLcl (database not in DB Management)*\n\n"
+                return header + extracted
+
+            # If V$SYSTEM_EVENT fails, try V$SESSION for active session waits
+            logger.info("V$SYSTEM_EVENT query failed, trying V$SESSION", connection=database_name)
+            session_waits_sql = f"""
+SELECT s.sid,
+       s.username,
+       s.event,
+       s.wait_class,
+       s.state,
+       s.seconds_in_wait as wait_seconds,
+       s.sql_id
+FROM v$session s
+WHERE s.status = 'ACTIVE'
+  AND s.wait_class != 'Idle'
+  AND s.type = 'USER'
+ORDER BY s.seconds_in_wait DESC
+FETCH FIRST {top_n} ROWS ONLY;"""
+            result = await tool_catalog.execute(
+                "oci_database_execute_sql",
+                {"connection_name": database_name, "sql": session_waits_sql.strip()},
+            )
+            extracted = _extract_result(result)
+            if extracted and not extracted.startswith("Error"):
+                header = f"**Active Session Waits for {database_name}** (Top {top_n})\n\n"
+                header += "ℹ️ *Queried via SQLcl (showing current active sessions)*\n\n"
+                if "No rows" in extracted or "0 rows" in extracted:
+                    return header + "✅ No active sessions currently waiting on non-idle events."
+                return header + extracted
+
+        # No method succeeded - return helpful error
+        db_name = database_name or entities.get("database_name", "unknown")
+        return (
+            f"Error: Could not get wait events for '{db_name}'.\n\n"
+            "The database was not found in DB Management and SQLcl connection failed.\n"
+            "Please ensure:\n"
+            "1. The database name matches a valid SQLcl connection (e.g., 'ATPAdi_high', 'th_high')\n"
+            "2. Or provide a managed_database_id for databases registered in DB Management\n\n"
+            "Available connections can be checked in the SQLcl wallet configuration."
         )
-        return _extract_result(result)
 
     except Exception as e:
         logger.error("db_wait_events workflow failed", error=str(e))
@@ -3419,35 +3509,114 @@ async def db_managed_databases_workflow(
     List managed databases in Database Management service.
 
     Shows all databases registered with the DB Management service.
+    Queries multiple OCI profiles (DEFAULT, EMDEMO) in parallel for comprehensive results.
 
     Matches intents: managed_databases, list_managed_databases, dbmgmt_databases,
                      db_management_list, registered_databases
     """
     try:
-        # Extract profile from entities or fall back to metadata (Slack passes profile via metadata)
-        profile = entities.get("oci_profile") or (metadata.get("oci_profile") if metadata else None)
-
-        compartment_id = entities.get("compartment_id")
-        if not compartment_id:
-            # Get profile-specific compartment for DB Management
-            dbmgmt_compartment, _ = _get_profile_compartment(profile, "dbmgmt")
-            compartment_id = dbmgmt_compartment or _get_root_compartment()
+        # Extract explicit profile from entities or metadata
+        explicit_profile = entities.get("oci_profile") or (metadata.get("oci_profile") if metadata else None)
 
         database_type = entities.get("database_type")  # EXTERNAL_SIDB, EXTERNAL_RAC, etc.
         deployment_type = entities.get("deployment_type")  # ONPREMISE, BM, etc.
 
-        params = {
-            "compartment_id": compartment_id,
-            "include_subtree": True,
-            "profile": profile,
-        }
-        if database_type:
-            params["database_type"] = database_type
-        if deployment_type:
-            params["deployment_type"] = deployment_type
+        # Determine which profiles to query
+        # If explicit profile specified, only query that one
+        # Otherwise, query all configured profiles (DEFAULT and EMDEMO)
+        if explicit_profile:
+            profiles_to_query = [explicit_profile]
+        else:
+            # Check which profiles have DBMGMT compartments configured
+            default_dbmgmt = os.getenv("OCI_DEFAULT_DBMGMT_COMPARTMENT_ID")
+            emdemo_dbmgmt = os.getenv("OCI_EMDEMO_DBMGMT_COMPARTMENT_ID")
 
-        result = await tool_catalog.execute("oci_dbmgmt_list_databases", params)
-        return _extract_result(result)
+            profiles_to_query = []
+            if default_dbmgmt:
+                profiles_to_query.append(None)  # None = DEFAULT profile
+            if emdemo_dbmgmt:
+                profiles_to_query.append("EMDEMO")
+
+            # Fallback to just DEFAULT if nothing configured
+            if not profiles_to_query:
+                profiles_to_query = [None]
+
+        # Build tasks for all profiles in parallel
+        async def query_profile(profile: str | None) -> tuple[str, str | None, list]:
+            """Query managed databases for a single profile."""
+            profile_label = profile or "DEFAULT"
+            try:
+                dbmgmt_compartment, dbmgmt_region = _get_profile_compartment(profile, "dbmgmt")
+                compartment_id = entities.get("compartment_id") or dbmgmt_compartment or _get_root_compartment(profile)
+
+                params: dict[str, Any] = {
+                    "compartment_id": compartment_id,
+                    "include_subtree": True,
+                }
+                if profile:
+                    params["profile"] = profile
+                if dbmgmt_region:
+                    params["region"] = dbmgmt_region
+                if database_type:
+                    params["database_type"] = database_type
+                if deployment_type:
+                    params["deployment_type"] = deployment_type
+
+                result = await tool_catalog.execute("oci_dbmgmt_list_databases", params)
+                result_str = _extract_result(result)
+
+                # Parse result to extract database list
+                try:
+                    parsed = json.loads(result_str)
+                    databases = parsed.get("databases", [])
+                    # Add profile label to each database for display
+                    for db in databases:
+                        db["_profile"] = profile_label
+                    return profile_label, None, databases
+                except json.JSONDecodeError:
+                    return profile_label, None, []
+
+            except Exception as e:
+                logger.warning(f"Failed to query profile {profile_label}", error=str(e))
+                return profile_label, str(e), []
+
+        # Run all profile queries in parallel
+        logger.info(
+            f"db_managed_databases: querying {len(profiles_to_query)} profiles",
+            profiles=profiles_to_query,
+        )
+        results = await asyncio.gather(*[query_profile(p) for p in profiles_to_query])
+
+        # Aggregate results
+        all_databases = []
+        profiles_queried = []
+        errors = []
+
+        for profile_label, error, databases in results:
+            profiles_queried.append(profile_label)
+            if error:
+                errors.append(f"{profile_label}: {error}")
+            all_databases.extend(databases)
+
+        # Format response
+        if all_databases:
+            return json.dumps({
+                "type": "managed_databases",
+                "databases": all_databases,
+                "count": len(all_databases),
+                "profiles_queried": profiles_queried,
+                "errors": errors if errors else None,
+            })
+        else:
+            # No databases found
+            error_msg = f" Errors: {'; '.join(errors)}" if errors else ""
+            return json.dumps({
+                "type": "managed_databases",
+                "databases": [],
+                "count": 0,
+                "profiles_queried": profiles_queried,
+                "message": f"No managed databases found in profiles: {', '.join(profiles_queried)}.{error_msg}",
+            })
 
     except Exception as e:
         logger.error("db_managed_databases workflow failed", error=str(e))
@@ -3658,7 +3827,7 @@ async def db_long_running_ops_workflow(
             FROM v$session_longops
             WHERE sofar < totalwork OR time_remaining > 0
             ORDER BY elapsed_seconds DESC
-            FETCH FIRST {limit} ROWS ONLY
+            FETCH FIRST {limit} ROWS ONLY;
         """
 
         result = await tool_catalog.execute(
@@ -3804,7 +3973,7 @@ async def db_full_table_scan_workflow(
                 WHERE p.sql_id = '{sql_id}'
                   AND p.operation = 'TABLE ACCESS'
                   AND p.options = 'FULL'
-                ORDER BY s.elapsed_time DESC
+                ORDER BY s.elapsed_time DESC;
             """
         else:
             sql = f"""
@@ -3820,7 +3989,7 @@ async def db_full_table_scan_workflow(
                   AND p.options = 'FULL'
                   AND (seg.bytes IS NULL OR seg.bytes > {min_size_gb} * 1024 * 1024 * 1024)
                 ORDER BY s.elapsed_time DESC
-                FETCH FIRST {limit} ROWS ONLY
+                FETCH FIRST {limit} ROWS ONLY;
             """
 
         result = await tool_catalog.execute(
@@ -3951,7 +4120,7 @@ SELECT s.sid || ',' || s.serial# as blocked_session,
 FROM v$session s
 JOIN v$session bs ON s.blocking_session = bs.sid
 WHERE s.blocking_session IS NOT NULL
-ORDER BY s.seconds_in_wait DESC"""
+ORDER BY s.seconds_in_wait DESC;"""
             result = await tool_catalog.execute(
                 "oci_database_execute_sql",
                 {"connection_name": database_name, "sql": blocking_sql},
@@ -4311,6 +4480,10 @@ async def db_performance_overview_workflow(
     """
     import asyncio
 
+    # Timeout for each tool call - OPSI/DBMGMT APIs can be slow (60-180s typical)
+    # Use 120s to allow for slow responses while failing reasonably fast
+    PERF_TOOL_TIMEOUT = 120
+
     try:
         # Extract profile - supports multi-tenancy (EMDEMO, DEFAULT, etc.)
         # Priority: entities.profile > entities.oci_profile > metadata.oci_profile
@@ -4347,56 +4520,81 @@ async def db_performance_overview_workflow(
                     params["profile"] = profile
                 if dbmgmt_region:
                     params["region"] = dbmgmt_region
-                result = await tool_catalog.execute("oci_dbmgmt_get_fleet_health", params)
+                result = await asyncio.wait_for(
+                    tool_catalog.execute("oci_dbmgmt_get_fleet_health", params),
+                    timeout=PERF_TOOL_TIMEOUT,
+                )
                 return _extract_result(result)
+            except TimeoutError:
+                logger.warning(f"Fleet health timed out after {PERF_TOOL_TIMEOUT}s")
+                return None
             except Exception as e:
                 logger.debug("Fleet health failed", error=str(e))
                 return None
 
         async def get_addm_findings():
             try:
-                params = {"compartment_id": opsi_compartment, "days": 7}
+                params = {"compartment_id": opsi_compartment, "days_back": 7}
                 if database_id:
                     params["database_id"] = database_id
                 if profile:
                     params["profile"] = profile
                 if opsi_region:
                     params["region"] = opsi_region
-                result = await tool_catalog.execute("oci_opsi_get_addm_findings", params)
+                result = await asyncio.wait_for(
+                    tool_catalog.execute("oci_opsi_get_addm_findings", params),
+                    timeout=PERF_TOOL_TIMEOUT,
+                )
                 return _extract_result(result)
+            except TimeoutError:
+                logger.warning(f"ADDM findings timed out after {PERF_TOOL_TIMEOUT}s")
+                return None
             except Exception as e:
                 logger.debug("ADDM findings failed", error=str(e))
                 return None
 
         async def get_recommendations():
             try:
-                params = {"compartment_id": opsi_compartment, "days": 7}
+                params = {"compartment_id": opsi_compartment, "days_back": 7}
                 if database_id:
                     params["database_id"] = database_id
                 if profile:
                     params["profile"] = profile
                 if opsi_region:
                     params["region"] = opsi_region
-                result = await tool_catalog.execute("oci_opsi_get_addm_recommendations", params)
+                result = await asyncio.wait_for(
+                    tool_catalog.execute("oci_opsi_get_addm_recommendations", params),
+                    timeout=PERF_TOOL_TIMEOUT,
+                )
                 return _extract_result(result)
+            except TimeoutError:
+                logger.warning(f"ADDM recommendations timed out after {PERF_TOOL_TIMEOUT}s")
+                return None
             except Exception as e:
                 logger.debug("ADDM recommendations failed", error=str(e))
                 return None
 
         async def get_resource_stats():
             try:
-                params = {"compartment_id": opsi_compartment, "resource_metric": "CPU", "days": 7}
+                # Note: oci_opsi_summarize_resource_stats doesn't accept days parameter
+                params = {"compartment_id": opsi_compartment, "resource_metric": "CPU"}
                 if profile:
                     params["profile"] = profile
                 if opsi_region:
                     params["region"] = opsi_region
-                result = await tool_catalog.execute("oci_opsi_summarize_resource_stats", params)
+                result = await asyncio.wait_for(
+                    tool_catalog.execute("oci_opsi_summarize_resource_stats", params),
+                    timeout=PERF_TOOL_TIMEOUT,
+                )
                 return _extract_result(result)
+            except TimeoutError:
+                logger.warning(f"Resource stats timed out after {PERF_TOOL_TIMEOUT}s")
+                return None
             except Exception as e:
                 logger.debug("Resource stats failed", error=str(e))
                 return None
 
-        # Execute all in parallel
+        # Execute all in parallel (with individual timeouts)
         fleet_health, addm_findings, recommendations, resource_stats = await asyncio.gather(
             get_fleet_health(),
             get_addm_findings(),

@@ -17,7 +17,7 @@ This software was created to showcase Oracle Cloud Infrastructure (OCI) AI Integ
 - **Self-Healing**: Automatic error recovery with parameter correction and smart retries
 - **Resilience Infrastructure**: Bulkhead isolation, circuit breakers, dead letter queues
 - **RAG**: OCI GenAI embeddings with Redis vector store for documentation context
-- **OCI APM Tracing**: Full OpenTelemetry integration with trace-log correlation
+- **OCI APM Tracing**: Full OpenTelemetry integration with OTLP trace-log correlation (logs in span details)
 - **OCI Logging**: Per-agent dedicated logs with trace ID injection
 - **Multi-LLM Support**: Anthropic Claude, OpenAI GPT, OCI GenAI, Oracle Code Assist
 
@@ -111,10 +111,11 @@ SLACK_BOT_TOKEN=xoxb-xxx
 SLACK_APP_TOKEN=xapp-xxx
 SLACK_SIGNING_SECRET=xxx
 
-# OCI APM (OpenTelemetry)
+# OCI APM (OpenTelemetry Tracing + Log Correlation)
 OCI_APM_ENDPOINT=https://xxx.apm-agt.region.oci.oraclecloud.com
 OCI_APM_PRIVATE_DATA_KEY=xxx
 OTEL_SERVICE_NAME=oci-coordinator-agent
+# OTLP_LOG_LEVEL=INFO  # Min log level exported to APM (default: INFO)
 
 # OCI Logging
 OCI_LOG_GROUP_ID=ocid1.loggroup.oc1.region.xxx
@@ -358,8 +359,8 @@ oci-coordinator/
 │   │   ├── deadletter.py         # Failed operation queue
 │   │   └── health.py             # Health monitoring
 │   ├── observability/            # Tracing and logging
-│   │   ├── tracing.py            # OpenTelemetry → OCI APM
-│   │   └── oci_logging.py        # OCI Logging with trace correlation
+│   │   ├── tracing.py            # OpenTelemetry → OCI APM (traces + OTLP logs)
+│   │   └── oci_logging.py        # OCI Logging Service with trace correlation
 │   ├── formatting/               # Response formatters
 │   │   ├── base.py               # Structured response models
 │   │   └── slack.py              # Slack Block Kit + native tables
@@ -379,30 +380,42 @@ oci-coordinator/
 
 ### OCI APM Integration
 
-All agent operations are traced via OpenTelemetry:
+All agent operations are traced via OpenTelemetry with full log correlation:
 
 ```python
 from src.observability import init_observability, get_trace_id
 
-# Initialize on startup
+# Initialize on startup (enables tracing + OTLP log export + OCI Logging)
 init_observability(agent_name="db-troubleshoot-agent")
 
 # Get current trace ID for correlation
 trace_id = get_trace_id()
 ```
 
+### Log Correlation (3 Pipelines)
+
+Logs flow to three parallel destinations for different use cases:
+
+| Pipeline | Destination | Purpose |
+|----------|-------------|---------|
+| **OTLP Log Export** | OCI APM `/v1/logs` | Logs appear in APM span details "Logs" tab |
+| **OCI Logging** | OCI Logging Service | Persistence, Log Analytics queries |
+| **Console** | stdout | Local development |
+
+The OpenTelemetry SDK automatically injects `trace_id` and `span_id` from the active span context into each log record, enabling APM to correlate logs with specific spans.
+
 ### OCI Logging
 
 Per-agent dedicated logs with automatic trace correlation:
 
 ```python
-# Logs automatically include trace_id for APM correlation
-logger.info("Processing request", trace_id=get_trace_id())
+# Logs within an active span automatically include trace_id/span_id
+logger.info("Processing request")  # trace context injected automatically
 ```
 
 View correlated logs in OCI Console:
-- APM Traces: `cloud.oracle.com/apm/apm-traces`
-- Logging: `cloud.oracle.com/logging`
+- APM Traces + Logs: `cloud.oracle.com/apm/apm-traces` (click span → "Logs" tab)
+- OCI Logging: `cloud.oracle.com/logging` (filter by trace_id)
 
 ## Development Status
 
@@ -410,6 +423,7 @@ View correlated logs in OCI Console:
 - [x] Project structure and Poetry setup
 - [x] Multi-LLM factory (OCA, Anthropic, OpenAI, OCI GenAI)
 - [x] OpenTelemetry tracing → OCI APM
+- [x] OTLP log export → APM span-level log correlation
 - [x] OCI Logging with trace correlation
 - [x] MCP client infrastructure with retry logic
 - [x] Tool-specific timeouts for large compartments

@@ -509,6 +509,16 @@ class AgentCatalog:
         """
         try:
             agent_def = agent_class.get_definition()
+
+            # Skip if agent is already registered (prevents duplicate warnings
+            # when auto_discover() is called multiple times during startup)
+            if agent_def.role in self._agents:
+                self._logger.debug(
+                    "Agent already registered, skipping",
+                    role=agent_def.role,
+                )
+                return
+
             agent_def.registered_at = datetime.utcnow()
 
             # Check for duplicate capabilities across existing agents

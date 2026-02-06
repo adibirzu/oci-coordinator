@@ -1245,9 +1245,19 @@ async def _execute_sql_logic(
         # Assume it's a TNS alias
         if sqlcl_tns_admin and os.path.isdir(os.path.expanduser(sqlcl_tns_admin)):
             sqlcl_aliases = _parse_tnsnames(sqlcl_tns_admin)
-            if connection_name in sqlcl_aliases:
+            # Case-insensitive matching for TNS aliases
+            # Build a lowercase to original mapping
+            alias_map = {alias.lower(): alias for alias in sqlcl_aliases}
+            conn_lower = connection_name.lower()
+
+            if conn_lower in alias_map:
+                # Exact case-insensitive match
                 use_tns_alias = True
-                tns_alias = connection_name
+                tns_alias = alias_map[conn_lower]
+            elif f"{conn_lower}_high" in alias_map:
+                # Try with _high suffix (common pattern for ADB connections)
+                use_tns_alias = True
+                tns_alias = alias_map[f"{conn_lower}_high"]
 
     if not use_tns_alias:
         if connection_name == "atp_wallet" or (connection_name is None and atp_tns):

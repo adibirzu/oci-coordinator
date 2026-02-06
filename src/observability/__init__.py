@@ -56,8 +56,11 @@ from src.observability.tracing import (
     force_flush_traces,
     get_tracer,
     init_otel_tracing,
+    init_otlp_log_export,
     init_tracing,
     is_otel_enabled,
+    is_otlp_logs_enabled,
+    shutdown_otlp_log_export,
     shutdown_tracing,
     truncate,
 )
@@ -86,8 +89,9 @@ def init_observability(
 
     Initializes:
     1. OTEL tracing (exported to OCI APM)
-    2. OCI Logging (with trace_id correlation)
-    3. LLM Metrics publisher (to OCI Monitoring)
+    2. OTLP log export (logs appear in APM span "Logs" tab)
+    3. OCI Logging (with trace_id correlation for Log Analytics)
+    4. LLM Metrics publisher (to OCI Monitoring)
 
     Args:
         agent_name: Agent name for service identification
@@ -96,7 +100,11 @@ def init_observability(
     # Initialize tracing first
     init_tracing(component=agent_name)
 
-    # Initialize OCI Logging with trace correlation
+    # Initialize OTLP log export - sends logs to APM via OTLP
+    # so they appear in the span details "Logs" tab
+    init_otlp_log_export(component=agent_name)
+
+    # Initialize OCI Logging with trace correlation (for Log Analytics persistence)
     init_oci_logging(agent_name=agent_name, profile=profile)
 
     # Initialize LLM metrics publisher (for token tracking dashboards)
@@ -127,6 +135,10 @@ __all__ = [
     "force_flush_traces",
     "truncate",
     "SERVICE_NAMES",
+    # OTLP Log Export (APM span-level log correlation)
+    "init_otlp_log_export",
+    "is_otlp_logs_enabled",
+    "shutdown_otlp_log_export",
     # LLM Observability (GenAI Semantic Conventions)
     "LLMInstrumentor",
     "LLMSpanContext",

@@ -63,4 +63,8 @@
 ## Observability (`src/observability/`)
 
 - OpenTelemetry tracing to OCI APM via OTLP
-- Per-agent OCI Logging with trace_id correlation
+- OTLP log export to OCI APM for span-level log correlation (APM "Logs" tab)
+- Per-agent OCI Logging with trace_id correlation (Log Analytics persistence)
+- 3 parallel log pipelines: OTLP→APM, OCILogging→LogAnalytics, Console→stdout
+- GenAI semantic conventions for LLM call instrumentation (OracleCodeAssistInstrumentor)
+- Token usage, latency, and error tracking per LLM call

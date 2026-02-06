@@ -4,11 +4,13 @@
 
 | Server | Tools | Purpose |
 |--------|-------|---------|
-| **oci-unified** | 34 | Identity, compute, network, security, cost, discovery |
+| **oci-unified** | 77 | Identity, compute, network, database, dbmgmt, opsi, logan, cost, discovery |
 | **database-observatory** | 50+ | OPSI, SQLcl, Logan for database observability |
 | **oci-infrastructure** | 44 | Full OCI SDK wrapper |
 | **finopsai** | 33 | Multicloud cost, anomaly detection, rightsizing |
+| **oci-mcp-security** | 60+ | Cloud Guard, WAF, Bastion, KMS, DataSafe, IAM |
 
+**Total Tools**: 395+
 **Tool Timeouts:** Cost: 30s, Discovery: 60s, Standard: 120s
 
 ## Domain Prefixes (`src/mcp/catalog.py`)
@@ -19,6 +21,7 @@ DOMAIN_PREFIXES = {
     "infrastructure": ["oci_compute_", "oci_network_"],
     "finops": ["oci_cost_", "finops_"],
     "security": ["oci_security_"],
+    "observability": ["oci_observability_", "oci_logan_"],
 }
 ```
 

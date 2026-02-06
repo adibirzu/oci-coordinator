@@ -59,6 +59,10 @@ This document provides a comprehensive mapping of all features, MCP servers, too
   - GenAI semantic conventions for OpenTelemetry
   - `OracleCodeAssistInstrumentor` for OCA tracing
   - Token usage, latency, and error tracking
+- **OTLP Log Export to APM**:
+  - Logs appear in APM span details "Logs" tab
+  - Automatic trace_id/span_id injection via OTEL LoggerProvider
+  - 3 parallel log pipelines: OTLP→APM, OCILogging→LogAnalytics, Console→stdout
 - **OpenTelemetry Enabled** for all MCP servers
 
 ---

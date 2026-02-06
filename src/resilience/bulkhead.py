@@ -40,16 +40,17 @@ class BulkheadPartition(str, Enum):
 # Default limits per partition
 # Tuned for typical concurrent request patterns:
 # - Database operations are most common, need headroom for parallel workflows
+#   (each DB troubleshooting workflow can make 3-5 sequential tool calls)
 # - Discovery operations do bulk listing and need high concurrency
 # - LLM calls are expensive and should be bounded
 DEFAULT_PARTITION_LIMITS = {
-    BulkheadPartition.DATABASE: 10,     # Increased from 5: DB workflows use 3+ tools each
-    BulkheadPartition.INFRASTRUCTURE: 8,  # Increased from 5 for parallel compute/network
-    BulkheadPartition.COST: 6,          # Increased from 4: cost queries are slow but parallelizable
-    BulkheadPartition.SECURITY: 5,      # Increased from 3 for concurrent Cloud Guard queries
-    BulkheadPartition.DISCOVERY: 10,    # Increased from 6 for parallel list/search operations
-    BulkheadPartition.LLM: 5,           # Keep bounded - LLM calls are expensive
-    BulkheadPartition.DEFAULT: 15,      # Increased from 10 for catch-all
+    BulkheadPartition.DATABASE: 15,     # Increased: DB workflows use 3-5 tools each, concurrent users
+    BulkheadPartition.INFRASTRUCTURE: 10,  # Increased for parallel compute/network operations
+    BulkheadPartition.COST: 8,          # Increased: cost queries are slow but parallelizable
+    BulkheadPartition.SECURITY: 8,      # Increased for concurrent Cloud Guard queries
+    BulkheadPartition.DISCOVERY: 12,    # Increased for parallel list/search operations
+    BulkheadPartition.LLM: 8,           # Increased: LLM calls for multiple concurrent users
+    BulkheadPartition.DEFAULT: 20,      # Increased for catch-all partition
 }
 
 # Map tool prefixes to partitions
@@ -66,16 +67,16 @@ TOOL_TO_PARTITION = {
 }
 
 # Partition-specific acquire timeouts (seconds)
-# Slow operations (cost, database) need longer waits as their slots are held longer
-# Fast operations should fail fast to avoid cascading delays
+# These timeouts should match or exceed the longest tool timeout in each partition
+# to prevent bulkhead starvation when tools are waiting for slow MCP responses
 PARTITION_ACQUIRE_TIMEOUTS = {
-    BulkheadPartition.DATABASE: 30.0,      # SQL ops can take 30-60s, need patience
-    BulkheadPartition.INFRASTRUCTURE: 15.0,  # Compute/network are fairly quick
-    BulkheadPartition.COST: 45.0,          # Usage API is notoriously slow (60s+)
-    BulkheadPartition.SECURITY: 20.0,      # Cloud Guard queries are moderate
-    BulkheadPartition.DISCOVERY: 15.0,     # List/search are usually quick
-    BulkheadPartition.LLM: 60.0,           # LLM calls can be very slow
-    BulkheadPartition.DEFAULT: 10.0,       # Default: fail fast
+    BulkheadPartition.DATABASE: 120.0,     # OPSI/DBMGMT tools can take 60-240s (see mcp_servers.yaml)
+    BulkheadPartition.INFRASTRUCTURE: 30.0,  # Compute/network can take up to 180s for large compartments
+    BulkheadPartition.COST: 120.0,         # Usage API is notoriously slow (60-180s)
+    BulkheadPartition.SECURITY: 60.0,      # Cloud Guard queries can take 180s
+    BulkheadPartition.DISCOVERY: 30.0,     # List/search can be slow with many resources
+    BulkheadPartition.LLM: 90.0,           # LLM calls can be very slow (60-90s typical)
+    BulkheadPartition.DEFAULT: 30.0,       # Default: reasonable wait before fail
 }
 
 

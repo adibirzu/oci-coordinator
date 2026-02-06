@@ -666,13 +666,44 @@ class LLMFactory:
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
-### 10.2 Per-Agent OCI Logging
+### 10.2 Log Correlation Architecture
+
+Logs flow to three parallel destinations for different use cases:
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    LOG PIPELINE (3 DESTINATIONS)                      │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                      │
+│  Python logging (structlog)                                         │
+│    │                                                                 │
+│    ├──► OTLP LoggingHandler ──► OCI APM /v1/logs                    │
+│    │    (auto trace_id/span_id)   → Span details "Logs" tab         │
+│    │                                                                 │
+│    ├──► OCILoggingHandler ──► OCI Logging Service                   │
+│    │    (trace_id in JSON)      → Log Analytics queries              │
+│    │                                                                 │
+│    └──► ConsoleRenderer ──► stdout                                  │
+│         (dev-friendly format)                                       │
+│                                                                      │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+**OTLP Log Export** (APM span-level correlation):
+- Uses OpenTelemetry `LoggerProvider` + `OTLPLogExporter`
+- Sends to `{APM_ENDPOINT}/20200101/opentelemetry/private/v1/logs`
+- Same auth (dataKey) as trace exporter
+- Automatic `trace_id`/`span_id` injection from active span context
+- Logs appear in APM span details → "Logs" tab
+- Config: `OTLP_LOG_LEVEL` (default: INFO)
+
+### 10.3 Per-Agent OCI Logging
 
 Each agent writes to a dedicated OCI Log with trace_id correlation:
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│                    OCI LOGGING                                        │
+│                    OCI LOGGING SERVICE                                │
 ├─────────────────────────────────────────────────────────────────────┤
 │                                                                      │
 │  Log Group: oci-coordinator-agents                                  │
@@ -695,7 +726,7 @@ Each agent writes to a dedicated OCI Log with trace_id correlation:
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-### 10.3 Metrics
+### 10.4 Metrics
 
 | Metric | Type | Labels |
 |--------|------|--------|

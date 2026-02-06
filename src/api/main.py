@@ -159,8 +159,24 @@ app_state = AppState()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Manage application lifecycle."""
+    """Manage application lifecycle.
+
+    When running in combined mode (via start_both.py), the coordinator is already
+    initialized and MCP servers are already connected. We skip redundant initialization
+    to avoid "Server already registered" warnings and duplicate processes.
+    """
     logger.info("API server starting up")
+
+    # Check if coordinator already initialized (combined mode via start_both.py)
+    from src.main import get_mcp_registry, is_coordinator_initialized
+
+    if is_coordinator_initialized():
+        logger.info("Coordinator already initialized, skipping MCP setup")
+        registry = get_mcp_registry()
+        yield
+        # Don't cleanup in combined mode - coordinator manages MCP lifecycle
+        logger.info("API server shutting down")
+        return
 
     # Initialize MCP infrastructure for standalone API mode
     registry = None
@@ -184,7 +200,7 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    # Cleanup
+    # Cleanup (only in standalone mode)
     logger.info("API server shutting down")
     if registry:
         try:

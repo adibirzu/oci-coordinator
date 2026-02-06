@@ -47,9 +47,14 @@ SQLCL_FALLBACK_CONNECTION=ATPAdi
 
 | Tool Type | MCP Server | Use Case |
 |-----------|------------|----------|
-| Direct SQL (`oci_database_execute_sql`) | database-observatory | Real-time v$ queries |
+| Direct SQL (`oci_database_execute_sql`) | oci-unified (primary) | Real-time v$ queries via SQLcl |
 | DB Management APIs (`oci_dbmgmt_*`) | oci-unified | AWR, wait events, fleet health |
 | OPSI APIs (`oci_opsi_*`) | oci-unified | Resource stats, ADDM findings |
+| SQLcl (fallback) | database-observatory | Alternative SQL execution path |
+
+**Note**: Both `oci-unified` and `database-observatory` provide `oci_database_execute_sql`.
+The `oci-unified` server takes precedence (registered first). Both implementations support
+SQLcl execution with TNS aliases from `SQLCL_TNS_ADMIN` directory.
 
 ---
 

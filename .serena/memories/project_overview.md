@@ -16,16 +16,16 @@ Python LangGraph orchestration system managing specialized AI agents for Oracle 
 | API | FastAPI, Uvicorn |
 | LLM Providers | OCA, Anthropic, OpenAI, OCI GenAI |
 | Cache | Redis (session state, tool results) |
-| Observability | OpenTelemetry → OCI APM |
-| Testing | Pytest (212 tests, 80%+ coverage) |
+| Observability | OpenTelemetry → OCI APM (traces + OTLP logs) |
+| Testing | Pytest (316 tests, 80%+ coverage) |
 | Package Manager | Poetry |
 | Linting | Ruff, Black, MyPy |
 
 ## Architecture Summary
 
-- 6 specialized agents: DB Troubleshoot, Log Analytics, Security, FinOps, Infrastructure, Error Analysis
-- 4 MCP servers with 158+ tools
-- 35+ deterministic workflows, 100+ intent aliases
+- 7 specialized agents: DB Troubleshoot, Log Analytics, Security, FinOps, Infrastructure, Error Analysis, SelectAI
+- 5 MCP servers with 395+ tools (oci-unified, database-observatory, oci-infrastructure, finopsai, oci-mcp-security)
+- 40+ deterministic workflows, 100+ intent aliases
 - LangGraph coordinator with intent routing and parallel orchestration
 
 ## Key Directories
@@ -60,9 +60,10 @@ OCI_CLI_PROFILE=DEFAULT
 REDIS_URL=redis://localhost:6379
 USE_LANGGRAPH_COORDINATOR=true
 
-# Observability
+# Observability (Tracing + OTLP Log Export)
 OCI_APM_ENDPOINT=https://xxx.apm-agt.region.oci.oraclecloud.com
 OCI_APM_PRIVATE_DATA_KEY=xxx
+# OTLP_LOG_LEVEL=INFO  # Min log level exported to APM span "Logs" tab
 
 # Infrastructure Provisioning (requires ALLOW_MUTATIONS=true)
 # DEFAULT_COMPARTMENT_ID=ocid1.compartment.oc1..xxx
@@ -82,9 +83,10 @@ ALLOW_MUTATIONS=false  # Safety flag for write operations
 
 | Agent | Key Features |
 |-------|-------------|
-| DB Troubleshoot | AWR, Top SQL, Wait Events, OPSI |
-| Log Analytics | Pattern detection, anomaly detection |
-| Security | MITRE ATT&CK mapping (T1078, T1098, T1562) |
-| FinOps | Cost analysis (30s timeout), rightsizing |
+| DB Troubleshoot | AWR, Top SQL, Wait Events, OPSI, SQLcl diagnostics |
+| Log Analytics | Pattern detection, anomaly detection, multi-tenancy |
+| Security | MITRE ATT&CK mapping (T1078, T1098, T1562), 60+ tools |
+| FinOps | Cost analysis (30s timeout), rightsizing, multicloud |
 | Infrastructure | Compute, network, VCN, instance provisioning |
 | Error Analysis | ORA- patterns, OOM detection |
+| SelectAI | NL2SQL, data chat, AI orchestration |

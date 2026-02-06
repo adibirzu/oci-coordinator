@@ -85,12 +85,43 @@ mkdir -p "$PROJECT_DIR/logs"
 # Change to project directory
 cd "$PROJECT_DIR"
 
-# Load environment
-if [ -f ".env.local" ]; then
-    echo "Loading environment from .env.local"
-    set -a
-    source .env.local
-    set +a
+# Load environment from .env.local
+# Search multiple locations to support worktrees
+load_env_file() {
+    local env_file="$1"
+    if [ -f "$env_file" ]; then
+        echo "Loading environment from: $env_file"
+        set -a
+        source "$env_file"
+        set +a
+        # Export for child processes (including MCP servers)
+        export OCI_COORDINATOR_ENV_FILE="$env_file"
+        return 0
+    fi
+    return 1
+}
+
+ENV_LOADED=false
+
+# Try in order of preference:
+# 1. Current project directory
+# 2. Main project directory (for worktrees)
+# 3. Home-relative path
+# 4. Explicit environment variable
+
+if [ -n "$OCI_COORDINATOR_ENV_FILE" ] && [ -f "$OCI_COORDINATOR_ENV_FILE" ]; then
+    load_env_file "$OCI_COORDINATOR_ENV_FILE" && ENV_LOADED=true
+elif [ -f "$PROJECT_DIR/.env.local" ]; then
+    load_env_file "$PROJECT_DIR/.env.local" && ENV_LOADED=true
+elif [ -f "$HOME/dev/oci-coordinator/.env.local" ]; then
+    load_env_file "$HOME/dev/oci-coordinator/.env.local" && ENV_LOADED=true
+fi
+
+if [ "$ENV_LOADED" = false ]; then
+    echo "Warning: No .env.local found. Using system environment variables only."
+    echo "Searched:"
+    echo "  - $PROJECT_DIR/.env.local"
+    echo "  - $HOME/dev/oci-coordinator/.env.local"
 fi
 
 # Enable ShowOCI cache if requested
@@ -119,10 +150,22 @@ echo "  Log: $LOG_FILE"
 if [ "$FOREGROUND" = true ]; then
     # Run in foreground
     echo "Running in foreground (Ctrl+C to stop)..."
-    $PYTHON_CMD -m src.main --mode "$MODE" --port "$PORT"
+    if [ "$MODE" = "both" ]; then
+        # Use start_both.py for combined mode (works around asyncio interaction)
+        # Must use 'poetry run python' for proper environment setup
+        poetry run python "$SCRIPT_DIR/start_both.py"
+    else
+        $PYTHON_CMD -m src.main --mode "$MODE" --port "$PORT"
+    fi
 else
     # Run in background
-    nohup $PYTHON_CMD -m src.main --mode "$MODE" --port "$PORT" > "$LOG_FILE" 2>&1 &
+    if [ "$MODE" = "both" ]; then
+        # Use start_both.py for combined mode (works around asyncio interaction)
+        # Must use 'poetry run python' for proper environment setup
+        nohup poetry run python "$SCRIPT_DIR/start_both.py" > "$LOG_FILE" 2>&1 &
+    else
+        nohup $PYTHON_CMD -m src.main --mode "$MODE" --port "$PORT" > "$LOG_FILE" 2>&1 &
+    fi
     PID=$!
     echo "$PID" > "$PID_FILE"
 

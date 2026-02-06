@@ -136,12 +136,12 @@ OCI_SECURITY_PATH=/path/to/oci-mcp-security
 
 ## Observability
 
-OpenTelemetry integration with OCI APM for full tracing:
+OpenTelemetry integration with OCI APM for full tracing and log correlation:
 
 ```python
 from src.observability import init_observability, get_tracer, OracleCodeAssistInstrumentor
 
-# Initialize on startup
+# Initialize on startup (enables tracing + OTLP log export + OCI Logging)
 init_observability(agent_name="coordinator")
 
 # Instrument LLM calls with GenAI semantic conventions
@@ -151,6 +151,15 @@ with OracleCodeAssistInstrumentor.chat_span(model="oca/gpt5") as llm_ctx:
 ```
 
 **Key Tracers**: `oci-coordinator`, `mcp-oci-unified`, `mcp-oci-logan`, `oca-llm`
+
+**Log Pipelines** (3 parallel destinations):
+| Pipeline | Destination | Purpose |
+|----------|-------------|---------|
+| OTLP Log Export | OCI APM `/v1/logs` | Span-level log correlation (APM "Logs" tab) |
+| OCI Logging | OCI Logging Service | Persistence, Log Analytics queries |
+| Console | stdout | Local development |
+
+Logs emitted within an active span automatically include `trace_id`/`span_id` for correlation.
 
 ## Reference
 

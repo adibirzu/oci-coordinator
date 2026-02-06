@@ -1519,12 +1519,21 @@ class CoordinatorNodes:
         # DB performance overview (combined analysis)
         perf_overview_keywords = ["database performance", "db performance", "comprehensive db", "full db analysis", "check database performance"]
         if any(kw in query_lower for kw in perf_overview_keywords):
+            entities = {}
+            db_name = self._extract_database_name(query)
+            if db_name:
+                entities["database_name"] = db_name
+            profiles = self._extract_profiles(query)
+            if profiles:
+                entities["profiles"] = profiles
+                if len(profiles) == 1:
+                    entities["oci_profile"] = profiles[0]
             return IntentClassification(
                 intent="db_performance_overview",
                 category=IntentCategory.ANALYSIS,
                 confidence=0.95,
                 domains=["database"],  # Single domain - workflow handles OPSI internally
-                entities={},
+                entities=entities,
                 suggested_workflow="db_performance_overview",
                 suggested_agent="db-troubleshoot-agent",  # Route to DB agent
             )

@@ -447,6 +447,8 @@ def determine_routing(
         "full_table_scan", "top_sql", "sql_monitoring", "long_running_ops",
         "parallelism_stats", "awr_report", "blocking_sessions", "wait_events",
         "sql_plan_baselines", "addm_findings", "addm_report",
+        # Fleet/overview workflows - run directly without agent LLM reasoning
+        "db_performance_overview", "db_fleet_health", "managed_databases",
     }
 
     if (
