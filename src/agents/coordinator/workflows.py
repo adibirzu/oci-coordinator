@@ -6212,9 +6212,14 @@ WORKFLOW_REGISTRY: dict[str, Any] = {
     # SelectAI - Natural Language Query
     "selectai_query": selectai_generate_workflow,
     "nl_query": selectai_generate_workflow,
+    "nl2sql": selectai_generate_workflow,
     "natural_language_sql": selectai_generate_workflow,
+    "natural_language_query": selectai_generate_workflow,
     "ask_database": selectai_generate_workflow,
+    "ask_data": selectai_generate_workflow,
     "ask_selectai": selectai_generate_workflow,
+    "query_data": selectai_generate_workflow,
+    "data_chat": selectai_generate_workflow,
     "selectai_generate": selectai_generate_workflow,
 
     # Observability - Alarms and Monitoring

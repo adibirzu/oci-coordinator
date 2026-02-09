@@ -8,9 +8,9 @@ This software was created to showcase Oracle Cloud Infrastructure (OCI) AI Integ
 
 ## Features
 
-- **Multi-Agent Orchestration**: Coordinate 6 specialized agents for database, logging, security, cost, infrastructure, and error analysis
-- **Workflow-First Design**: 70%+ deterministic workflows via MCP tools (**35+ pre-built workflows** with 100+ intent aliases); LLM reasoning for complex analysis
-- **395+ MCP Tools**: 4 MCP servers (oci-unified, database-observatory, oci-infrastructure, finopsai-mcp)
+- **Multi-Agent Orchestration**: Coordinate 7 specialized agents for database, logging, security, cost, infrastructure, error analysis, and NL2SQL/data chat
+- **Workflow-First Design**: 70%+ deterministic workflows via MCP tools (**40+ pre-built workflows** with 300+ intent aliases); LLM reasoning for complex analysis
+- **270+ MCP Tools**: 5 MCP servers (oci-unified, database-observatory, oci-infrastructure, finopsai-mcp, oci-mcp-security)
 - **Database Observatory Integration**: Full OPSI, SQLcl, and Logan Analytics via MCP
 - **Slack Integration**: Real-time chatbot with Socket Mode, 3-second ack pattern, and interactive quick actions
 - **REST API**: FastAPI server with SSE streaming support - all commands available via API
@@ -44,6 +44,11 @@ This software was created to showcase Oracle Cloud Infrastructure (OCI) AI Integ
      │   DB    │    │   Log   │   │Security │   │ FinOps  │    │  Infra  │
      │Troublesh│    │Analytics│   │ Threat  │   │  Agent  │    │  Agent  │
      └────┬────┘    └────┬────┘   └────┬────┘   └────┬────┘    └────┬────┘
+          │              │             │             │               │
+     ┌─────────┐    ┌─────────┐        │             │               │
+     │ Error   │    │SelectAI │        │             │               │
+     │Analysis │    │  Agent  │        │             │               │
+     └────┬────┘    └────┬────┘        │             │               │
           └─────────────┴─────────────┼─────────────┴─────────────┘
                                       │
                         ┌─────────────▼─────────────┐
@@ -141,7 +146,7 @@ poetry run python -m src.main --mode api --port 3001
 # Start both
 poetry run python -m src.main --mode both
 
-# Run tests (281+ tests)
+# Run tests (316 tests)
 poetry run pytest --cov=src
 
 # Lint and format
@@ -159,6 +164,7 @@ poetry run black src/
 | **FinOps** | Cost analysis, optimization | `get_cost_summary`, `oci_cost_spikes`, `oci_cost_budget_status` | cost, budget, spending |
 | **Infrastructure** | Compute, network management | `list_instances`, `manage_vcn`, `start_by_name` | instance, VM, VCN |
 | **Error Analysis** | Log error detection, admin todos | `oci_logging_search_logs`, pattern detection | error scan, patterns, admin |
+| **SelectAI** | NL2SQL, data chat, AI orchestration | `oci_selectai_generate`, `oci_selectai_run_agent` | query data, ask database, NL2SQL |
 
 ### FinOps AI Agent
 
@@ -205,7 +211,7 @@ The DB Troubleshoot Agent uses tiered MCP tools for optimal response times:
 | **2 (OPSI API)** | 1-5s | `analyze_cpu_usage`, `analyze_memory_usage`, `get_performance_summary` |
 | **3 (SQL)** | 5-30s | `execute_sql`, `get_schema_info`, `database_status` |
 
-### Available Workflows (35+)
+### Available Workflows (40+)
 
 **Database Troubleshooting**:
 - `db_blocking_sessions_workflow` - Blocking session detection via v$session
@@ -292,12 +298,13 @@ curl -X POST http://localhost:3001/chat \
 
 | Server | Tools | Description | GitHub |
 |--------|-------|-------------|--------|
-| **oci-unified** | 51 | Built-in server with ShowOCI-style discovery | `src/mcp/server/` (this project) |
+| **oci-unified** | 83 | Built-in server with ShowOCI-style discovery | `src/mcp/server/` (this project) |
 | **database-observatory** | 50+ | OPSI, SQLcl, Logan Analytics | [adibirzu/mcp-oci-database-observatory](https://github.com/adibirzu/mcp-oci-database-observatory) |
 | **oci-infrastructure** | 44 | Full OCI management (mcp-oci) | [adibirzu/mcp-oci](https://github.com/adibirzu/mcp-oci) |
 | **finopsai-mcp** | 33 | Multicloud FinOps with anomaly detection | [adibirzu/finopsai-mcp](https://github.com/adibirzu/finopsai-mcp) |
+| **oci-mcp-security** | 60+ | Cloud Guard, WAF, KMS, Bastion, DataSafe | [adibirzu/oci-mcp-security](https://github.com/adibirzu/oci-mcp-security) |
 
-**Total: 395+ tools across 4 MCP servers**
+**Total: 270+ tools across 5 MCP servers**
 
 ### Why oci-unified vs mcp-oci?
 
@@ -323,7 +330,7 @@ oci-coordinator/
 │   │   ├── coordinator/          # LangGraph coordinator
 │   │   │   ├── graph.py          # StateGraph with intent routing
 │   │   │   ├── orchestrator.py   # Parallel orchestration with loop prevention
-│   │   │   ├── workflows.py      # 35+ pre-built deterministic workflows
+│   │   │   ├── workflows.py      # 40+ pre-built deterministic workflows
 │   │   │   └── state.py          # Conversation state management
 │   │   ├── database/             # DB Troubleshoot Agent
 │   │   ├── log_analytics/        # Log Analytics Agent
@@ -331,6 +338,7 @@ oci-coordinator/
 │   │   ├── finops/               # FinOps Agent
 │   │   ├── infrastructure/       # Infrastructure Agent
 │   │   ├── error_analysis/       # Error Analysis Agent with admin todos
+│   │   ├── selectai/             # SelectAI Agent (NL2SQL, data chat)
 │   │   └── self_healing/         # Self-healing framework (analyzer, corrector)
 │   ├── channels/                 # Input channel integrations
 │   │   └── slack.py              # Slack Bot with LangGraph integration
@@ -369,7 +377,7 @@ oci-coordinator/
 │   ├── api/                      # FastAPI endpoints
 │   │   └── main.py               # REST API with chat, tools, agents
 │   └── main.py                   # Application entry point
-├── tests/                        # Pytest test suite (281+ tests)
+├── tests/                        # Pytest test suite (316 tests)
 ├── config/                       # Configuration files
 │   └── mcp_servers.yaml          # MCP server definitions
 ├── prompts/                      # Agent system prompts
@@ -430,13 +438,13 @@ View correlated logs in OCI Console:
 - [x] Database Observatory MCP integration
 - [x] Agent catalog with auto-discovery
 - [x] Skill system with step execution
-- [x] 6 Specialized Agents (DB Troubleshoot, Log Analytics, Security, FinOps, Infrastructure, Error Analysis)
+- [x] 7 Specialized Agents (DB Troubleshoot, Log Analytics, Security, FinOps, Infrastructure, Error Analysis, SelectAI)
 - [x] Slack Bot integration (Socket Mode + LangGraph + 3-second ack)
 - [x] Instance operations by name (`oci_compute_*_by_name`)
 - [x] Structured response formatting with Slack table blocks
 - [x] LangGraph coordinator with intent routing
 - [x] Multi-agent parallel orchestration with loop prevention
-- [x] 35+ pre-built deterministic workflows with 100+ intent aliases
+- [x] 40+ pre-built deterministic workflows with 300+ intent aliases
 - [x] FastAPI REST API server with SSE streaming
 - [x] Tool aliases and domain-based dynamic discovery
 - [x] ToolConverter for MCP → LangChain
@@ -446,7 +454,7 @@ View correlated logs in OCI Console:
 - [x] Resilience infrastructure (Bulkhead, Circuit Breaker, DLQ)
 - [x] Redis caching with tag-based invalidation
 - [x] Context compression for long conversations
-- [x] 281+ tests passing (80%+ coverage target)
+- [x] 316 tests passing (80%+ coverage target)
 
 ### Planned 📋
 - [ ] Microsoft Teams integration
@@ -456,7 +464,7 @@ View correlated logs in OCI Console:
 ## Testing
 
 ```bash
-# Run all 212 tests
+# Run all tests
 poetry run pytest --cov=src
 
 # Run specific test file

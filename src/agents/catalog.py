@@ -254,6 +254,7 @@ DOMAIN_PRIORITY = {
     },
     "observability": {
         "log-analytics-agent": 100,
+        "error-analysis-agent": 80,
         "db-troubleshoot-agent": 20,
     },
     "infrastructure": {

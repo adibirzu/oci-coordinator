@@ -5,10 +5,10 @@
 The OCI AI Agent Coordinator is a LangGraph-based orchestration system implementing a **Workflow-First** architecture. It prioritizes deterministic workflows for known tasks (target: 70%+ of requests) while providing agentic fallback for complex or novel queries.
 
 **Current Capabilities:**
-- **395+ MCP Tools** across 4 servers
-- **35+ Pre-built Workflows** with 100+ intent aliases
-- **6 Specialized Agents** (DB Troubleshoot, Log Analytics, Security, FinOps, Infrastructure, Error Analysis)
-- **281+ Tests** passing (80%+ coverage target)
+- **270+ MCP Tools** across 5 servers
+- **40+ Pre-built Workflows** with 300+ intent aliases
+- **7 Specialized Agents** (DB Troubleshoot, Log Analytics, Security, FinOps, Infrastructure, Error Analysis, SelectAI)
+- **316 Tests** passing (80%+ coverage target)
 
 See `docs/DEMO_PLAN.md` for 30 production-ready Slack commands demonstrating end-to-end capabilities.
 
@@ -335,7 +335,7 @@ class ConversationContext:
 │                          │                │                 │           │
 │                          ▼                ▼                 │           │
 │                   ┌────────────────────────────┐            │           │
-│                   │  SPECIALIZED AGENTS (6)    │            │           │
+│                   │  SPECIALIZED AGENTS (7)    │            │           │
 │                   │  ┌──────────────────────┐ │            │           │
 │                   │  │ • DB Troubleshoot    │ │            │           │
 │                   │  │ • Log Analytics      │ │            │           │
@@ -343,6 +343,7 @@ class ConversationContext:
 │                   │  │ • FinOps             │ │            │           │
 │                   │  │ • Infrastructure     │ │            │           │
 │                   │  │ • Error Analysis     │ │            │           │
+│                   │  │ • SelectAI           │ │            │           │
 │                   │  └──────────────────────┘ │            │           │
 │                   └──────────────┬────────────┘            │           │
 │                                  │                          │           │
@@ -377,7 +378,7 @@ class ConversationContext:
 ├──────────────────────────────────────────────────────────────────────────┤
 │                                                                           │
 │   ┌─────────────────────────────────────────────────────────────────────┐│
-│   │  oci-unified (Built-in) — 51 tools                                  ││
+│   │  oci-unified (Built-in) — 83 tools                                  ││
 │   │  └── Identity, Compute, Network, Cost, Security, Observability      ││
 │   └─────────────────────────────────────────────────────────────────────┘│
 │                           │                                               │
@@ -394,6 +395,11 @@ class ConversationContext:
 │   ┌─────────────────────────────────────────────────────────────────────┐│
 │   │  finopsai (External) — 33 tools                                      ││
 │   │  └── Multicloud Cost, Anomaly Detection, Rightsizing                ││
+│   └─────────────────────────────────────────────────────────────────────┘│
+│                           │                                               │
+│   ┌─────────────────────────────────────────────────────────────────────┐│
+│   │  oci-mcp-security (External) — 60+ tools                            ││
+│   │  └── Cloud Guard, WAF, KMS, Bastion, DataSafe, Audit              ││
 │   └─────────────────────────────────────────────────────────────────────┘│
 │                           │                                               │
 └───────────────────────────┼───────────────────────────────────────────────┘
@@ -452,10 +458,11 @@ defaults:
 
 | Server | Description | GitHub Repository |
 |--------|-------------|-------------------|
-| **oci-unified** | Built-in unified server with ShowOCI-style discovery | `src/mcp/server/` (this project) |
-| **database-observatory** | OPSI, SQLcl, Logan Analytics | [adibirzu/mcp-oci-database-observatory](https://github.com/adibirzu/mcp-oci-database-observatory) |
-| **oci-infrastructure** | Full OCI management (mcp-oci) | [adibirzu/mcp-oci](https://github.com/adibirzu/mcp-oci) |
-| **finopsai-mcp** | Multicloud FinOps with anomaly detection | [adibirzu/finopsai-mcp](https://github.com/adibirzu/finopsai-mcp) |
+| **oci-unified** | Built-in unified server with ShowOCI-style discovery (83 tools) | `src/mcp/server/` (this project) |
+| **database-observatory** | OPSI, SQLcl, Logan Analytics (50+ tools) | [adibirzu/mcp-oci-database-observatory](https://github.com/adibirzu/mcp-oci-database-observatory) |
+| **oci-infrastructure** | Full OCI management via mcp-oci (44 tools) | [adibirzu/mcp-oci](https://github.com/adibirzu/mcp-oci) |
+| **finopsai-mcp** | Multicloud FinOps with anomaly detection (33 tools) | [adibirzu/finopsai-mcp](https://github.com/adibirzu/finopsai-mcp) |
+| **oci-mcp-security** | Cloud Guard, WAF, KMS, Bastion, DataSafe (60+ tools) | [adibirzu/oci-mcp-security](https://github.com/adibirzu/oci-mcp-security) |
 
 ### 7.3 MCP Server Capabilities Comparison
 
@@ -866,6 +873,7 @@ APPROVAL_REQUIRED = [
 - [x] FinOps agent (`src/agents/finops/`)
 - [x] Infrastructure agent (`src/agents/infrastructure/`)
 - [x] Error Analysis agent (`src/agents/error_analysis/`)
+- [x] SelectAI agent (`src/agents/selectai/`) — NL2SQL, data chat, AI orchestration
 - [x] Channel-aware formatting (`src/formatting/`)
 - [x] Instance operations by name (`oci_compute_*_by_name`)
 - [x] DB Troubleshooting workflows (see `docs/DB_TROUBLESHOOTING_WORKFLOW.md`)
@@ -989,13 +997,13 @@ Resource isolation prevents one domain from exhausting resources:
 
 | Partition | Max Concurrent | Timeout | Use Case |
 |-----------|----------------|---------|----------|
-| DATABASE | 3 | 60s | SQL execution, OPSI queries |
-| INFRASTRUCTURE | 5 | 30s | Compute/network operations |
-| COST | 2 | 30s | OCI Usage API (slow) |
-| SECURITY | 3 | 30s | Cloud Guard, IAM |
-| DISCOVERY | 2 | 60s | Full resource scans |
-| LLM | 5 | 300s | LLM inference |
-| DEFAULT | 10 | 120s | Other operations |
+| DATABASE | 15 | 120s | SQL execution, OPSI queries |
+| INFRASTRUCTURE | 10 | 30s | Compute/network operations |
+| COST | 8 | 120s | OCI Usage API (slow) |
+| SECURITY | 8 | 60s | Cloud Guard, IAM |
+| DISCOVERY | 12 | 30s | Full resource scans |
+| LLM | 8 | 90s | LLM inference |
+| DEFAULT | 20 | 30s | Other operations |
 
 ### 14.4 Health Monitor Configuration
 

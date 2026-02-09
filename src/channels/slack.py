@@ -158,9 +158,6 @@ async def _resume_pending_request_async(
     """
     from slack_sdk.web.async_client import AsyncWebClient
 
-    from src.formatting.parser import ResponseParser
-    from src.formatting.slack import SlackFormatter
-
     client = AsyncWebClient(token=bot_token)
 
     try:
@@ -309,10 +306,6 @@ def notify_auth_success(bot_token: str | None = None) -> None:
     Args:
         bot_token: Slack bot token (uses env var if not provided)
     """
-    import time
-
-    from src.channels.async_runtime import run_async
-
     token = bot_token or os.getenv("SLACK_BOT_TOKEN")
     if not token:
         logger.warning("Cannot notify auth success: no bot token")
@@ -1036,7 +1029,6 @@ class SlackHandler:
         Returns:
             The result (SlackResponse) from the client method
         """
-        import asyncio
         import inspect
 
         from slack_sdk.errors import SlackApiError
@@ -1142,7 +1134,6 @@ class SlackHandler:
         Returns:
             The result from say
         """
-        import asyncio
         import inspect
 
         from slack_sdk.errors import SlackApiError
@@ -1291,8 +1282,6 @@ class SlackHandler:
         connection issues that occur when creating new event loops.
         """
         # Ensure AsyncRuntime is started before registering handlers
-        import time
-
         from src.channels.async_runtime import AsyncRuntime
 
         runtime = AsyncRuntime.get_instance()
@@ -3165,8 +3154,6 @@ class SlackHandler:
         Returns:
             LLM-generated response
         """
-        import time
-
         from langchain_core.messages import HumanMessage, SystemMessage
 
         # Get tracer for LLM calls

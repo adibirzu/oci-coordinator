@@ -130,6 +130,7 @@ class CoordinatorNodes:
             "security-threat-agent": "security_audit",
             "finops-agent": "cost_analysis",
             "infrastructure-agent": "infrastructure_check",
+            "selectai-agent": "selectai",
         }
 
         # Check if agent role has a mapped workflow type
@@ -144,6 +145,8 @@ class CoordinatorNodes:
                 workflow_type = "security_audit"
             elif any(kw in query_lower for kw in ["database", "db", "sql", "awr", "performance"]):
                 workflow_type = "database_troubleshoot"
+            elif any(kw in query_lower for kw in ["nl2sql", "selectai", "query data", "ask my data", "natural language"]):
+                workflow_type = "selectai"
 
         return workflow_type
 
@@ -971,6 +974,11 @@ class CoordinatorNodes:
                 "domains": ["compute", "network", "storage", "vcn"],
                 "tools": ["oci_compute_*", "oci_network_*"],
                 "description": "Compute instances, VCNs, subnets, lifecycle management",
+            },
+            "selectai-agent": {
+                "domains": ["selectai", "nl2sql", "data"],
+                "tools": ["oci_selectai_*"],
+                "description": "NL2SQL queries, data chat, AI agent orchestration via SelectAI",
             },
         }
 
