@@ -61,9 +61,20 @@ from src.formatting.parser import ParseResult, ResponseParser
 from src.formatting.slack import SlackFormatter
 from src.formatting.teams import TeamsFormatter
 
+# Import markdown converter
+from src.formatting.markdown_to_slack import (
+    MarkdownToSlackConverter,
+    convert_markdown_to_slack,
+    convert_markdown_text,
+)
+
 __all__ = [
     # Core types
     "OutputFormat",
+    # Markdown converter
+    "MarkdownToSlackConverter",
+    "convert_markdown_to_slack",
+    "convert_markdown_text",
     "Severity",
     "TrendDirection",
     # Response components
