@@ -14,6 +14,7 @@ Implements the graph nodes:
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
@@ -30,7 +31,12 @@ from src.agents.coordinator.state import (
     RoutingType,
     ToolCall,
     ToolResult,
+    add_thinking_step,
     determine_routing,
+    state_get_routing_type,
+    state_has_pending_tools,
+    state_should_continue,
+    state_to_dict,
 )
 from src.agents.coordinator.transparency import (
     AgentCandidate,
@@ -99,9 +105,9 @@ class CoordinatorNodes:
     ) -> IntentClassification:
         """Merge context from previous intent if needed."""
         # IF previous intent exists AND has entities
-        if state.intent and state.intent.entities:
+        if state.get("intent") and state.get("intent").entities:
             # Merge entities, new entities take precedence
-            merged_entities = state.intent.entities.copy()
+            merged_entities = state.get("intent").entities.copy()
             merged_entities.update(intent.entities)
 
             # Update the intent with merged entities
@@ -168,12 +174,12 @@ class CoordinatorNodes:
             State updates
         """
         with _tracer.start_as_current_span("coordinator.input") as span:
-            span.set_attribute("message_count", len(state.messages))
-            self._logger.debug("Processing input", message_count=len(state.messages))
+            span.set_attribute("message_count", len(state.get("messages", [])))
+            self._logger.debug("Processing input", message_count=len(state.get("messages", [])))
 
             # Extract query from last human message
             query = ""
-            for msg in reversed(state.messages):
+            for msg in reversed(state.get("messages", [])):
                 if isinstance(msg, HumanMessage):
                     query = msg.content
                     break
@@ -216,25 +222,46 @@ class CoordinatorNodes:
             State updates with intent classification
         """
         with _tracer.start_as_current_span("coordinator.classifier") as span:
-            span.set_attribute("query_preview", state.query[:100] if state.query else "")
-            self._logger.info("Classifying intent", query=state.query[:100])
+            span.set_attribute("query_preview", state.get("query", "")[:100] if state.get("query", "") else "")
+            self._logger.info("Classifying intent", query=state.get("query", "")[:100])
 
             # Add thinking step for classification start
-            thinking_trace = state.thinking_trace
+            thinking_trace = state.get("thinking_trace")
             if thinking_trace:
                 thinking_trace.add_step(
                     ThinkingPhase.CLASSIFYING,
                     "Analyzing query to understand intent...",
-                    {"query_preview": state.query[:100]},
+                    {"query_preview": state.get("query", "")[:100]},
                 )
 
             # Pre-classification: Check for domain-specific queries
             # This is more reliable than LLM for specific patterns
             # ORDER MATTERS: More specific queries should be checked BEFORE generic ones
 
+            # 0. Check help/agent queries FIRST (list agents, capabilities, help)
+            pre_classified = self._pre_classify_help_query(state.get("query", ""))
+            if pre_classified:
+                span.set_attribute("pre_classification", "help")
+                self._logger.info(
+                    "Pre-classified help/agent query",
+                    intent=pre_classified.intent,
+                    workflow=pre_classified.suggested_workflow,
+                )
+                if thinking_trace:
+                    thinking_trace.add_step(
+                        ThinkingPhase.CLASSIFIED,
+                        f"Detected help/agent query → Intent: {pre_classified.intent}",
+                        {
+                            "method": "pre-classification",
+                            "intent": pre_classified.intent,
+                            "confidence": pre_classified.confidence,
+                        },
+                    )
+                return {"intent": self._enrich_intent(pre_classified, state)}
+
             # 1. Check DB Management queries FIRST (troubleshooting: AWR, SQL, blocking, wait events)
             # These are more specific than database listing and should take priority
-            pre_classified = self._pre_classify_dbmgmt_query(state.query)
+            pre_classified = self._pre_classify_dbmgmt_query(state.get("query", ""))
             if pre_classified:
                 span.set_attribute("pre_classification", "dbmgmt")
                 self._logger.info(
@@ -256,7 +283,7 @@ class CoordinatorNodes:
                 return {"intent": self._enrich_intent(pre_classified, state)}
 
             # 2. Check OPSI queries (ADDM, capacity, insights) - also more specific
-            pre_classified = self._pre_classify_opsi_query(state.query)
+            pre_classified = self._pre_classify_opsi_query(state.get("query", ""))
             if pre_classified:
                 span.set_attribute("pre_classification", "opsi")
                 self._logger.info(
@@ -278,7 +305,7 @@ class CoordinatorNodes:
                 return {"intent": self._enrich_intent(pre_classified, state)}
 
             # 3. Check SelectAI queries (tables, profiles, natural language SQL)
-            pre_classified = self._pre_classify_selectai_query(state.query)
+            pre_classified = self._pre_classify_selectai_query(state.get("query", ""))
             if pre_classified:
                 span.set_attribute("pre_classification", "selectai")
                 self._logger.info(
@@ -300,7 +327,7 @@ class CoordinatorNodes:
                 return {"intent": self._enrich_intent(pre_classified, state)}
 
             # 4. Check database listing queries (generic database queries)
-            pre_classified = self._pre_classify_database_query(state.query)
+            pre_classified = self._pre_classify_database_query(state.get("query", ""))
             if pre_classified:
                 span.set_attribute("pre_classification", "database_listing")
                 self._logger.info(
@@ -323,7 +350,7 @@ class CoordinatorNodes:
                 return {"intent": self._enrich_intent(pre_classified, state)}
 
             # 4. Check resource-cost mapping queries (e.g., "what's costing me the most")
-            pre_classified = self._pre_classify_resource_cost_query(state.query)
+            pre_classified = self._pre_classify_resource_cost_query(state.get("query", ""))
             if pre_classified:
                 span.set_attribute("pre_classification", "resource_cost_mapping")
                 self._logger.info(
@@ -345,7 +372,7 @@ class CoordinatorNodes:
                 return {"intent": self._enrich_intent(pre_classified, state)}
 
             # 5. Check domain-specific cost queries
-            pre_classified = self._pre_classify_cost_query(state.query)
+            pre_classified = self._pre_classify_cost_query(state.get("query", ""))
             if pre_classified:
                 span.set_attribute("pre_classification", "cost_domain_specific")
                 self._logger.info(
@@ -367,7 +394,7 @@ class CoordinatorNodes:
                 return {"intent": self._enrich_intent(pre_classified, state)}
 
             # 6. Check identity queries (compartments, tenancy, regions)
-            pre_classified = self._pre_classify_identity_query(state.query)
+            pre_classified = self._pre_classify_identity_query(state.get("query", ""))
             if pre_classified:
                 span.set_attribute("pre_classification", "identity")
                 self._logger.info(
@@ -390,7 +417,7 @@ class CoordinatorNodes:
 
             # 7. Check error analysis queries (error messages, exceptions)
             # This MUST come before compute to avoid misrouting errors mentioning "server"
-            pre_classified = self._pre_classify_error_query(state.query)
+            pre_classified = self._pre_classify_error_query(state.get("query", ""))
             if pre_classified:
                 span.set_attribute("pre_classification", "error_analysis")
                 self._logger.info(
@@ -412,7 +439,7 @@ class CoordinatorNodes:
                 return {"intent": self._enrich_intent(pre_classified, state)}
 
             # 8. Check compute/infrastructure queries (create instance, list shapes)
-            pre_classified = self._pre_classify_compute_query(state.query)
+            pre_classified = self._pre_classify_compute_query(state.get("query", ""))
             if pre_classified:
                 span.set_attribute("pre_classification", "compute")
                 self._logger.info(
@@ -434,7 +461,7 @@ class CoordinatorNodes:
                 return {"intent": self._enrich_intent(pre_classified, state)}
 
             # 8. Check security queries (cloudguard, vulnerabilities, threats)
-            pre_classified = self._pre_classify_security_query(state.query)
+            pre_classified = self._pre_classify_security_query(state.get("query", ""))
             if pre_classified:
                 span.set_attribute("pre_classification", "security")
                 self._logger.info(
@@ -456,7 +483,7 @@ class CoordinatorNodes:
                 return {"intent": self._enrich_intent(pre_classified, state)}
 
             # 9. Check observability queries (alarms, metrics)
-            pre_classified = self._pre_classify_observability_query(state.query)
+            pre_classified = self._pre_classify_observability_query(state.get("query", ""))
             if pre_classified:
                 span.set_attribute("pre_classification", "observability")
                 self._logger.info(
@@ -486,13 +513,13 @@ class CoordinatorNodes:
                 )
 
             # Build classification prompt
-            classification_prompt = self._build_classification_prompt(state.query)
+            classification_prompt = self._build_classification_prompt(state.get("query", ""))
 
             try:
                 response = await self.llm.ainvoke([HumanMessage(content=classification_prompt)])
 
                 # Parse classification from response
-                intent = self._parse_classification(response.content, state.query)
+                intent = self._parse_classification(response.content, state.get("query", ""))
 
                 span.set_attribute("intent.name", intent.intent)
                 span.set_attribute("intent.category", intent.category.value)
@@ -1772,8 +1799,22 @@ class CoordinatorNodes:
         has_instance = any(kw in query_lower for kw in instance_keywords)
         has_listing = any(kw in query_lower for kw in listing_keywords)
 
-        # IMPORTANT: Check listing patterns FIRST (takes precedence over provisioning)
-        # This handles "show me last 10 created instances" correctly as list, not provision
+        # IMPORTANT: Check ACTION verbs FIRST - they take precedence over listing quantifiers.
+        # "start all instances" is an ACTION, not a listing query.
+        # "list stopped instances" IS a listing query (handled below).
+        action_keywords = ["start", "boot", "power on", "turn on",
+                           "stop", "shutdown", "shut down", "power off", "turn off", "halt",
+                           "restart", "reboot", "reset"]
+        has_action = any(kw in query_lower for kw in action_keywords)
+
+        # If an action verb is present, skip listing even if "all" is in the query.
+        # Exception: explicit listing verbs like "list/show stopped instances" should still list.
+        explicit_listing_verbs = ["list", "show", "display", "find", "what", "which", "get"]
+        has_explicit_listing = any(kw in query_lower for kw in explicit_listing_verbs)
+        if has_action and not has_explicit_listing:
+            has_listing = False
+
+        # Check listing patterns (takes precedence over provisioning but NOT over actions)
 
         # List shapes patterns
         shape_keywords = ["shape", "shapes", "instance type", "instance types"]
@@ -1894,6 +1935,15 @@ class CoordinatorNodes:
         if not has_listing:
             import re
 
+            # Detect multi-instance operations (e.g., "start all GOAD instances",
+            # "stop victim and GOAD instances"). These need LLM reasoning from
+            # the infrastructure agent to list, filter, and act on each match.
+            is_multi_instance = has_action and (
+                "all" in query_lower.split()  # "start all instances" / "start all GOAD instances"
+                or "every" in query_lower.split()  # "start every instance"
+                or (" and " in query_lower and has_instance)  # "start GOAD and victim instances"
+            )
+
             # Helper function to extract instance name from query
             def extract_instance_name(query_text: str, action_keywords: list[str]) -> str | None:
                 """Extract instance name from various patterns."""
@@ -1956,20 +2006,22 @@ class CoordinatorNodes:
             if has_restart:
                 # Don't require has_instance - allow action-first patterns
                 entities: dict[str, Any] = {}
-                instance_name = extract_instance_name(query_lower, restart_keywords)
-                if instance_name:
-                    entities["instance_name"] = instance_name
+                if not is_multi_instance:
+                    instance_name = extract_instance_name(query_lower, restart_keywords)
+                    if instance_name:
+                        entities["instance_name"] = instance_name
                 compartment_name = extract_compartment_name(query_lower)
                 if compartment_name:
                     entities["compartment_name"] = compartment_name
 
                 return IntentClassification(
-                    intent="restart_instance",
+                    intent="restart_instances" if is_multi_instance else "restart_instance",
                     category=IntentCategory.ACTION,
-                    confidence=0.95,
+                    confidence=0.90 if is_multi_instance else 0.95,
                     domains=["compute"],
                     entities=entities,
-                    suggested_workflow="restart_instance_by_name",
+                    # Multi-instance: route to agent (no workflow) for LLM reasoning
+                    suggested_workflow=None if is_multi_instance else "restart_instance_by_name",
                     suggested_agent="infrastructure-agent",
                 )
 
@@ -1980,20 +2032,21 @@ class CoordinatorNodes:
             if has_stop:
                 # Don't require has_instance - allow action-first patterns
                 entities = {}
-                instance_name = extract_instance_name(query_lower, stop_keywords)
-                if instance_name:
-                    entities["instance_name"] = instance_name
+                if not is_multi_instance:
+                    instance_name = extract_instance_name(query_lower, stop_keywords)
+                    if instance_name:
+                        entities["instance_name"] = instance_name
                 compartment_name = extract_compartment_name(query_lower)
                 if compartment_name:
                     entities["compartment_name"] = compartment_name
 
                 return IntentClassification(
-                    intent="stop_instance",
+                    intent="stop_instances" if is_multi_instance else "stop_instance",
                     category=IntentCategory.ACTION,
-                    confidence=0.95,
+                    confidence=0.90 if is_multi_instance else 0.95,
                     domains=["compute"],
                     entities=entities,
-                    suggested_workflow="stop_instance_by_name",
+                    suggested_workflow=None if is_multi_instance else "stop_instance_by_name",
                     suggested_agent="infrastructure-agent",
                 )
 
@@ -2004,20 +2057,21 @@ class CoordinatorNodes:
             if has_start:
                 # Don't require has_instance - allow action-first patterns
                 entities = {}
-                instance_name = extract_instance_name(query_lower, start_keywords)
-                if instance_name:
-                    entities["instance_name"] = instance_name
+                if not is_multi_instance:
+                    instance_name = extract_instance_name(query_lower, start_keywords)
+                    if instance_name:
+                        entities["instance_name"] = instance_name
                 compartment_name = extract_compartment_name(query_lower)
                 if compartment_name:
                     entities["compartment_name"] = compartment_name
 
                 return IntentClassification(
-                    intent="start_instance",
+                    intent="start_instances" if is_multi_instance else "start_instance",
                     category=IntentCategory.ACTION,
-                    confidence=0.95,
+                    confidence=0.90 if is_multi_instance else 0.95,
                     domains=["compute"],
                     entities=entities,
-                    suggested_workflow="start_instance_by_name",
+                    suggested_workflow=None if is_multi_instance else "start_instance_by_name",
                     suggested_agent="infrastructure-agent",
                 )
 
@@ -2305,6 +2359,69 @@ class CoordinatorNodes:
 
         return None
 
+    def _pre_classify_help_query(self, query: str) -> IntentClassification | None:
+        """
+        Pre-classify help and agent discovery queries using keyword matching.
+
+        Catches queries like:
+        - "what agents do you have" → list_agents
+        - "list agents" / "show agents" → list_agents
+        - "what can you do" / "what are your capabilities" → list_agents
+        - "help" / "show help" → list_agents
+
+        This avoids LLM classification for these common meta-queries.
+        """
+        query_lower = query.lower()
+
+        # Agent listing patterns
+        agent_keywords = [
+            "list agent", "list agents", "show agent", "show agents",
+            "available agent", "available agents", "what agent", "which agent",
+            "agent catalog", "agent capabilities",
+        ]
+        if any(kw in query_lower for kw in agent_keywords):
+            return IntentClassification(
+                intent="list_agents",
+                category=IntentCategory.QUERY,
+                confidence=0.95,
+                domains=[],
+                entities={},
+                suggested_workflow="list_agents",
+                suggested_agent=None,
+            )
+
+        # "What can you do" / general capabilities patterns
+        capability_keywords = [
+            "what can you do", "what do you do", "what are your capabilities",
+            "what are you capable of", "how can you help",
+            "what can i ask", "what can i do",
+        ]
+        if any(kw in query_lower for kw in capability_keywords):
+            return IntentClassification(
+                intent="list_agents",
+                category=IntentCategory.QUERY,
+                confidence=0.95,
+                domains=[],
+                entities={},
+                suggested_workflow="list_agents",
+                suggested_agent=None,
+            )
+
+        # Simple "help" (standalone, not "help with X")
+        import re
+        if re.match(r"^\s*(show\s+)?help\s*$", query_lower):
+            return IntentClassification(
+                intent="list_agents",
+                category=IntentCategory.QUERY,
+                confidence=0.95,
+                domains=[],
+                entities={},
+                suggested_workflow="list_agents",
+                suggested_agent=None,
+            )
+
+        return None
+
     def _build_classification_prompt(self, query: str) -> str:
         """Build the intent classification prompt (optimized for token efficiency)."""
         # Agent-to-domain mapping for routing decisions
@@ -2394,9 +2511,9 @@ DB perf: fleet health→db_fleet_health, AWR→awr_report, top SQL→top_sql, AD
             State updates with routing decision and agent candidates
         """
         with _tracer.start_as_current_span("coordinator.router") as span:
-            thinking_trace = state.thinking_trace
+            thinking_trace = state.get("thinking_trace")
 
-            if not state.intent:
+            if not state.get("intent"):
                 span.set_attribute("error", "no_intent")
                 self._logger.warning("No intent for routing")
                 return {
@@ -2408,11 +2525,11 @@ DB perf: fleet health→db_fleet_health, AWR→awr_report, top SQL→top_sql, AD
                 thinking_trace.add_step(
                     ThinkingPhase.ROUTING,
                     "Determining best route for this request...",
-                    {"domains": state.intent.domains},
+                    {"domains": state.get("intent").domains},
                 )
 
             # Discover matching agents for transparency
-            agent_candidates = self._discover_agents(state.intent, state.query)
+            agent_candidates = self._discover_agents(state.get("intent"), state.get("query", ""))
 
             if thinking_trace and agent_candidates:
                 thinking_trace.add_step(
@@ -2427,7 +2544,7 @@ DB perf: fleet health→db_fleet_health, AWR→awr_report, top SQL→top_sql, AD
                 )
 
             # Pass original query for complexity detection
-            routing = determine_routing(state.intent, original_query=state.query)
+            routing = determine_routing(state.get("intent"), original_query=state.get("query", ""))
 
             span.set_attribute("routing.type", routing.routing_type.value)
             span.set_attribute("routing.target", routing.target or "none")
@@ -2467,10 +2584,10 @@ DB perf: fleet health→db_fleet_health, AWR→awr_report, top SQL→top_sql, AD
             agent_context = None
             if routing.routing_type == RoutingType.AGENT:
                 agent_context = AgentContext(
-                    query=state.query,
-                    intent=state.intent,
-                    previous_results=state.tool_results,
-                    metadata=state.metadata,
+                    query=state.get("query", ""),
+                    intent=state.get("intent"),
+                    previous_results=state.get("tool_results", []),
+                    metadata=state.get("metadata", {}),
                 )
 
             return {
@@ -2589,9 +2706,9 @@ DB perf: fleet health→db_fleet_health, AWR→awr_report, top SQL→top_sql, AD
             State updates with workflow result
         """
         with _tracer.start_as_current_span("coordinator.workflow") as span:
-            workflow_name = state.workflow_name
+            workflow_name = state.get("workflow_name")
             span.set_attribute("workflow.name", workflow_name or "none")
-            thinking_trace = state.thinking_trace
+            thinking_trace = state.get("thinking_trace")
 
             if not workflow_name:
                 span.set_attribute("error", "no_workflow")
@@ -2608,8 +2725,8 @@ DB perf: fleet health→db_fleet_health, AWR→awr_report, top SQL→top_sql, AD
                     )
                 # Fallback to agentic
                 return {
-                    "routing": replace(state.routing, routing_type=RoutingType.AGENT)
-                    if state.routing
+                    "routing": replace(state.get("routing"), routing_type=RoutingType.AGENT)
+                    if state.get("routing")
                     else None,
                     "error": f"Workflow '{workflow_name}' not found",
                 }
@@ -2627,8 +2744,8 @@ DB perf: fleet health→db_fleet_health, AWR→awr_report, top SQL→top_sql, AD
             try:
                 start_time = time.time()
                 workflow_kwargs = {
-                    "query": state.query,
-                    "entities": state.intent.entities if state.intent else {},
+                    "query": state.get("query", ""),
+                    "entities": state.get("intent").entities if state.get("intent") else {},
                     "tool_catalog": self.tool_catalog,
                     "memory": self.memory,
                 }
@@ -2636,7 +2753,7 @@ DB perf: fleet health→db_fleet_health, AWR→awr_report, top SQL→top_sql, AD
                     import inspect
 
                     if "metadata" in inspect.signature(workflow).parameters:
-                        workflow_kwargs["metadata"] = state.metadata
+                        workflow_kwargs["metadata"] = state.get("metadata", {})
                 except (TypeError, ValueError):
                     pass
 
@@ -2681,11 +2798,11 @@ DB perf: fleet health→db_fleet_health, AWR→awr_report, top SQL→top_sql, AD
                         {"error": str(e)},
                     )
                 # Try fallback if available
-                if state.routing and state.routing.fallback:
+                if state.get("routing") and state.get("routing").fallback:
                     return {
-                        "routing": state.routing.fallback,
+                        "routing": state.get("routing").fallback,
                         "workflow_name": None,
-                        "current_agent": state.routing.fallback.target,
+                        "current_agent": state.get("routing").fallback.target,
                     }
                 return {"error": f"Workflow failed: {e}"}
 
@@ -2708,8 +2825,8 @@ DB perf: fleet health→db_fleet_health, AWR→awr_report, top SQL→top_sql, AD
             State updates with synthesized response from multiple agents
         """
         with _tracer.start_as_current_span("coordinator.parallel") as span:
-            span.set_attribute("query_preview", state.query[:100] if state.query else "")
-            domains = state.intent.domains if state.intent else []
+            span.set_attribute("query_preview", state.get("query", "")[:100] if state.get("query", "") else "")
+            domains = state.get("intent").domains if state.get("intent") else []
             span.set_attribute("domains", ",".join(domains))
 
             if not self.orchestrator:
@@ -2717,32 +2834,32 @@ DB perf: fleet health→db_fleet_health, AWR→awr_report, top SQL→top_sql, AD
                 self._logger.warning("Parallel orchestrator not available")
                 # Fallback to single agent execution
                 return {
-                    "routing": state.routing._replace(routing_type=RoutingType.AGENT)
-                    if state.routing and hasattr(state.routing, "_replace")
-                    else state.routing,
+                    "routing": state.get("routing")._replace(routing_type=RoutingType.AGENT)
+                    if state.get("routing") and hasattr(state.get("routing"), "_replace")
+                    else state.get("routing"),
                     "error": "Parallel orchestrator not available, falling back to agent",
                 }
 
             self._logger.info(
                 "Executing parallel orchestration",
                 domains=domains,
-                category=state.intent.category.value if state.intent else "unknown",
+                category=state.get("intent").category.value if state.get("intent") else "unknown",
             )
 
             start_time = time.time()
             try:
                 # Build context for orchestrator
                 context = {
-                    "intent": state.intent.to_dict() if state.intent else {},
+                    "intent": state.get("intent").to_dict() if state.get("intent") else {},
                     "domains": domains,
-                    "previous_results": [r.to_dict() for r in state.tool_results],
-                    "output_format": state.output_format,
-                    "channel_type": state.channel_type,
+                    "previous_results": [r.to_dict() for r in state.get("tool_results", [])],
+                    "output_format": state.get("output_format", "markdown"),
+                    "channel_type": state.get("channel_type"),
                 }
 
                 # Execute parallel orchestration
                 result = await self.orchestrator.execute(
-                    query=state.query,
+                    query=state.get("query", ""),
                     context=context,
                 )
 
@@ -2773,14 +2890,14 @@ DB perf: fleet health→db_fleet_health, AWR→awr_report, top SQL→top_sql, AD
                     }
                 else:
                     # Parallel execution failed, try fallback
-                    if state.routing and state.routing.fallback:
+                    if state.get("routing") and state.get("routing").fallback:
                         self._logger.info(
                             "Parallel failed, using fallback",
-                            fallback=state.routing.fallback.routing_type.value,
+                            fallback=state.get("routing").fallback.routing_type.value,
                         )
                         return {
-                            "routing": state.routing.fallback,
-                            "current_agent": state.routing.fallback.target,
+                            "routing": state.get("routing").fallback,
+                            "current_agent": state.get("routing").fallback.target,
                             "error": result.error,
                         }
                     return {
@@ -2800,10 +2917,10 @@ DB perf: fleet health→db_fleet_health, AWR→awr_report, top SQL→top_sql, AD
                 )
 
                 # Try fallback if available
-                if state.routing and state.routing.fallback:
+                if state.get("routing") and state.get("routing").fallback:
                     return {
-                        "routing": state.routing.fallback,
-                        "current_agent": state.routing.fallback.target,
+                        "routing": state.get("routing").fallback,
+                        "current_agent": state.get("routing").fallback.target,
                     }
                 return {"error": f"Parallel execution failed: {e}"}
 
@@ -2822,25 +2939,25 @@ DB perf: fleet health→db_fleet_health, AWR→awr_report, top SQL→top_sql, AD
             State updates with agent response
         """
         with _tracer.start_as_current_span("coordinator.agent") as span:
-            span.set_attribute("iteration", state.iteration)
-            span.set_attribute("current_agent", state.current_agent or "coordinator-llm")
-            thinking_trace = state.thinking_trace
+            span.set_attribute("iteration", state.get("iteration", 0))
+            span.set_attribute("current_agent", state.get("current_agent") or "coordinator-llm")
+            thinking_trace = state.get("thinking_trace")
 
             self._logger.debug(
                 "Agent node",
-                iteration=state.iteration,
-                current_agent=state.current_agent,
+                iteration=state.get("iteration", 0),
+                current_agent=state.get("current_agent"),
             )
 
             # If delegating to specialized agent
-            if state.current_agent:
+            if state.get("current_agent"):
                 span.set_attribute("delegation", "specialized_agent")
-                agent_name = state.current_agent.replace("-agent", "").replace("-", " ").title()
+                agent_name = state.get("current_agent").replace("-agent", "").replace("-", " ").title()
                 if thinking_trace:
                     thinking_trace.add_step(
                         ThinkingPhase.DELEGATING,
                         f"Delegating to {agent_name} agent...",
-                        {"agent": state.current_agent},
+                        {"agent": state.get("current_agent")},
                     )
                 return await self._invoke_specialized_agent(state)
 
@@ -2854,11 +2971,48 @@ DB perf: fleet health→db_fleet_health, AWR→awr_report, top SQL→top_sql, AD
                 )
             return await self._invoke_coordinator_llm(state)
 
+    async def _heartbeat_emitter(
+        self,
+        thinking_trace: Any,
+        agent_name: str,
+        interval: float,
+        stop_event: asyncio.Event,
+    ) -> None:
+        """Emit periodic thinking steps during agent invocation.
+
+        Provides progressive status messages so Slack users see liveness
+        instead of a stale "Processing..." message.
+        """
+        elapsed = 0
+        phases = [
+            "Querying OCI APIs",
+            "Analyzing results",
+            "Processing data",
+        ]
+        while not stop_event.is_set():
+            try:
+                await asyncio.wait_for(
+                    stop_event.wait(), timeout=interval
+                )
+                break  # Event was set, stop emitting
+            except TimeoutError:
+                elapsed += int(interval)
+                if elapsed <= int(interval) * len(phases):
+                    phase_msg = phases[min(elapsed // int(interval) - 1, len(phases) - 1)]
+                else:
+                    phase_msg = "Still working"
+                if thinking_trace:
+                    thinking_trace.add_step(
+                        ThinkingPhase.EXECUTING,
+                        f"{agent_name}: {phase_msg}... ({elapsed}s)",
+                        {"agent": agent_name, "elapsed_seconds": elapsed},
+                    )
+
     async def _invoke_specialized_agent(
         self, state: CoordinatorState
     ) -> dict[str, Any]:
         """Delegate to a specialized agent."""
-        agent_role = state.current_agent
+        agent_role = state.get("current_agent")
 
         if not agent_role:
             return {"error": "No agent specified"}
@@ -2868,8 +3022,8 @@ DB perf: fleet health→db_fleet_health, AWR→awr_report, top SQL→top_sql, AD
 
             # Get agent from catalog with output format config
             agent_config = {
-                "output_format": state.output_format,
-                "channel_type": state.channel_type,
+                "output_format": state.get("output_format", "markdown"),
+                "channel_type": state.get("channel_type"),
             }
 
             agent_instance = self.agent_catalog.instantiate(
@@ -2897,25 +3051,25 @@ DB perf: fleet health→db_fleet_health, AWR→awr_report, top SQL→top_sql, AD
             self._logger.info(
                 "Delegating to agent",
                 agent_role=agent_role,
-                output_format=state.output_format,
+                output_format=state.get("output_format", "markdown"),
                 timeout_seconds=timeout_seconds,
             )
 
             start_time = time.time()
             try:
-                context = state.agent_context.to_dict() if state.agent_context else {}
-                context["output_format"] = state.output_format
-                context["channel_type"] = state.channel_type
+                context = state.get("agent_context").to_dict() if state.get("agent_context") else {}
+                context["output_format"] = state.get("output_format", "markdown")
+                context["channel_type"] = state.get("channel_type")
 
                 # Create file-based planner for complex queries to reduce token usage
                 # The planner stores tool outputs in .plan/ files instead of context
                 planner = None
-                workflow_type = self._infer_workflow_type(agent_role, state.query)
-                if should_use_planner(state.query, workflow_type):
-                    thread_id = state.metadata.get("thread_id") if state.metadata else None
+                workflow_type = self._infer_workflow_type(agent_role, state.get("query", ""))
+                if should_use_planner(state.get("query", ""), workflow_type):
+                    thread_id = state.get("metadata", {}).get("thread_id") if state.get("metadata", {}) else None
                     planner = await create_planner_for_workflow(
                         workflow_name=workflow_type,
-                        query=state.query,
+                        query=state.get("query", ""),
                         thread_id=thread_id,
                     )
                     context["planner"] = planner
@@ -2925,11 +3079,29 @@ DB perf: fleet health→db_fleet_health, AWR→awr_report, top SQL→top_sql, AD
                         workflow_type=workflow_type,
                     )
 
-                # Wrap agent invocation with timeout
-                result = await asyncio.wait_for(
-                    agent_instance.invoke(state.query, context),
-                    timeout=timeout_seconds,
+                # Wrap agent invocation with timeout + heartbeat for Slack liveness
+                heartbeat_agent_name = agent_role.replace("-agent", "").replace("-", " ").title()
+                stop_heartbeat = asyncio.Event()
+                heartbeat_task = asyncio.create_task(
+                    self._heartbeat_emitter(
+                        state.get("thinking_trace"),
+                        heartbeat_agent_name,
+                        8.0,
+                        stop_heartbeat,
+                    )
                 )
+                try:
+                    result = await asyncio.wait_for(
+                        agent_instance.invoke(state.get("query", ""), context),
+                        timeout=timeout_seconds,
+                    )
+                finally:
+                    stop_heartbeat.set()
+                    heartbeat_task.cancel()
+                    try:
+                        await heartbeat_task
+                    except asyncio.CancelledError:
+                        pass
                 duration_ms = int((time.time() - start_time) * 1000)
 
                 span.set_attribute("agent.duration_ms", duration_ms)
@@ -2965,7 +3137,7 @@ DB perf: fleet health→db_fleet_health, AWR→awr_report, top SQL→top_sql, AD
                         )
 
                 # Add thinking step for agent completion
-                thinking_trace = state.thinking_trace
+                thinking_trace = state.get("thinking_trace")
                 if thinking_trace:
                     agent_name = agent_role.replace("-agent", "").replace("-", " ").title()
                     thinking_trace.add_step(
@@ -3000,7 +3172,7 @@ DB perf: fleet health→db_fleet_health, AWR→awr_report, top SQL→top_sql, AD
                 )
 
                 # Add thinking step for timeout
-                thinking_trace = state.thinking_trace
+                thinking_trace = state.get("thinking_trace")
                 if thinking_trace:
                     thinking_trace.add_step(
                         ThinkingPhase.ERROR,
@@ -3018,8 +3190,56 @@ DB perf: fleet health→db_fleet_health, AWR→awr_report, top SQL→top_sql, AD
                     except Exception:
                         pass  # Don't fail on planner logging
 
-                # Provide agent-specific timeout guidance
+                # Attempt coordinator LLM fallback before returning timeout message
                 agent_name = agent_role.replace("-agent", "").replace("-", " ").title()
+                fallback_enabled = os.getenv("AGENT_FALLBACK_TO_LLM", "true").lower() == "true"
+
+                if fallback_enabled:
+                    try:
+                        if thinking_trace:
+                            thinking_trace.add_step(
+                                ThinkingPhase.EXECUTING,
+                                f"{agent_name} timed out — falling back to coordinator LLM...",
+                                {"agent": agent_role, "fallback": True},
+                            )
+
+                        self._logger.info(
+                            "Attempting coordinator LLM fallback after agent timeout",
+                            agent_role=agent_role,
+                        )
+                        fallback_result = await self._invoke_coordinator_llm(state)
+
+                        # Extract text response only — ignore tool_calls to prevent re-entering agent loop
+                        fallback_messages = fallback_result.get("messages", [])
+                        fallback_content = ""
+                        if fallback_messages:
+                            last_msg = fallback_messages[-1]
+                            if hasattr(last_msg, "content") and last_msg.content:
+                                fallback_content = last_msg.content.strip()
+
+                        if fallback_content:
+                            self._logger.info(
+                                "Coordinator LLM fallback succeeded",
+                                agent_role=agent_role,
+                                response_length=len(fallback_content),
+                            )
+                            if thinking_trace:
+                                thinking_trace.add_step(
+                                    ThinkingPhase.COMPLETE,
+                                    "Coordinator LLM provided response after agent timeout",
+                                    {"agent": agent_role, "fallback": True},
+                                )
+                            return {
+                                "final_response": fallback_content,
+                            }
+                    except Exception as fallback_err:
+                        self._logger.warning(
+                            "Coordinator LLM fallback also failed",
+                            agent_role=agent_role,
+                            error=str(fallback_err),
+                        )
+
+                # Fall through to original timeout guidance
                 timeout_guidance = {
                     "finops": "Try asking about a shorter time period (e.g., 'last 7 days' instead of 'last month'), or ask about a specific compartment.",
                     "db-troubleshoot": (
@@ -3064,7 +3284,7 @@ DB perf: fleet health→db_fleet_health, AWR→awr_report, top SQL→top_sql, AD
                 )
 
                 # Add thinking step for error
-                thinking_trace = state.thinking_trace
+                thinking_trace = state.get("thinking_trace")
                 if thinking_trace:
                     thinking_trace.add_step(
                         ThinkingPhase.ERROR,
@@ -3082,6 +3302,54 @@ DB perf: fleet health→db_fleet_health, AWR→awr_report, top SQL→top_sql, AD
                     except Exception:
                         pass  # Don't fail on planner logging
 
+                # Attempt coordinator LLM fallback before returning error
+                fallback_enabled = os.getenv("AGENT_FALLBACK_TO_LLM", "true").lower() == "true"
+                if fallback_enabled:
+                    try:
+                        agent_name = agent_role.replace("-agent", "").replace("-", " ").title()
+                        if thinking_trace:
+                            thinking_trace.add_step(
+                                ThinkingPhase.EXECUTING,
+                                f"{agent_name} failed — falling back to coordinator LLM...",
+                                {"agent": agent_role, "fallback": True, "error": str(e)[:100]},
+                            )
+
+                        self._logger.info(
+                            "Attempting coordinator LLM fallback after agent error",
+                            agent_role=agent_role,
+                            original_error=str(e)[:200],
+                        )
+                        fallback_result = await self._invoke_coordinator_llm(state)
+
+                        fallback_messages = fallback_result.get("messages", [])
+                        fallback_content = ""
+                        if fallback_messages:
+                            last_msg = fallback_messages[-1]
+                            if hasattr(last_msg, "content") and last_msg.content:
+                                fallback_content = last_msg.content.strip()
+
+                        if fallback_content:
+                            self._logger.info(
+                                "Coordinator LLM fallback succeeded after agent error",
+                                agent_role=agent_role,
+                                response_length=len(fallback_content),
+                            )
+                            if thinking_trace:
+                                thinking_trace.add_step(
+                                    ThinkingPhase.COMPLETE,
+                                    "Coordinator LLM provided response after agent error",
+                                    {"agent": agent_role, "fallback": True},
+                                )
+                            return {
+                                "final_response": fallback_content,
+                            }
+                    except Exception as fallback_err:
+                        self._logger.warning(
+                            "Coordinator LLM fallback also failed after agent error",
+                            agent_role=agent_role,
+                            error=str(fallback_err),
+                        )
+
                 return {"error": f"Agent failed: {e}"}
 
     async def _invoke_coordinator_llm(
@@ -3089,7 +3357,7 @@ DB perf: fleet health→db_fleet_health, AWR→awr_report, top SQL→top_sql, AD
     ) -> dict[str, Any]:
         """Invoke the coordinator's LLM for reasoning."""
         # Build messages for LLM
-        messages = list(state.messages)
+        messages = list(state.get("messages", []))
 
         # RAG context injection - DISABLED
         # To re-enable: set RAG_ENABLED=true in environment
@@ -3127,7 +3395,7 @@ DB perf: fleet health→db_fleet_health, AWR→awr_report, top SQL→top_sql, AD
             self._logger.warning("Feedback retrieval failed", error=str(e))
 
         # Add tool results as messages
-        for result in state.tool_results:
+        for result in state.get("tool_results", []):
             messages.append(
                 ToolMessage(
                     content=str(result.result),
@@ -3154,7 +3422,7 @@ DB perf: fleet health→db_fleet_health, AWR→awr_report, top SQL→top_sql, AD
                 self._logger.warning(
                     "LLM returned empty response",
                     llm_type=type(self.llm).__name__,
-                    query_preview=state.query[:100] if state.query else "",
+                    query_preview=state.get("query", "")[:100] if state.get("query", "") else "",
                 )
 
             # Extract tool calls if any
@@ -3173,7 +3441,7 @@ DB perf: fleet health→db_fleet_health, AWR→awr_report, top SQL→top_sql, AD
                 "messages": [response],
                 "tool_calls": tool_calls,
                 "tool_results": [],  # Clear previous results
-                "iteration": state.iteration + 1,
+                "iteration": state.get("iteration", 0) + 1,
             }
 
         except Exception as e:
@@ -3198,16 +3466,16 @@ DB perf: fleet health→db_fleet_health, AWR→awr_report, top SQL→top_sql, AD
         Returns:
             State updates with tool results
         """
-        if not state.tool_calls:
+        if not state.get("tool_calls", []):
             return {"tool_results": []}
 
         self._logger.info(
             "Executing tools",
-            tool_count=len(state.tool_calls),
+            tool_count=len(state.get("tool_calls", [])),
         )
 
         results = []
-        for tool_call in state.tool_calls:
+        for tool_call in state.get("tool_calls", []):
             start_time = time.time()
 
             try:
@@ -3285,21 +3553,22 @@ DB perf: fleet health→db_fleet_health, AWR→awr_report, top SQL→top_sql, AD
         """
         self._logger.debug(
             "Output node",
-            iterations=state.iteration,
-            has_error=bool(state.error),
+            iterations=state.get("iteration", 0),
+            has_error=bool(state.get("error")),
         )
 
         # Build agent/workflow attribution header
         attribution = self._build_attribution_header(state)
 
         # If we already have a final response (and it's not empty), add attribution
-        if state.final_response and state.final_response.strip():
+        if state.get("final_response") and state.get("final_response").strip():
             if attribution:
-                return {"final_response": f"{attribution}\n\n{state.final_response}"}
+                final_resp = state.get("final_response")
+                return {"final_response": f"{attribution}\n\n{final_resp}"}
             return {}
 
         # Extract from last AI message
-        for msg in reversed(state.messages):
+        for msg in reversed(state.get("messages", [])):
             if isinstance(msg, AIMessage):
                 content = msg.content if msg.content else ""
                 # Check for non-empty, meaningful response
@@ -3314,22 +3583,24 @@ DB perf: fleet health→db_fleet_health, AWR→awr_report, top SQL→top_sql, AD
                     )
 
         # Fallback for errors
-        if state.error:
-            error_response = f"Error: {state.error}"
+        if state.get("error"):
+            err = state.get("error")
+            error_response = f"Error: {err}"
             if attribution:
                 return {"final_response": f"{attribution}\n\n{error_response}"}
             return {"final_response": error_response}
 
         # Enhanced fallback with context about what was attempted
         routing_info = ""
-        if state.routing:
-            routing_info = f" (routing: {state.routing.routing_type.value})"
+        if state.get("routing"):
+            routing_obj = state.get("routing")
+            routing_info = f" (routing: {routing_obj.routing_type.value})"
 
         self._logger.warning(
             "No meaningful response from AI",
-            iterations=state.iteration,
+            iterations=state.get("iteration", 0),
             routing=routing_info,
-            query_preview=state.query[:100] if state.query else "",
+            query_preview=state.get("query", "")[:100] if state.get("query", "") else "",
         )
 
         fallback_response = (
@@ -3350,25 +3621,25 @@ DB perf: fleet health→db_fleet_health, AWR→awr_report, top SQL→top_sql, AD
         Returns:
             Attribution string like "🤖 Agent: db-troubleshoot-agent" or empty string
         """
-        if not state.routing:
+        if not state.get("routing"):
             return ""
 
-        routing_type = state.routing.routing_type
+        routing_type = state.get("routing").routing_type
 
         # Workflow attribution
-        if routing_type == RoutingType.WORKFLOW and state.workflow_name:
-            workflow_display = state.workflow_name.replace("_", " ").title()
+        if routing_type == RoutingType.WORKFLOW and state.get("workflow_name"):
+            workflow_display = state.get("workflow_name").replace("_", " ").title()
             return f"📋 **Workflow:** {workflow_display}"
 
         # Agent attribution
-        if routing_type == RoutingType.AGENT and state.current_agent:
-            agent_display = state.current_agent.replace("-agent", "").replace("-", " ").title()
+        if routing_type == RoutingType.AGENT and state.get("current_agent"):
+            agent_display = state.get("current_agent").replace("-agent", "").replace("-", " ").title()
             return f"🤖 **Agent:** {agent_display}"
 
         # Parallel execution attribution
         if routing_type == RoutingType.PARALLEL:
-            if state.workflow_state and "agents_used" in state.workflow_state:
-                agents = state.workflow_state["agents_used"]
+            if state.get("workflow_state", {}) and "agents_used" in state.get("workflow_state", {}):
+                agents = state.get("workflow_state", {})["agents_used"]
                 if agents:
                     agents_display = ", ".join(
                         a.replace("-agent", "").replace("-", " ").title()
@@ -3399,13 +3670,13 @@ def should_continue_after_router(state: CoordinatorState) -> str:
     Returns:
         Node name: "workflow", "parallel", "agent", or "output"
     """
-    if state.error:
+    if state.get("error"):
         return "output"
 
-    if not state.routing:
+    if not state.get("routing"):
         return "agent"  # Default to agentic
 
-    routing_type = state.routing.routing_type
+    routing_type = state.get("routing").routing_type
 
     if routing_type == RoutingType.WORKFLOW:
         return "workflow"
@@ -3426,16 +3697,16 @@ def should_continue_after_agent(state: CoordinatorState) -> str:
     Returns:
         "action" if tool calls pending, "output" otherwise
     """
-    if state.error:
+    if state.get("error"):
         return "output"
 
-    if state.final_response:
+    if state.get("final_response"):
         return "output"
 
-    if state.iteration >= state.max_iterations:
+    if state.get("iteration", 0) >= state.get("max_iterations", 15):
         return "output"
 
-    if state.has_pending_tools():
+    if state_has_pending_tools(state):
         return "action"
 
     return "output"
@@ -3448,10 +3719,10 @@ def should_loop_from_action(state: CoordinatorState) -> str:
     Returns:
         "agent" to continue, "output" to end
     """
-    if state.error:
+    if state.get("error"):
         return "output"
 
-    if state.iteration >= state.max_iterations:
+    if state.get("iteration", 0) >= state.get("max_iterations", 15):
         return "output"
 
     return "agent"

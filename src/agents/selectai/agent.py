@@ -169,11 +169,19 @@ class SelectAIAgent(BaseAgent, SelfHealingMixin):
                 timeout_seconds=120,
             ),
             description=(
-                "SelectAI Agent for natural language database queries, "
-                "chat with database context, and AI agent orchestration "
-                "using Oracle Autonomous Database SelectAI."
+                "SelectAI Agent for natural language database queries (NL2SQL), "
+                "chat with database context, AI agent orchestration, and report "
+                "generation using Oracle Autonomous Database SelectAI."
             ),
             mcp_servers=["selectai", "database-observatory"],
+            mcp_tools=[
+                "oci_selectai_generate",
+                "oci_selectai_list_profiles",
+                "oci_selectai_get_profile_tables",
+                "oci_selectai_run_agent",
+                "oci_selectai_ping",
+                "oci_selectai_test_connection",
+            ],
         )
 
     def build_graph(self) -> StateGraph:

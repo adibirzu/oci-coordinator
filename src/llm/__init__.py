@@ -117,7 +117,7 @@ def get_llm_config(channel_type: str | None = None) -> dict:
         # Oracle Code Assist - uses shared token cache from ~/.oca/token.json
         # Authentication is handled externally via oca-langchain-client OAuth flow
         config["provider"] = "oca"
-        config["model_name"] = _env_with_channel("OCA_MODEL", channel_type) or "oca/gpt5"
+        config["model_name"] = _env_with_channel("OCA_MODEL", channel_type) or "oca/gpt5.2"
         config["temperature"] = float(_env_with_channel("LLM_TEMPERATURE", channel_type) or "0.7")
         config["max_tokens"] = int(_env_with_channel("LLM_MAX_TOKENS", channel_type) or "4096")
 
@@ -234,32 +234,33 @@ async def get_llm_with_auto_fallback(
     )
 
     # Build config for the selected provider
-    config = get_llm_config(channel_type)
-    config["provider"] = provider
+    # If the fallback provider differs from configured, rebuild config
+    original_provider = os.getenv("LLM_PROVIDER", "anthropic").lower()
+    if provider == original_provider:
+        # Same provider as configured — use channel-specific config
+        config = get_llm_config(channel_type)
+    else:
+        # Different provider (fallback) — build fresh config for it
+        from src.llm.models import DEFAULT_MODELS
 
-    # If fallback provider differs from configured, update relevant config
-    if provider != config.get("provider"):
-        # Get default config for the fallback provider
-        original_provider = os.getenv("LLM_PROVIDER", "anthropic").lower()
-        if provider != original_provider:
-            # Reset provider-specific config for fallback
-            if provider == "lm_studio":
-                config["base_url"] = os.getenv("LM_STUDIO_BASE_URL", "http://localhost:1234/v1")
-                config["model_name"] = os.getenv("LM_STUDIO_MODEL", "local-model")
-            elif provider == "ollama":
-                config["base_url"] = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
-                config["model_name"] = os.getenv("OLLAMA_MODEL", "llama3.1")
-            elif provider == "oca":
-                config["model_name"] = os.getenv("OCA_MODEL", "oca/gpt5")
-            elif provider == "anthropic":
-                config["api_key"] = os.getenv("ANTHROPIC_API_KEY")
-                config["model_name"] = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-20250514")
-            elif provider == "openai":
-                config["api_key"] = os.getenv("OPENAI_API_KEY")
-                config["model_name"] = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-            elif provider == "oci_genai":
-                config["compartment_id"] = os.getenv("OCI_GENAI_COMPARTMENT_ID")
-                config["model_name"] = os.getenv("OCI_GENAI_MODEL_ID", "cohere.command-r-plus")
+        config = {"provider": provider}
+        if provider == "lm_studio":
+            config["base_url"] = os.getenv("LM_STUDIO_BASE_URL", "http://localhost:1234/v1")
+            config["model_name"] = os.getenv("LM_STUDIO_MODEL", DEFAULT_MODELS["lm_studio"])
+        elif provider == "ollama":
+            config["base_url"] = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
+            config["model_name"] = os.getenv("OLLAMA_MODEL", DEFAULT_MODELS["ollama"])
+        elif provider == "oca":
+            config["model_name"] = os.getenv("OCA_MODEL", DEFAULT_MODELS["oca"])
+        elif provider == "anthropic":
+            config["api_key"] = os.getenv("ANTHROPIC_API_KEY")
+            config["model_name"] = os.getenv("ANTHROPIC_MODEL", DEFAULT_MODELS["anthropic"])
+        elif provider == "openai":
+            config["api_key"] = os.getenv("OPENAI_API_KEY")
+            config["model_name"] = os.getenv("OPENAI_MODEL", DEFAULT_MODELS["openai"])
+        elif provider == "oci_genai":
+            config["compartment_id"] = os.getenv("OCI_GENAI_COMPARTMENT_ID")
+            config["model_name"] = os.getenv("OCI_GENAI_MODEL_ID", DEFAULT_MODELS["oci_genai"])
 
     return LLMFactory.create_llm(config)
 
@@ -273,7 +274,7 @@ def get_llm(channel_type: str | None = None) -> BaseChatModel:
 
     Environment Variables:
         LLM_PROVIDER: Provider name (oca, anthropic, openai, lm_studio, ollama, oci_genai)
-        OCA_MODEL: Oracle Code Assist model (e.g., oca/gpt5)
+        OCA_MODEL: Oracle Code Assist model (e.g., oca/gpt5.2)
         ANTHROPIC_API_KEY: API key for Anthropic
         OPENAI_API_KEY: API key for OpenAI
         LM_STUDIO_BASE_URL: LM Studio API endpoint (default: http://localhost:1234/v1)

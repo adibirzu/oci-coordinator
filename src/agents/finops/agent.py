@@ -373,12 +373,15 @@ class FinOpsAgent(BaseAgent, SelfHealingMixin):
                 "optimization",
                 "anomaly-detection",
                 "usage-forecasting",
+                "focus-normalization",
             ],
             skills=[
                 "cost_breakdown_workflow",
                 "anomaly_detection",
                 "rightsizing_analysis",
                 "budget_check",
+                "focus_cost_normalization",
+                "focus_savings_analysis",
             ],
             kafka_topics=KafkaTopics(
                 consume=["commands.finops-agent"],
@@ -393,9 +396,18 @@ class FinOpsAgent(BaseAgent, SelfHealingMixin):
             ),
             description=(
                 "FinOps Expert Agent for cost analysis, budget tracking, "
-                "and optimization recommendations in OCI."
+                "usage forecasting, anomaly detection, FOCUS normalization, "
+                "and optimization recommendations across OCI services."
             ),
             mcp_servers=["finopsai", "oci-unified"],  # finopsai primary, oci-unified fallback
+            mcp_tools=[
+                "oci_cost_get_summary",
+                "oci_cost_by_compartment",
+                "oci_cost_service_drilldown",
+                "oci_cost_database_drilldown",
+                "oci_cost_monthly_trend",
+                "oci_cost_usage_comparison",
+            ],
         )
 
     def build_graph(self) -> StateGraph:

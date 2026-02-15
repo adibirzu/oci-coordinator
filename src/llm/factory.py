@@ -7,6 +7,7 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_openai import ChatOpenAI
 
 from src.llm.health import validate_provider_config
+from src.llm.models import DEFAULT_MODELS
 from src.llm.oca import ChatOCA, is_oca_authenticated
 from src.llm.rate_limiter import wrap_with_rate_limiter
 
@@ -69,26 +70,25 @@ class LLMFactory:
             # OCA uses shared token cache from ~/.oca/token.json
             # Authentication is handled by oca-langchain-client OAuth flow
             if not is_oca_authenticated():
-                import structlog
-                structlog.get_logger().warning(
+                logger.warning(
                     "OCA not authenticated - requests will fail until login"
                 )
             llm = ChatOCA(
-                model=config.get("model_name", "oca/gpt5"),
+                model=config.get("model_name", DEFAULT_MODELS["oca"]),
                 temperature=config.get("temperature", 0.7),
                 max_tokens=config.get("max_tokens", 4096),
             )
         elif provider == "anthropic":
             llm = ChatAnthropic(
                 api_key=config.get("api_key"),
-                model_name=config.get("model_name", "claude-sonnet-4-20250514"),
+                model_name=config.get("model_name", DEFAULT_MODELS["anthropic"]),
                 temperature=config.get("temperature", 0.7),
                 max_tokens=config.get("max_tokens", 4096),
             )
         elif provider == "openai":
             kwargs = {
                 "api_key": config.get("api_key"),
-                "model_name": config.get("model_name", "gpt-4-turbo-preview"),
+                "model_name": config.get("model_name", DEFAULT_MODELS["openai"]),
                 "temperature": config.get("temperature", 0.7),
                 "max_tokens": config.get("max_tokens", 4096),
             }
@@ -108,8 +108,6 @@ class LLMFactory:
                     "Install with: pip install langchain-community"
                 )
 
-            import structlog
-
             # OCI GenAI requires compartment ID and uses OCI SDK authentication
             compartment_id = config.get("compartment_id") or os.getenv(
                 "OCI_GENAI_COMPARTMENT_ID"
@@ -121,7 +119,7 @@ class LLMFactory:
                 )
 
             llm = ChatOCIGenAI(
-                model_id=config.get("model_name", "cohere.command-r-plus"),
+                model_id=config.get("model_name", DEFAULT_MODELS["oci_genai"]),
                 compartment_id=compartment_id,
                 service_endpoint=config.get("endpoint") or os.getenv(
                     "OCI_GENAI_ENDPOINT",
@@ -132,21 +130,19 @@ class LLMFactory:
                     "max_tokens": config.get("max_tokens", 4096),
                 },
             )
-            structlog.get_logger().info(
+            logger.info(
                 "OCI GenAI initialized",
-                model=config.get("model_name", "cohere.command-r-plus"),
+                model=config.get("model_name", DEFAULT_MODELS["oci_genai"]),
                 compartment_id=compartment_id[:30] + "...",
             )
         elif provider == "lm_studio":
             # LM Studio uses OpenAI-compatible API
-            import structlog
-
             base_url = config.get("base_url") or os.getenv(
                 "LM_STUDIO_BASE_URL", "http://localhost:1234/v1"
             )
-            model_name = config.get("model_name", "local-model")
+            model_name = config.get("model_name", DEFAULT_MODELS["lm_studio"])
 
-            structlog.get_logger().info(
+            logger.info(
                 "LM Studio initialized",
                 model=model_name,
                 base_url=base_url,
@@ -161,14 +157,12 @@ class LLMFactory:
             )
         elif provider == "ollama":
             # Ollama uses OpenAI-compatible API
-            import structlog
-
             base_url = config.get("base_url") or os.getenv(
                 "OLLAMA_BASE_URL", "http://localhost:11434/v1"
             )
-            model_name = config.get("model_name", "llama3.1")
+            model_name = config.get("model_name", DEFAULT_MODELS["ollama"])
 
-            structlog.get_logger().info(
+            logger.info(
                 "Ollama initialized",
                 model=model_name,
                 base_url=base_url,
@@ -190,8 +184,7 @@ class LLMFactory:
             enable_rate_limiting = os.getenv("LLM_RATE_LIMITING", "true").lower() == "true"
 
         if enable_rate_limiting:
-            import structlog
-            structlog.get_logger().info(
+            logger.info(
                 "LLM rate limiting enabled",
                 provider=provider,
                 max_concurrent=max_concurrent,

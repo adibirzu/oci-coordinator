@@ -114,6 +114,7 @@ class SecurityThreatAgent(BaseAgent, SelfHealingMixin):
                 "security-posture",
                 "mitre-mapping",
                 "cloud-guard-analysis",
+                "sigma-to-ocl",
             ],
             skills=[
                 "threat_hunting_workflow",
@@ -134,6 +135,9 @@ class SecurityThreatAgent(BaseAgent, SelfHealingMixin):
                 "security_access_governance_workflow",
                 "security_kms_inventory_workflow",
                 "security_iam_review_workflow",
+                "sigma_to_ocl_conversion",
+                "sigma_threat_hunting",
+                "mitre_coverage_report",
             ],
             kafka_topics=KafkaTopics(
                 consume=["commands.security-threat-agent"],
@@ -148,9 +152,17 @@ class SecurityThreatAgent(BaseAgent, SelfHealingMixin):
             ),
             description=(
                 "Security Expert Agent for threat detection, compliance monitoring, "
-                "and MITRE ATT&CK analysis in OCI environments."
+                "Cloud Guard problem analysis, MITRE ATT&CK mapping, vulnerability scanning, "
+                "WAF policy review, bastion session audit, and Data Safe assessments in OCI."
             ),
             mcp_servers=["oci-unified", "oci-mcp-security"],
+            mcp_tools=[
+                "oci_security_list_users",
+                "oci_security_cloudguard_list_problems",
+                "oci_security_cloudguard_get_security_score",
+                "oci_security_audit_list_events",
+                "oci_security_overview",
+            ],
         )
 
     def build_graph(self) -> StateGraph:

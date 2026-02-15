@@ -232,8 +232,16 @@ class ErrorAnalysisAgent(BaseAgent, SelfHealingMixin):
                 max_iterations=15,
                 timeout_seconds=300,
             ),
-            description="Analyzes OCI logs for errors, detects patterns, and creates admin todos",
+            description=(
+                "Error Analysis Agent that scans OCI logs for errors, detects patterns, "
+                "performs root cause analysis with LLM reasoning, and creates admin todos."
+            ),
             mcp_servers=["oci-unified", "database-observatory"],
+            mcp_tools=[
+                "oci_logan_execute_query",
+                "oci_logan_search_logs",
+                "oci_logan_get_summary",
+            ],
         )
 
     def _build_graph(self) -> StateGraph:

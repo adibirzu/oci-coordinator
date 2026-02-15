@@ -4,8 +4,9 @@ Oracle Code Assist (OCA) LLM Provider.
 Implements OCA integration via LiteLLM endpoint with PKCE OAuth authentication.
 Token caching and refresh is handled automatically.
 
-Available Models (as of 2026-01):
-    - oca/gpt5 (default, supports vision)
+Available Models (as of 2026-02):
+    - oca/gpt5.2 (default, most capable, supports vision)
+    - oca/gpt5 (previous generation, fallback)
     - oca/gpt-oss-120b (Oracle's 120B model)
     - oca/llama4
     - oca/openai-o3
@@ -14,10 +15,10 @@ Usage:
     from src.llm.oca import ChatOCA, get_oca_llm
 
     # Create LLM instance
-    llm = get_oca_llm(model="oca/gpt5")
+    llm = get_oca_llm(model="oca/gpt5.2")
 
     # Or use directly
-    llm = ChatOCA(model="oca/gpt5")
+    llm = ChatOCA(model="oca/gpt5.2")
     response = await llm.ainvoke([HumanMessage(content="Hello!")])
 """
 
@@ -76,12 +77,12 @@ class OCAConfig:
     # Token refresh buffer (3 minutes)
     RENEW_BUFFER_SEC = 3 * 60
 
-    # Default model - use oca/gpt5 (most capable, supports vision)
-    # Available models: oca/gpt5, oca/gpt-oss-120b, oca/llama4, oca/openai-o3
-    DEFAULT_MODEL = os.getenv("OCA_MODEL", "oca/gpt5")
+    # Default model - use oca/gpt5.2 (most capable, supports vision)
+    # Available models: oca/gpt5.2, oca/gpt5, oca/gpt-oss-120b, oca/llama4, oca/openai-o3
+    DEFAULT_MODEL = os.getenv("OCA_MODEL", "oca/gpt5.2")
 
     # Fallback models (in order of preference)
-    FALLBACK_MODELS = ["oca/gpt5", "oca/gpt-oss-120b", "oca/llama4", "oca/openai-o3"]
+    FALLBACK_MODELS = ["oca/gpt5.2", "oca/gpt5", "oca/gpt-oss-120b", "oca/llama4", "oca/openai-o3"]
 
 
 OCA_CONFIG = OCAConfig()
@@ -644,8 +645,8 @@ def get_oca_llm(
     """Create an OCA LLM instance.
 
     Args:
-        model: Model to use (default: oca/gpt5). Available models:
-               oca/gpt5, oca/gpt-oss-120b, oca/llama4, oca/openai-o3
+        model: Model to use (default: oca/gpt5.2). Available models:
+               oca/gpt5.2, oca/gpt5, oca/gpt-oss-120b, oca/llama4, oca/openai-o3
         temperature: Sampling temperature
         max_tokens: Maximum tokens in response
 
@@ -842,7 +843,7 @@ async def verify_oca_integration() -> tuple[bool, str, dict]:
             try:
                 from langchain_core.messages import HumanMessage
 
-                llm = ChatOCA(model="oca/gpt5", max_tokens=10, temperature=0)
+                llm = ChatOCA(model=OCA_CONFIG.DEFAULT_MODEL, max_tokens=10, temperature=0)
                 response = await llm.ainvoke([HumanMessage(content="Say 'ok'")])
 
                 llm_ok = len(response.content) > 0

@@ -16,6 +16,12 @@ from src.agents.coordinator.state import (
     RoutingType,
     ToolCall,
     ToolResult,
+    add_thinking_step,
+    determine_routing,
+    state_get_routing_type,
+    state_has_pending_tools,
+    state_should_continue,
+    state_to_dict,
 )
 from src.agents.coordinator.workflows import (
     WORKFLOW_REGISTRY,
@@ -37,6 +43,13 @@ __all__ = [
     "AgentContext",
     "ToolCall",
     "ToolResult",
+    # State helper functions
+    "add_thinking_step",
+    "determine_routing",
+    "state_get_routing_type",
+    "state_has_pending_tools",
+    "state_should_continue",
+    "state_to_dict",
     # Workflows
     "WORKFLOW_REGISTRY",
     "get_workflow_registry",

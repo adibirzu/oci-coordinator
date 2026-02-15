@@ -23,17 +23,17 @@ Usage:
     from src.observability.llm_tracing import LLMInstrumentor, llm_span
 
     # Decorate LLM calls
-    @llm_span(operation="chat", model="oca/gpt5")
+    @llm_span(operation="chat", model="oca/gpt5.2")
     async def call_llm(prompt: str) -> str:
         ...
 
     # Or use context manager
-    with LLMInstrumentor.span("tool_call", model="oca/gpt5") as span:
+    with LLMInstrumentor.span("tool_call", model="oca/gpt5.2") as span:
         span.set_tokens(input=100, output=50)
         result = await call_tool(...)
 
     # For Oracle Code Assist
-    with OracleCodeAssistInstrumentor.chat_span(model="oca/gpt5") as span:
+    with OracleCodeAssistInstrumentor.chat_span(model="oca/gpt5.2") as span:
         span.set_prompt(prompt)
         response = await oca_client.chat(prompt)
         span.set_completion(response)
@@ -81,7 +81,7 @@ class GenAIAttributes:
     SYSTEM = "gen_ai.system"  # e.g., "openai", "anthropic", "oci", "oracle_code_assist"
 
     # Request attributes
-    REQUEST_MODEL = "gen_ai.request.model"  # e.g., "oca/gpt5", "claude-3"
+    REQUEST_MODEL = "gen_ai.request.model"  # e.g., "oca/gpt5.2", "claude-sonnet-4"
     REQUEST_MAX_TOKENS = "gen_ai.request.max_tokens"
     REQUEST_TEMPERATURE = "gen_ai.request.temperature"
     REQUEST_TOP_P = "gen_ai.request.top_p"
@@ -400,11 +400,12 @@ class LLMInstrumentor:
 
     # Token cost estimates per 1K tokens (approximate)
     TOKEN_COSTS = {
+        "oca/gpt5.2": {"input": 0.001, "output": 0.002},
         "oca/gpt5": {"input": 0.001, "output": 0.002},
         "claude-sonnet-4-20250514": {"input": 0.003, "output": 0.015},
         "claude-3-opus": {"input": 0.015, "output": 0.075},
-        "gpt-4-turbo": {"input": 0.01, "output": 0.03},
         "gpt-4o": {"input": 0.005, "output": 0.015},
+        "gpt-4-turbo": {"input": 0.01, "output": 0.03},
     }
 
     @classmethod
@@ -496,7 +497,7 @@ def llm_span(
         system: LLM provider system
 
     Example:
-        @llm_span(operation="agent_run", model="oca/gpt5")
+        @llm_span(operation="agent_run", model="oca/gpt5.2")
         async def run_agent(query: str) -> str:
             ...
     """
@@ -642,7 +643,7 @@ class AgentInstrumentor:
     def classification_span(
         cls,
         query: str,
-        model: str = "oca/gpt5",
+        model: str = "oca/gpt5.2",
         **attributes: Any,
     ):
         """Create a span for intent classification.
@@ -747,7 +748,7 @@ class OracleCodeAssistInstrumentor:
     Compatible with OCI APM, viewapp LLM Observability, and DataDog.
 
     Usage:
-        with OracleCodeAssistInstrumentor.chat_span(model="oca/gpt5") as span:
+        with OracleCodeAssistInstrumentor.chat_span(model="oca/gpt5.2") as span:
             span.set_prompt(prompt)
             span.set_request_params(temperature=0.7, max_tokens=1000)
             response = await oca_client.chat(prompt)
@@ -764,7 +765,7 @@ class OracleCodeAssistInstrumentor:
     @contextmanager
     def chat_span(
         cls,
-        model: str = "oca/gpt5",
+        model: str = "oca/gpt5.2",
         endpoint: str | None = None,
         region: str | None = None,
         tenancy: str | None = None,
@@ -805,7 +806,7 @@ class OracleCodeAssistInstrumentor:
     @contextmanager
     def completion_span(
         cls,
-        model: str = "oca/gpt5",
+        model: str = "oca/gpt5.2",
         endpoint: str | None = None,
         **attributes: Any,
     ):

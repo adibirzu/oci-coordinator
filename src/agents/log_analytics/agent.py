@@ -107,13 +107,18 @@ class LogAnalyticsAgent(BaseAgent, SelfHealingMixin):
             role="log-analytics-agent",
             capabilities=[
                 "log-search",
+                "log-query-execution",
                 "pattern-detection",
                 "log-correlation",
                 "audit-analysis",
                 "anomaly-detection",
+                "log-analysis",
+                "observability-overview",
             ],
             skills=[
                 "log_search_workflow",
+                "log_summary_workflow",
+                "log_query_workflow",
                 "pattern_analysis",
                 "correlation_analysis",
                 "audit_review",
@@ -124,16 +129,26 @@ class LogAnalyticsAgent(BaseAgent, SelfHealingMixin):
             ),
             health_endpoint="http://localhost:8011/health",
             metadata=AgentMetadata(
-                version="1.0.0",
+                version="1.1.0",
                 namespace="oci-coordinator",
                 max_iterations=10,
                 timeout_seconds=45,
             ),
             description=(
-                "Log Analytics Expert Agent for OCI log search, pattern detection, "
-                "and correlation analysis across services."
+                "Log Analytics Expert Agent for OCI Log Analytics (Logan). "
+                "Provides log search, query execution, pattern detection, "
+                "anomaly correlation, and audit analysis across OCI services. "
+                "Supports namespaces, log groups, storage analytics, and "
+                "advanced Log Analytics query syntax."
             ),
             mcp_servers=["oci-unified", "database-observatory"],
+            mcp_tools=[
+                "oci_logan_list_namespaces",
+                "oci_logan_list_log_groups",
+                "oci_logan_get_summary",
+                "oci_logan_execute_query",
+                "oci_logan_search_logs",
+            ],
         )
 
     def build_graph(self) -> StateGraph:

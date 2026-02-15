@@ -27,7 +27,7 @@ class TestOCAConfig:
         assert "identity.oraclecloud.com" in config.IDCS_OAUTH_URL
         assert "aiservice" in config.OCA_ENDPOINT
         assert config.OCA_API_VERSION == "20250206"
-        assert config.DEFAULT_MODEL == "oca/gpt5" or config.DEFAULT_MODEL.startswith("oca/")
+        assert config.DEFAULT_MODEL == "oca/gpt5.2" or config.DEFAULT_MODEL.startswith("oca/")
 
     def test_config_endpoints(self):
         """Verify endpoint URL construction."""
@@ -179,9 +179,9 @@ class TestChatOCA:
 
     def test_identifying_params(self):
         """Verify identifying parameters."""
-        llm = ChatOCA(model="oca/gpt5", temperature=0.5, max_tokens=2048)
+        llm = ChatOCA(model="oca/gpt5.2", temperature=0.5, max_tokens=2048)
         params = llm._identifying_params
-        assert params["model"] == "oca/gpt5"
+        assert params["model"] == "oca/gpt5.2"
         assert params["temperature"] == 0.5
         assert params["max_tokens"] == 2048
 

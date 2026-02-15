@@ -621,7 +621,14 @@ class InfrastructureAgent(BaseAgent, SelfHealingMixin):
             }
 
     async def _execute_action_node(self, state: InfrastructureState) -> dict[str, Any]:
-        """Execute infrastructure action (start, stop, restart)."""
+        """Execute infrastructure action (start, stop, restart).
+
+        Supports two modes:
+        - Single instance: when resource_id is set (OCID known)
+        - Multi-instance: when resource_id is None but compartment_id is set.
+          Lists instances in compartment, filters by name patterns from query,
+          and performs the action on each matching instance.
+        """
         with self._tracer.start_as_current_span("execute_action") as span:
             self._logger.info(
                 "Executing infrastructure action",
@@ -630,19 +637,25 @@ class InfrastructureAgent(BaseAgent, SelfHealingMixin):
                 trace_id=get_trace_id(),
             )
 
-            if not state.resource_id:
-                return {
-                    "error": "No resource ID specified for action",
-                    "phase": "output",
-                }
-
-            action_result = {}
             tool_map = {
                 ActionType.START: "oci_compute_start_instance",
                 ActionType.STOP: "oci_compute_stop_instance",
                 ActionType.RESTART: "oci_compute_restart_instance",
             }
 
+            # Multi-instance: no resource_id but we have a compartment
+            if not state.resource_id and state.compartment_id:
+                return await self._execute_multi_instance_action(
+                    state, tool_map, span,
+                )
+
+            if not state.resource_id:
+                return {
+                    "error": "No resource ID or compartment specified for action",
+                    "phase": "output",
+                }
+
+            action_result = {}
             tool_name = tool_map.get(state.action_type)
             if tool_name:
                 result = await self._call_mcp_tool(
@@ -675,6 +688,225 @@ class InfrastructureAgent(BaseAgent, SelfHealingMixin):
                 "action_result": action_result,
                 "phase": "output",
             }
+
+    async def _execute_multi_instance_action(
+        self,
+        state: InfrastructureState,
+        tool_map: dict,
+        span: Any,
+    ) -> dict[str, Any]:
+        """List instances in compartment, filter by name, and perform action on each."""
+        import json
+        import re
+
+        self._logger.info(
+            "Multi-instance action: listing instances to filter",
+            action=state.action_type.value,
+            compartment_id=state.compartment_id,
+            query=state.query[:100],
+        )
+
+        # Step 1: List all instances in the compartment
+        list_result = await self._call_mcp_tool(
+            "oci_compute_list_instances",
+            {
+                "compartment_id": state.compartment_id,
+                "limit": 100,
+                "format": "json",
+            },
+        )
+
+        if list_result.get("error"):
+            return {"error": f"Failed to list instances: {list_result['error']}", "phase": "output"}
+
+        # Unwrap the result — _call_mcp_tool wraps ToolCallResult as {"result": <ToolCallResult>}
+        raw_result = list_result
+        if isinstance(list_result, dict) and "result" in list_result:
+            inner = list_result["result"]
+            # ToolCallResult has .result attribute with the actual data
+            if hasattr(inner, "result"):
+                raw_result = inner.result
+            elif hasattr(inner, "content"):
+                raw_result = inner.content
+            else:
+                raw_result = inner
+
+        # Parse instances from the unwrapped response
+        instances = []
+        if isinstance(raw_result, str):
+            # MCP typically returns JSON string — parse it
+            try:
+                parsed = json.loads(raw_result)
+                if isinstance(parsed, list):
+                    instances = parsed
+                elif isinstance(parsed, dict):
+                    instances = parsed.get("instances", parsed.get("data", []))
+            except json.JSONDecodeError:
+                self._logger.warning("Failed to parse instance list as JSON", preview=raw_result[:200])
+        elif isinstance(raw_result, list):
+            instances = raw_result
+        elif isinstance(raw_result, dict):
+            instances = raw_result.get("instances", raw_result.get("data", []))
+
+        self._logger.info(
+            "Instance list response parsed",
+            instance_count=len(instances),
+            raw_type=type(raw_result).__name__,
+        )
+
+        if not instances:
+            return {
+                "error": "No instances found in compartment",
+                "phase": "output",
+            }
+
+        # Step 2: Extract name patterns from query
+        name_patterns = self._extract_instance_name_patterns(state.query)
+        span.set_attribute("name_patterns", str(name_patterns))
+
+        # Step 3: Filter instances by name patterns
+        if name_patterns:
+            matched = []
+            for inst in instances:
+                inst_name = ""
+                if isinstance(inst, dict):
+                    inst_name = inst.get("display_name", inst.get("name", "")).lower()
+                if any(p in inst_name for p in name_patterns):
+                    matched.append(inst)
+            target_instances = matched
+        else:
+            # No specific name filter — use all instances
+            target_instances = instances
+
+        if not target_instances:
+            return {
+                "error": f"No instances matching '{', '.join(name_patterns)}' found in compartment "
+                         f"({len(instances)} total instances)",
+                "phase": "output",
+            }
+
+        self._logger.info(
+            "Filtered instances for action",
+            matched=len(target_instances),
+            total=len(instances),
+            patterns=name_patterns,
+        )
+        span.set_attribute("matched_instances", len(target_instances))
+
+        # Step 4: Execute action on each matching instance
+        tool_name = tool_map.get(state.action_type)
+        if not tool_name:
+            return {"error": f"No tool mapping for action: {state.action_type}", "phase": "output"}
+
+        results = []
+        for inst in target_instances:
+            inst_id = inst.get("id", inst.get("instance_id", "")) if isinstance(inst, dict) else ""
+            inst_name = inst.get("display_name", inst.get("name", "unknown")) if isinstance(inst, dict) else "unknown"
+
+            if not inst_id:
+                results.append({"name": inst_name, "status": "skipped", "reason": "no instance ID"})
+                continue
+
+            result = await self._call_mcp_tool(tool_name, {"instance_id": inst_id})
+
+            if result.get("error"):
+                if "ALLOW_MUTATIONS" in str(result.get("error", "")):
+                    return {
+                        "error": "Write operations are disabled. Set ALLOW_MUTATIONS=true to enable.",
+                        "phase": "output",
+                    }
+                results.append({"name": inst_name, "id": inst_id, "status": "failed", "error": str(result["error"])})
+            else:
+                results.append({"name": inst_name, "id": inst_id, "status": "success"})
+
+        succeeded = sum(1 for r in results if r["status"] == "success")
+        failed = sum(1 for r in results if r["status"] == "failed")
+
+        action_result = {
+            "action": state.action_type.value,
+            "multi_instance": True,
+            "total_matched": len(target_instances),
+            "succeeded": succeeded,
+            "failed": failed,
+            "name_patterns": name_patterns,
+            "results": results,
+            "status": "success" if failed == 0 else "partial",
+        }
+
+        span.set_attribute("action_success", succeeded > 0)
+        span.set_attribute("action_succeeded", succeeded)
+        span.set_attribute("action_failed", failed)
+
+        return {
+            "action_result": action_result,
+            "phase": "output",
+        }
+
+    def _extract_instance_name_patterns(self, query: str) -> list[str]:
+        """Extract instance name patterns from a multi-instance query.
+
+        Examples:
+            "start all GOAD instances" → ["goad"]
+            "stop GOAD and victim instances" → ["goad", "victim"]
+            "start all instances" → [] (no filter, matches all)
+        """
+        import re
+
+        query_lower = query.lower()
+
+        # Remove common noise words to find the actual name patterns
+        noise_words = {
+            "start", "stop", "restart", "reboot", "boot", "shutdown", "halt",
+            "power", "on", "off", "turn",
+            "all", "the", "every", "each",
+            "instance", "instances", "vm", "vms", "server", "servers",
+            "in", "from", "of", "and", "also", "compartment",
+            "please", "can", "you", "my",
+        }
+
+        # Extract candidate names: words/phrases between action and "instance(s)"
+        # Pattern: "<action> [all/the] <NAME> [and <NAME>] instance(s)"
+        patterns = []
+
+        # Try structured pattern first: capture words between action and "instance(s)"
+        match = re.search(
+            r'(?:start|stop|restart|reboot|boot|shutdown|halt)\s+'
+            r'(?:all\s+|the\s+|every\s+)?'
+            r'(.+?)\s*'
+            r'(?:instances?|vms?|servers?)',
+            query_lower,
+        )
+        if match:
+            name_segment = match.group(1).strip()
+            # Split by "and" or commas to get individual names
+            parts = re.split(r'\s*(?:and|,)\s*', name_segment)
+            for part in parts:
+                # Clean each part
+                clean = part.strip()
+                words = clean.split()
+                # Filter out noise words
+                name_words = [w for w in words if w not in noise_words]
+                if name_words:
+                    patterns.append(" ".join(name_words))
+
+        # Also check for "and also <NAME> instances" pattern
+        also_match = re.search(
+            r'(?:and\s+)?also\s+(.+?)\s*(?:instances?|vms?|servers?)',
+            query_lower,
+        )
+        if also_match:
+            name_segment = also_match.group(1).strip()
+            parts = re.split(r'\s*(?:and|,)\s*', name_segment)
+            for part in parts:
+                clean = part.strip()
+                words = clean.split()
+                name_words = [w for w in words if w not in noise_words]
+                if name_words:
+                    name = " ".join(name_words)
+                    if name not in patterns:
+                        patterns.append(name)
+
+        return patterns
 
     async def _security_check_node(self, state: InfrastructureState) -> dict[str, Any]:
         """Perform security analysis using MCP tools."""
@@ -765,27 +997,84 @@ class InfrastructureAgent(BaseAgent, SelfHealingMixin):
 
         # Add action result if any
         if state.action_result:
-            response.add_section(
-                title="Action Result",
-                fields=[
-                    StatusIndicator(
-                        label="Action",
-                        value=state.action_result.get("action", "unknown"),
-                        severity=Severity.INFO,
-                    ),
-                    StatusIndicator(
-                        label="Status",
-                        value=state.action_result.get("status", "unknown"),
-                        severity=Severity.SUCCESS if state.action_result.get("status") == "success" else Severity.HIGH,
-                    ),
-                    StatusIndicator(
-                        label="Resource",
-                        value=state.action_result.get("resource_id", "N/A")[:40],
-                        severity=Severity.INFO,
-                    ),
-                ],
-                divider_after=True,
-            )
+            if state.action_result.get("multi_instance"):
+                # Multi-instance action result
+                succeeded = state.action_result.get("succeeded", 0)
+                failed = state.action_result.get("failed", 0)
+                total = state.action_result.get("total_matched", 0)
+                overall_severity = Severity.SUCCESS if failed == 0 else Severity.MEDIUM
+
+                response.add_section(
+                    title="Multi-Instance Action Result",
+                    fields=[
+                        StatusIndicator(
+                            label="Action",
+                            value=state.action_result.get("action", "unknown"),
+                            severity=Severity.INFO,
+                        ),
+                        StatusIndicator(
+                            label="Matched",
+                            value=f"{total} instances",
+                            severity=Severity.INFO,
+                        ),
+                        StatusIndicator(
+                            label="Succeeded",
+                            value=str(succeeded),
+                            severity=Severity.SUCCESS,
+                        ),
+                        StatusIndicator(
+                            label="Failed",
+                            value=str(failed),
+                            severity=Severity.HIGH if failed > 0 else Severity.SUCCESS,
+                        ),
+                    ],
+                    divider_after=True,
+                )
+
+                # Add per-instance results as a table
+                instance_results = state.action_result.get("results", [])
+                if instance_results:
+                    rows = [
+                        TableRow(cells=[
+                            r.get("name", "unknown"),
+                            r.get("status", "unknown"),
+                            r.get("error", "")[:50] if r.get("error") else "",
+                        ])
+                        for r in instance_results
+                    ]
+                    response.add_section(
+                        title="Instance Details",
+                        fields=[
+                            TableData(
+                                headers=["Instance", "Status", "Details"],
+                                rows=rows,
+                            ),
+                        ],
+                        divider_after=True,
+                    )
+            else:
+                # Single-instance action result
+                response.add_section(
+                    title="Action Result",
+                    fields=[
+                        StatusIndicator(
+                            label="Action",
+                            value=state.action_result.get("action", "unknown"),
+                            severity=Severity.INFO,
+                        ),
+                        StatusIndicator(
+                            label="Status",
+                            value=state.action_result.get("status", "unknown"),
+                            severity=Severity.SUCCESS if state.action_result.get("status") == "success" else Severity.HIGH,
+                        ),
+                        StatusIndicator(
+                            label="Resource",
+                            value=state.action_result.get("resource_id", "N/A")[:40],
+                            severity=Severity.INFO,
+                        ),
+                    ],
+                    divider_after=True,
+                )
 
         # Add summary metrics
         response.add_metrics(

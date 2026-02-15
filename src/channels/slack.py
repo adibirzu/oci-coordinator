@@ -705,7 +705,7 @@ def build_help_blocks() -> list[dict]:
             "elements": [
                 {
                     "type": "mrkdwn",
-                    "text": ":bulb: Type `catalog` for interactive troubleshooting | :zap: Powered by OCA"
+                    "text": ":bulb: Type `catalog` for interactive troubleshooting | `status` for system health | :zap: Powered by OCA"
                 }
             ]
         }
@@ -927,6 +927,129 @@ def build_error_blocks(error: str, suggestion: str | None = None) -> list[dict]:
                 }
             ]
         })
+
+    return blocks
+
+
+async def _check_system_health() -> dict[str, Any]:
+    """Run system health checks for diagnostics.
+
+    Returns a dict with component statuses:
+        {component_name: {"status": "ok"|"error", "detail": "..."}}
+    """
+    checks: dict[str, Any] = {}
+
+    # Check LLM / OCA authentication
+    try:
+        from src.llm.oca import is_oca_authenticated
+        auth_ok = is_oca_authenticated()
+        checks["llm_auth"] = {
+            "status": "ok" if auth_ok else "error",
+            "detail": "Authenticated" if auth_ok else "Not authenticated - run /auth or click auth link",
+        }
+    except Exception as e:
+        checks["llm_auth"] = {"status": "error", "detail": f"Check failed: {str(e)[:80]}"}
+
+    # Check MCP tool catalog
+    try:
+        from src.mcp.connection_manager import MCPConnectionManager
+        mcp_manager = await MCPConnectionManager.get_instance()
+        tool_catalog = await mcp_manager.get_tool_catalog()
+        if tool_catalog:
+            tool_count = len(tool_catalog.list_tools())
+            checks["mcp_tools"] = {
+                "status": "ok" if tool_count > 0 else "warning",
+                "detail": f"{tool_count} tools available",
+            }
+        else:
+            checks["mcp_tools"] = {"status": "error", "detail": "Tool catalog not initialized"}
+    except Exception as e:
+        checks["mcp_tools"] = {"status": "error", "detail": f"MCP unavailable: {str(e)[:80]}"}
+
+    # Check OCI config
+    try:
+        import oci
+        config = oci.config.from_file()
+        tenancy = config.get("tenancy", "")
+        region = config.get("region", "unknown")
+        checks["oci_config"] = {
+            "status": "ok" if tenancy else "error",
+            "detail": f"Region: {region}" if tenancy else "No tenancy configured",
+        }
+    except Exception as e:
+        checks["oci_config"] = {"status": "error", "detail": f"OCI config error: {str(e)[:80]}"}
+
+    # Check Redis / memory
+    try:
+        from src.memory.manager import SharedMemoryManager
+        mem = SharedMemoryManager()
+        await mem.initialize()
+        checks["redis"] = {"status": "ok", "detail": "Connected"}
+    except Exception as e:
+        checks["redis"] = {"status": "warning", "detail": f"Unavailable (non-critical): {str(e)[:60]}"}
+
+    # Check LangGraph coordinator
+    try:
+        from src.main import get_coordinator
+        coordinator = get_coordinator()
+        checks["coordinator"] = {
+            "status": "ok" if coordinator else "warning",
+            "detail": "Pre-warmed and ready" if coordinator else "Not pre-warmed (will initialize on first request)",
+        }
+    except Exception as e:
+        checks["coordinator"] = {"status": "warning", "detail": f"Check failed: {str(e)[:60]}"}
+
+    return checks
+
+
+def build_status_blocks(checks: dict[str, Any]) -> list[dict]:
+    """Build Slack Block Kit blocks for system health status."""
+    status_icons = {"ok": ":white_check_mark:", "warning": ":warning:", "error": ":x:"}
+    component_labels = {
+        "llm_auth": "LLM Authentication",
+        "mcp_tools": "MCP Tool Servers",
+        "oci_config": "OCI Configuration",
+        "redis": "Redis (Memory)",
+        "coordinator": "LangGraph Coordinator",
+    }
+
+    blocks: list[dict] = [
+        {
+            "type": "header",
+            "text": {"type": "plain_text", "text": "System Health Status", "emoji": True},
+        },
+    ]
+
+    all_ok = all(c.get("status") == "ok" for c in checks.values())
+    overall_icon = ":large_green_circle:" if all_ok else ":red_circle:"
+    blocks.append({
+        "type": "section",
+        "text": {
+            "type": "mrkdwn",
+            "text": f"{overall_icon} *Overall*: {'All systems operational' if all_ok else 'Issues detected - see below'}",
+        },
+    })
+    blocks.append({"type": "divider"})
+
+    for key, check in checks.items():
+        icon = status_icons.get(check.get("status", "error"), ":question:")
+        label = component_labels.get(key, key)
+        blocks.append({
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"{icon} *{label}*\n{check.get('detail', 'No details')}",
+            },
+        })
+
+    blocks.append({"type": "divider"})
+    blocks.append({
+        "type": "context",
+        "elements": [{
+            "type": "mrkdwn",
+            "text": ":bulb: *Tip:* If MCP tools or LLM auth show errors, the bot cannot process OCI queries. Contact your admin.",
+        }],
+    })
 
     return blocks
 
@@ -1218,12 +1341,26 @@ class SlackHandler:
             )
         except Exception as e:
             logger.error("Slack say failed, falling back", error=str(e))
-            await self._send_plain_text_fallback(
-                client=client,
-                channel=channel,
-                thread_ts=thread_ts,
-                text=text,
-            )
+            try:
+                await self._send_plain_text_fallback(
+                    client=client,
+                    channel=channel,
+                    thread_ts=thread_ts,
+                    text=text,
+                )
+            except Exception as fallback_err:
+                logger.error("Plain text fallback also failed", error=str(fallback_err))
+                try:
+                    await self._safe_client_call(
+                        client.chat_postMessage,
+                        channel=channel,
+                        thread_ts=thread_ts,
+                        text=":warning: Error processing request. Please try again.",
+                        max_retries=1,
+                    )
+                except Exception:
+                    logger.critical("Cannot communicate with Slack at all",
+                                    channel=channel)
 
     def _create_app(self):
         """Create and configure the sync Slack Bolt app."""
@@ -1296,6 +1433,24 @@ class SlackHandler:
         else:
             logger.info("AsyncRuntime started successfully", loop_id=id(runtime.loop))
 
+        def _sync_error_reply(client: Any, event: dict, error: str) -> None:
+            """Send error message via sync Slack client when async processing fails."""
+            try:
+                channel = event.get("channel")
+                thread_ts = event.get("thread_ts") or event.get("ts")
+                if channel:
+                    client.chat_postMessage(
+                        channel=channel,
+                        thread_ts=thread_ts,
+                        text=f":warning: Sorry, I hit an unexpected error: {str(error)[:200]}\nPlease try again.",
+                    )
+            except Exception as reply_err:
+                logger.error(
+                    "Failed to send sync error reply",
+                    error=str(reply_err),
+                    original_error=str(error),
+                )
+
         @app.event("app_mention")
         def handle_mention(event: dict, say: Callable, client: Any) -> None:
             """Handle @mentions of the bot."""
@@ -1305,7 +1460,11 @@ class SlackHandler:
                 text_preview=event.get("text", "")[:50],
             )
             # Use shared async runtime instead of asyncio.run()
-            run_async(self._process_message(event, say, client))
+            try:
+                run_async(self._process_message(event, say, client))
+            except Exception as e:
+                logger.error("Unhandled error in mention handler", error=str(e))
+                _sync_error_reply(client, event, str(e))
 
         @app.event("message")
         def handle_message(event: dict, say: Callable, client: Any) -> None:
@@ -1331,7 +1490,11 @@ class SlackHandler:
             # Note: Do NOT check _is_bot_mention here - app_mention handler already handles @mentions
             # Adding _is_bot_mention causes duplicate processing (both app_mention AND message fire)
             if is_dm or thread_ts:
-                run_async(self._process_message(event, say, client))
+                try:
+                    run_async(self._process_message(event, say, client))
+                except Exception as e:
+                    logger.error("Unhandled error in message handler", error=str(e))
+                    _sync_error_reply(client, event, str(e))
             else:
                 # Skip non-threaded channel messages - app_mention handles @mentions
                 pass
@@ -1711,35 +1874,45 @@ class SlackHandler:
             elif thread_ts is None and reply_in_thread:
                 thread_ts = event.get("ts")
 
-            # Deduplicate events to prevent stacking messages
-            if self._is_duplicate_event(event):
-                logger.info("Ignoring duplicate event",
-                           event_id=event.get("event_id"),
-                           msg_id=event.get("client_msg_id"))
-                return
-
-            # Remove bot mention from text
-            text = self._clean_message(text)
-            text_lower = text.lower().strip()
-            span.set_attribute("slack.user", user)
-            span.set_attribute("slack.channel", channel)
-            span.set_attribute("message.length", len(text))
-
-            logger.info(
-                "Processing Slack message",
-                user=user,
-                channel=channel,
-                text_preview=text[:50],
-                trace_id=get_trace_id(),
-            )
-
             try:
+                # Deduplicate events to prevent stacking messages
+                if self._is_duplicate_event(event):
+                    logger.info("Ignoring duplicate event",
+                               event_id=event.get("event_id"),
+                               msg_id=event.get("client_msg_id"))
+                    return
+
+                # Remove bot mention from text
+                text = self._clean_message(text)
+                text_lower = text.lower().strip()
+                span.set_attribute("slack.user", user)
+                span.set_attribute("slack.channel", channel)
+                span.set_attribute("message.length", len(text))
+
+                logger.info(
+                    "Processing Slack message",
+                    user=user,
+                    channel=channel,
+                    text_preview=text[:50],
+                    trace_id=get_trace_id(),
+                )
+
                 # Handle special commands first
                 if text_lower in ("help", "?", "commands"):
                     await self._safe_say(
                         say,
                         text="OCI Coordinator Help",
                         blocks=build_help_blocks(),
+                        thread_ts=thread_ts,
+                    )
+                    return
+
+                if text_lower in ("status", "health", "diagnose", "diag"):
+                    checks = await _check_system_health()
+                    await self._safe_say(
+                        say,
+                        text="System Health Status",
+                        blocks=build_status_blocks(checks),
                         thread_ts=thread_ts,
                     )
                     return
@@ -2129,14 +2302,29 @@ class SlackHandler:
                 span.set_attribute("error.message", str(e))
 
                 # Send error response
-                await self._safe_say_with_fallback(
-                    say=say,
-                    client=client,
-                    channel=channel,
-                    thread_ts=thread_ts,
-                    text=f"Error: {str(e)[:100]}",
-                    blocks=build_error_blocks(str(e)[:200]),
-                )
+                try:
+                    await self._safe_say_with_fallback(
+                        say=say,
+                        client=client,
+                        channel=channel,
+                        thread_ts=thread_ts,
+                        text=f"Error: {str(e)[:100]}",
+                        blocks=build_error_blocks(str(e)[:200]),
+                    )
+                except Exception as send_err:
+                    logger.error("Failed to send error response in _process_message",
+                                 error=str(send_err), original_error=str(e))
+                    try:
+                        await self._safe_client_call(
+                            client.chat_postMessage,
+                            channel=channel,
+                            thread_ts=thread_ts,
+                            text=f":warning: Sorry, I hit an unexpected error: {str(e)[:200]}\nPlease try again.",
+                            max_retries=1,
+                        )
+                    except Exception:
+                        logger.critical("Cannot send any error response to Slack",
+                                        channel=channel, original_error=str(e))
 
                 # Add error reaction
                 try:
@@ -2630,6 +2818,17 @@ class SlackHandler:
                             profile_context=profile_context,
                         )
                         if result and result.get("success"):
+                            # Check for auth errors that got wrapped in a "successful" response
+                            # (output_node may package auth errors as final_response text)
+                            response_text = result.get("response", "")
+                            error_text = result.get("error", "")
+                            combined_check = f"{response_text} {error_text}".lower()
+                            if "requires authentication" in combined_check or (
+                                "authentication" in combined_check and "oauth" in combined_check
+                            ):
+                                logger.info("Auth error detected in success response, returning auth_required")
+                                return {"type": "auth_required"}
+
                             span.set_attribute("routing.type", result.get("routing_type", "langgraph"))
                             span.set_attribute("routing.method", "langgraph")
                             # Get the actual workflow/agent name for attribution
@@ -2643,7 +2842,7 @@ class SlackHandler:
                                 "type": "agent_response",
                                 "agent_id": agent_id,
                                 "query": text,
-                                "message": result.get("response", ""),
+                                "message": response_text,
                                 "sections": [],
                                 "thinking_trace": result.get("thinking_trace"),
                                 "thinking_summary": result.get("thinking_summary"),
@@ -2656,10 +2855,32 @@ class SlackHandler:
                                 logger.info("OCA authentication required, returning auth_required response")
                                 return {"type": "auth_required"}
 
-                            # LangGraph returned error, fall through to keyword routing
+                            # LangGraph returned a non-empty response with an error
+                            # If there's a response message, return it (workflow may have
+                            # generated a user-friendly error like "Compartment not found")
+                            response_msg = result.get("response", "")
+                            if response_msg and response_msg != "No response generated":
+                                logger.warning(
+                                    "LangGraph coordinator returned error with response, propagating",
+                                    error=error_msg,
+                                    response_preview=response_msg[:100],
+                                )
+                                return {
+                                    "type": "agent_response",
+                                    "agent_id": result.get("selected_workflow")
+                                        or result.get("selected_agent")
+                                        or "coordinator",
+                                    "query": text,
+                                    "message": response_msg,
+                                    "sections": [],
+                                    "thinking_trace": result.get("thinking_trace"),
+                                    "thinking_summary": result.get("thinking_summary"),
+                                }
+
+                            # No useful response - fall through to keyword routing
                             logger.warning(
                                 "LangGraph coordinator returned error, falling back to keyword routing",
-                                error=result.get("error"),
+                                error=error_msg,
                             )
                     except Exception as e:
                         # Check if it's an auth error - propagate immediately
@@ -2696,7 +2917,10 @@ class SlackHandler:
 
                 logger.error("Coordinator invocation failed", error=error_str)
                 span.set_attribute("error", True)
-                return None
+                return {
+                    "type": "error",
+                    "message": f"Request processing failed: {error_str[:300]}",
+                }
 
     async def _invoke_langgraph_coordinator(
         self,
@@ -3160,7 +3384,7 @@ class SlackHandler:
         llm_tracer = get_tracer(agent_def.agent_id)
 
         with llm_tracer.start_as_current_span(f"llm.invoke.{agent_def.agent_id}") as span:
-            span.set_attribute("llm.model", "oca/gpt5")
+            span.set_attribute("llm.model", "oca/gpt5.2")
             span.set_attribute("llm.agent", agent_def.agent_id)
             span.set_attribute("llm.query_length", len(query))
 

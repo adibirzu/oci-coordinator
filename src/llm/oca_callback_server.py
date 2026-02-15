@@ -145,6 +145,16 @@ class OCACallbackHandler(BaseHTTPRequestHandler):
         """Suppress default HTTP logging."""
         pass
 
+    def _send_html(self, status: int, body: bytes) -> None:
+        """Send an HTML response with proper headers so the browser completes loading."""
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(body)
+        self.wfile.flush()
+
     def do_GET(self):
         """Handle GET requests (OAuth callback)."""
         parsed = urlparse(self.path)
@@ -164,29 +174,18 @@ class OCACallbackHandler(BaseHTTPRequestHandler):
             error = query.get("error", ["Unknown"])[0]
             error_desc = query.get("error_description", [""])[0]
             logger.error("OAuth error", error=error, description=error_desc)
-
-            self.send_response(400)
-            self.send_header("Content-Type", "text/html")
-            self.end_headers()
-            self.wfile.write(f"""
-                <html>
-                <body style="font-family: system-ui; text-align: center; padding: 50px;">
-                    <h1 style="color: #e74c3c;">Authentication Failed</h1>
-                    <p>Error: {error}</p>
-                    <p>{error_desc}</p>
-                    <p>You can close this window.</p>
-                </body>
-                </html>
-            """.encode())
+            self._send_html(400, f"""<!DOCTYPE html>
+<html><body style="font-family: system-ui; text-align: center; padding: 50px;">
+<h1 style="color: #e74c3c;">Authentication Failed</h1>
+<p>Error: {error}</p><p>{error_desc}</p>
+<p>You can close this window.</p>
+</body></html>""".encode())
             return
 
         # Get authorization code
         code = query.get("code", [None])[0]
         if not code:
-            self.send_response(400)
-            self.send_header("Content-Type", "text/html")
-            self.end_headers()
-            self.wfile.write(b"Missing authorization code")
+            self._send_html(400, b"<!DOCTYPE html><html><body>Missing authorization code</body></html>")
             return
 
         # Verify state parameter (CSRF protection)
@@ -194,34 +193,22 @@ class OCACallbackHandler(BaseHTTPRequestHandler):
         saved_state = load_state()
         if saved_state and returned_state != saved_state:
             logger.error("State mismatch - possible CSRF attack")
-            self.send_response(400)
-            self.send_header("Content-Type", "text/html")
-            self.end_headers()
-            self.wfile.write(b"""
-                <html>
-                <body style="font-family: system-ui; text-align: center; padding: 50px;">
-                    <h1 style="color: #e74c3c;">Authentication Failed</h1>
-                    <p>Invalid state parameter. Please try logging in again from Slack.</p>
-                </body>
-                </html>
-            """)
+            self._send_html(400, b"""<!DOCTYPE html>
+<html><body style="font-family: system-ui; text-align: center; padding: 50px;">
+<h1 style="color: #e74c3c;">Authentication Failed</h1>
+<p>Invalid state parameter. Please try logging in again from Slack.</p>
+</body></html>""")
             return
 
         # Load PKCE verifier
         verifier = load_verifier()
         if not verifier:
             logger.error("No PKCE verifier found for callback")
-            self.send_response(400)
-            self.send_header("Content-Type", "text/html")
-            self.end_headers()
-            self.wfile.write(b"""
-                <html>
-                <body style="font-family: system-ui; text-align: center; padding: 50px;">
-                    <h1 style="color: #e74c3c;">Authentication Failed</h1>
-                    <p>No PKCE verifier found. Please try logging in again from Slack.</p>
-                </body>
-                </html>
-            """)
+            self._send_html(400, b"""<!DOCTYPE html>
+<html><body style="font-family: system-ui; text-align: center; padding: 50px;">
+<h1 style="color: #e74c3c;">Authentication Failed</h1>
+<p>No PKCE verifier found. Please try logging in again from Slack.</p>
+</body></html>""")
             return
 
         # Exchange code for token
@@ -230,49 +217,46 @@ class OCACallbackHandler(BaseHTTPRequestHandler):
             save_token(token)
             clear_verifier()
 
-            # Notify callback if registered
+            # Send HTML response to browser FIRST, before the callback.
+            # The on_token_received callback may block (e.g., resuming the
+            # user's pending request via Slack), so the browser must get
+            # its response before that happens.
+            self._send_html(200, b"""<!DOCTYPE html>
+<html><body style="font-family: system-ui; text-align: center; padding: 50px;">
+<h1 style="color: #27ae60;">Authentication Successful!</h1>
+<p>You can close this window and return to Slack.</p>
+<p>Your session is now active.</p>
+<script>setTimeout(function(){window.close()},3000)</script>
+</body></html>""")
+
+            # Notify callback AFTER browser response is sent
             if OCACallbackHandler.on_token_received:
                 try:
                     OCACallbackHandler.on_token_received(token)
                 except Exception as e:
                     logger.warning("Token callback failed", error=str(e))
 
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html")
-            self.end_headers()
-            self.wfile.write(b"""
-                <html>
-                <body style="font-family: system-ui; text-align: center; padding: 50px;">
-                    <h1 style="color: #27ae60;">Authentication Successful!</h1>
-                    <p>You can close this window and return to Slack.</p>
-                    <p>Your session is now active.</p>
-                </body>
-                </html>
-            """)
-
             logger.info(
                 "OCA authentication successful",
                 expires_in=token.get("expires_in", 0),
             )
         else:
-            self.send_response(400)
-            self.send_header("Content-Type", "text/html")
-            self.end_headers()
-            self.wfile.write(b"""
-                <html>
-                <body style="font-family: system-ui; text-align: center; padding: 50px;">
-                    <h1 style="color: #e74c3c;">Authentication Failed</h1>
-                    <p>Token exchange failed. Please try again.</p>
-                </body>
-                </html>
-            """)
+            self._send_html(400, b"""<!DOCTYPE html>
+<html><body style="font-family: system-ui; text-align: center; padding: 50px;">
+<h1 style="color: #e74c3c;">Authentication Failed</h1>
+<p>Token exchange failed. Please try again.</p>
+</body></html>""")
 
     def _handle_health_check(self) -> None:
         """Handle health check endpoint."""
+        body = json.dumps({"status": "ok", "service": "oca-callback"}).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Connection", "close")
         self.end_headers()
-        self.wfile.write(json.dumps({"status": "ok", "service": "oca-callback"}).encode())
+        self.wfile.write(body)
+        self.wfile.flush()
 
 
 class RobustHTTPServer(ThreadingHTTPServer):

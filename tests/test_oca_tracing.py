@@ -91,7 +91,7 @@ async def test_oca_llm_call():
 
         try:
             # Create LLM instance
-            llm = get_oca_llm(model="oca/gpt5", temperature=0.1, max_tokens=100)
+            llm = get_oca_llm(model="oca/gpt5.2", temperature=0.1, max_tokens=100)
             print(f"\n  LLM Instance: {llm._llm_type}")
             print(f"    - Model: {llm.model}")
             print(f"    - Temperature: {llm.temperature}")
@@ -173,7 +173,7 @@ async def test_nested_agent_workflow():
                 print("  2. Agent: Processing request...")
 
                 # LLM call within agent context
-                llm = get_oca_llm(model="oca/gpt5", temperature=0.1, max_tokens=150)
+                llm = get_oca_llm(model="oca/gpt5.2", temperature=0.1, max_tokens=150)
 
                 messages = [
                     SystemMessage(content="You are an OCI infrastructure agent. Respond briefly."),

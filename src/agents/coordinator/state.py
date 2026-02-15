@@ -11,7 +11,7 @@ import contextvars
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Annotated, Any
+from typing import Annotated, Any, TypedDict
 
 from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
@@ -218,161 +218,156 @@ class AgentContext:
         }
 
 
-@dataclass
-class CoordinatorState:
+class CoordinatorState(TypedDict, total=False):
     """
-    State maintained through the LangGraph execution.
+    State maintained through the LangGraph execution (TypedDict for LangGraph 1.0).
 
     This state flows through all nodes in the coordinator graph:
     input → classifier → router → (workflow|agent|direct) → output
 
-    Attributes:
-        messages: Conversation history (LangGraph managed)
-        query: Original user query
-        intent: Classified intent information
-        routing: Routing decision
-        tool_calls: Pending tool calls from LLM
-        tool_results: Results from executed tools
-        agent_context: Context for specialized agents
-        current_agent: Currently executing agent role
-        workflow_state: State for workflow execution
-        iteration: Current iteration count
-        max_iterations: Maximum allowed iterations (loop guard)
-        error: Any error that occurred
-        final_response: Final response to return
-        output_format: Output format for response (markdown, slack, teams, etc.)
-        channel_type: Input channel type for format detection
+    All fields use ``total=False`` so nodes can return partial state dicts.
+    The ``messages`` field uses the ``add_messages`` reducer so new messages
+    are *appended* instead of replaced.
     """
 
     # Message history (managed by LangGraph add_messages reducer)
-    messages: Annotated[Sequence[BaseMessage], add_messages] = field(
-        default_factory=list
-    )
+    messages: Annotated[list[BaseMessage], add_messages]
 
     # Query processing
-    query: str = ""
-    intent: IntentClassification | None = None
-    routing: RoutingDecision | None = None
+    query: str
+    intent: IntentClassification | None
+    routing: RoutingDecision | None
 
     # Tool execution
-    tool_calls: list[ToolCall] = field(default_factory=list)
-    tool_results: list[ToolResult] = field(default_factory=list)
+    tool_calls: list[ToolCall]
+    tool_results: list[ToolResult]
 
     # Agent delegation
-    agent_context: AgentContext | None = None
-    current_agent: str | None = None
-    agent_response: str | None = None
+    agent_context: AgentContext | None
+    current_agent: str | None
+    agent_response: str | None
 
     # Workflow execution
-    workflow_state: dict[str, Any] = field(default_factory=dict)
-    workflow_name: str | None = None
+    workflow_state: dict[str, Any]
+    workflow_name: str | None
 
     # Loop control
-    iteration: int = 0
-    max_iterations: int = 15
+    iteration: int
+    max_iterations: int
 
     # Completion
-    error: str | None = None
-    final_response: str | None = None
+    error: str | None
+    final_response: str | None
 
     # Output formatting
-    output_format: str = "markdown"  # markdown, slack, teams, html, plain
-    channel_type: str | None = None  # slack, teams, web, api, cli
+    output_format: str  # markdown, slack, teams, html, plain
+    channel_type: str | None  # slack, teams, web, api, cli
 
     # Transparency layer - tracks thinking process for user visibility
-    thinking_trace: ThinkingTrace | None = None
-    agent_candidates: list[AgentCandidate] = field(default_factory=list)
-    enhanced_query: str | None = None  # LLM-enhanced version of original query
-
-    # DEPRECATED: Use set_thinking_callback() context variable instead.
-    # This field is kept for backward compatibility but should not be used.
-    # The callback is stored in a context variable to avoid msgpack serialization
-    # issues with LangGraph's MemorySaver checkpointer.
-    on_thinking_update: Any = None  # Deprecated - use context variable
+    thinking_trace: ThinkingTrace | None
+    agent_candidates: list[AgentCandidate]
+    enhanced_query: str | None  # LLM-enhanced version of original query
 
     # Metadata for profile-aware operations (OCI profile, context, etc.)
-    metadata: dict[str, Any] = field(default_factory=dict)
-
-    def to_dict(self) -> dict[str, Any]:
-        """Serialize state to dictionary (for debugging/logging)."""
-        return {
-            "query": self.query,
-            "enhanced_query": self.enhanced_query,
-            "intent": self.intent.to_dict() if self.intent else None,
-            "routing": self.routing.to_dict() if self.routing else None,
-            "tool_calls": [tc.to_dict() for tc in self.tool_calls],
-            "tool_results": [tr.to_dict() for tr in self.tool_results],
-            "current_agent": self.current_agent,
-            "workflow_name": self.workflow_name,
-            "iteration": self.iteration,
-            "max_iterations": self.max_iterations,
-            "error": self.error,
-            "has_final_response": self.final_response is not None,
-            "thinking_trace": self.thinking_trace.to_dict() if self.thinking_trace else None,
-            "agent_candidates": [c.to_dict() for c in self.agent_candidates],
-            "metadata": self.metadata,
-        }
-
-    def add_thinking_step(
-        self,
-        phase: ThinkingPhase,
-        message: str,
-        data: dict[str, Any] | None = None,
-    ) -> None:
-        """
-        Add a thinking step to the trace and trigger update callback.
-
-        Args:
-            phase: The thinking phase
-            message: Human-readable message
-            data: Additional phase-specific data
-        """
-        import asyncio
-        import inspect
+    metadata: dict[str, Any]
 
 
-        if self.thinking_trace is None:
-            from src.agents.coordinator.transparency import create_thinking_trace
-            self.thinking_trace = create_thinking_trace()
+# ─────────────────────────────────────────────────────────────────────────────
+# Standalone helper functions for CoordinatorState
+# (TypedDict doesn't support methods, so these are module-level functions)
+# ─────────────────────────────────────────────────────────────────────────────
 
-        step = self.thinking_trace.add_step(phase, message, data)
 
-        # Trigger callback for real-time updates (e.g., Slack)
-        # Use context variable to get callback (avoids msgpack serialization issues)
-        callback = get_thinking_callback()
-        if callback and callable(callback):
-            try:
-                result = callback(step)
-                # Handle async callbacks by scheduling them
-                if inspect.iscoroutine(result):
-                    try:
-                        loop = asyncio.get_running_loop()
-                        loop.create_task(result)
-                    except RuntimeError:
-                        # No running loop, try to run synchronously
-                        pass
-            except Exception:
-                pass  # Don't let callback errors break the flow
+def state_to_dict(state: CoordinatorState) -> dict[str, Any]:
+    """Serialize state to dictionary (for debugging/logging)."""
+    intent = state.get("intent")
+    routing = state.get("routing")
+    thinking_trace = state.get("thinking_trace")
+    return {
+        "query": state.get("query", ""),
+        "enhanced_query": state.get("enhanced_query"),
+        "intent": intent.to_dict() if intent else None,
+        "routing": routing.to_dict() if routing else None,
+        "tool_calls": [tc.to_dict() for tc in state.get("tool_calls", [])],
+        "tool_results": [tr.to_dict() for tr in state.get("tool_results", [])],
+        "current_agent": state.get("current_agent"),
+        "workflow_name": state.get("workflow_name"),
+        "iteration": state.get("iteration", 0),
+        "max_iterations": state.get("max_iterations", 15),
+        "error": state.get("error"),
+        "has_final_response": state.get("final_response") is not None,
+        "thinking_trace": thinking_trace.to_dict() if thinking_trace else None,
+        "agent_candidates": [c.to_dict() for c in state.get("agent_candidates", [])],
+        "metadata": state.get("metadata", {}),
+    }
 
-    def should_continue(self) -> bool:
-        """Check if graph execution should continue."""
-        if self.error:
-            return False
-        if self.iteration >= self.max_iterations:
-            return False
-        if self.final_response is not None:
-            return False
-        return True
 
-    def has_pending_tools(self) -> bool:
-        """Check if there are pending tool calls."""
-        return len(self.tool_calls) > 0
+def add_thinking_step(
+    state: CoordinatorState,
+    phase: ThinkingPhase,
+    message: str,
+    data: dict[str, Any] | None = None,
+) -> None:
+    """
+    Add a thinking step to the trace and trigger update callback.
 
-    def get_routing_type(self) -> RoutingType:
-        """Get the routing type from decision."""
-        if self.routing:
-            return self.routing.routing_type
-        return RoutingType.DIRECT
+    Note: This mutates the thinking_trace in-place. Since ThinkingTrace is a
+    mutable object stored by reference, this works with TypedDict state.
+
+    Args:
+        state: Current coordinator state
+        phase: The thinking phase
+        message: Human-readable message
+        data: Additional phase-specific data
+    """
+    import asyncio
+    import inspect
+
+    thinking_trace = state.get("thinking_trace")
+    if thinking_trace is None:
+        from src.agents.coordinator.transparency import create_thinking_trace
+        thinking_trace = create_thinking_trace()
+        state["thinking_trace"] = thinking_trace
+
+    step = thinking_trace.add_step(phase, message, data)
+
+    # Trigger callback for real-time updates (e.g., Slack)
+    callback = get_thinking_callback()
+    if callback and callable(callback):
+        try:
+            result = callback(step)
+            if inspect.iscoroutine(result):
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(result)
+                except RuntimeError:
+                    pass
+        except Exception:
+            pass  # Don't let callback errors break the flow
+
+
+def state_should_continue(state: CoordinatorState) -> bool:
+    """Check if graph execution should continue."""
+    if state.get("error"):
+        return False
+    if state.get("iteration", 0) >= state.get("max_iterations", 15):
+        return False
+    if state.get("final_response") is not None:
+        return False
+    return True
+
+
+def state_has_pending_tools(state: CoordinatorState) -> bool:
+    """Check if there are pending tool calls."""
+    return len(state.get("tool_calls", [])) > 0
+
+
+def state_get_routing_type(state: CoordinatorState) -> RoutingType:
+    """Get the routing type from decision."""
+    routing = state.get("routing")
+    if routing:
+        return routing.routing_type
+    return RoutingType.DIRECT
 
 
 # ─────────────────────────────────────────────────────────────────────────────

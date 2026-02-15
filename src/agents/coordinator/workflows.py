@@ -577,6 +577,7 @@ async def _resolve_compartment(
     tool_catalog: ToolCatalog,
     query: str | None = None,
     skip_root_fallback: bool = False,
+    diagnostics: list[str] | None = None,
 ) -> str | None:
     """
     Resolve a compartment name or ID to an OCID.
@@ -587,12 +588,18 @@ async def _resolve_compartment(
         query: Original query to extract compartment name from if name_or_id is None
         skip_root_fallback: If True, return None instead of falling back to root compartment.
                            Use this when the caller wants to try conversation context first.
+        diagnostics: Optional list to append diagnostic messages to for troubleshooting.
 
     Returns:
         Compartment OCID if found, root compartment as fallback (unless skip_root_fallback), or None
     """
+    def _diag(msg: str) -> None:
+        if diagnostics is not None:
+            diagnostics.append(msg)
+
     # If already an OCID, return as-is
     if name_or_id and name_or_id.startswith("ocid1."):
+        _diag(f"Using provided OCID: {name_or_id[:40]}...")
         return name_or_id
 
     # Try to extract compartment name from query if not provided
@@ -633,6 +640,7 @@ async def _resolve_compartment(
 
     # If we have a name to search, try to find it
     if search_name:
+        _diag(f"Searching for compartment: '{search_name}'")
         try:
             logger.debug("Searching for compartment by name", search_name=search_name)
             # Search for compartments matching the name
@@ -659,14 +667,17 @@ async def _resolve_compartment(
                     compartment_id = compartment_id.rstrip("`|")
                     logger.info("Resolved compartment name to OCID",
                                name=search_name, ocid=compartment_id[:50])
+                    _diag(f"Resolved '{search_name}' -> {compartment_id[:40]}...")
                     return compartment_id
                 else:
                     logger.warning("Compartment OCID found in result but regex failed to extract",
                                   search_name=search_name)
+                    _diag(f"Compartment search found results but could not extract OCID")
             else:
                 logger.warning("Compartment search returned no OCID matches",
                               search_name=search_name,
                               result_preview=result_str[:100] if result_str else "empty")
+                _diag(f"No compartment found matching '{search_name}'")
 
             # Try JSON parsing if it's structured
             try:
@@ -687,16 +698,21 @@ async def _resolve_compartment(
 
         except Exception as e:
             logger.warning("Compartment search failed", name=search_name, error=str(e))
+            _diag(f"Compartment search tool failed: {str(e)[:100]}")
 
     # Skip root fallback if caller wants to try conversation context first
     if skip_root_fallback:
         logger.debug("Skipping root compartment fallback (caller will try context)")
+        _diag("Will check conversation context before falling back to root")
         return None
 
     # Fall back to root compartment
     root = _get_root_compartment()
     if root:
         logger.debug("Using root compartment as fallback", ocid=root[:50])
+        _diag(f"Falling back to root (tenancy) compartment")
+    else:
+        _diag("No root compartment available (OCI CLI not configured?)")
     return root
 
 
@@ -1183,6 +1199,7 @@ async def list_instances_workflow(
     Supports compartment name resolution (e.g., "list instances in Adrian_birzu compartment")
     Stores resolved compartment in conversation context for subsequent queries.
     """
+    resolution_diagnostics: list[str] = []
     try:
         # Get thread_id for conversation context
         thread_id = metadata.get("thread_id") if metadata else None
@@ -1196,7 +1213,10 @@ async def list_instances_workflow(
             entities=entities,
             thread_id=thread_id,
         )
-        compartment_id = await _resolve_compartment(compartment_input, tool_catalog, query, skip_root_fallback=True)
+        compartment_id = await _resolve_compartment(
+            compartment_input, tool_catalog, query,
+            skip_root_fallback=True, diagnostics=resolution_diagnostics,
+        )
 
         # Track which compartment we're using
         used_fallback = False
@@ -1210,6 +1230,9 @@ async def list_instances_workflow(
                 compartment_id = context_id
                 used_context = True
                 context_compartment_name = context_name  # Save for reporting
+                resolution_diagnostics.append(
+                    f"Using compartment '{context_name}' from conversation context"
+                )
                 logger.info("Using compartment from conversation context",
                            thread_id=thread_id,
                            context_name=context_name,
@@ -1222,7 +1245,13 @@ async def list_instances_workflow(
             logger.debug("Using root compartment as fallback",
                         ocid=compartment_id[:50] if compartment_id else None)
             if not compartment_id:
-                return "Error: Could not determine compartment. Please specify a compartment name or configure OCI CLI."
+                diag_detail = " | ".join(resolution_diagnostics) if resolution_diagnostics else "No diagnostics"
+                return (
+                    f"Error: Could not determine compartment. "
+                    f"Please specify a compartment name or configure OCI CLI.\n"
+                    f"_Diagnostics: {diag_detail}_"
+                )
+            resolution_diagnostics.append("Fell back to root (tenancy) compartment")
         elif not used_context:
             logger.info("Compartment resolved successfully",
                        requested=compartment_input,
@@ -1286,7 +1315,13 @@ async def list_instances_workflow(
             state_msg = f" with state {lifecycle_state}" if lifecycle_state else ""
             comp_info = f" (compartment: {compartment_input or 'root'})" if compartment_input else ""
             if used_fallback and compartment_input:
-                return f"No instances found{state_msg}. Note: Compartment '{compartment_input}' was not found, searched root compartment instead."
+                diag_detail = " → ".join(resolution_diagnostics) if resolution_diagnostics else ""
+                diag_suffix = f"\n_Resolution path: {diag_detail}_" if diag_detail else ""
+                return (
+                    f"No instances found{state_msg}. "
+                    f"Note: Compartment '{compartment_input}' was not found, "
+                    f"searched root compartment instead.{diag_suffix}"
+                )
             return f"No instances found{state_msg}{comp_info}."
 
         # Add compartment context to successful results for debugging
@@ -1311,7 +1346,10 @@ async def list_instances_workflow(
 
     except Exception as e:
         logger.error("list_instances workflow failed", error=str(e))
-        return f"Error listing instances: {e}"
+        diag_detail = ""
+        if resolution_diagnostics:
+            diag_detail = f"\n_Resolution path: {' → '.join(resolution_diagnostics)}_"
+        return f"Error listing instances: {e}{diag_detail}"
 
 
 async def get_instance_workflow(
@@ -2670,6 +2708,55 @@ async def search_capabilities_workflow(
     except Exception as e:
         logger.error("search_capabilities workflow failed", error=str(e))
         return f"Error searching capabilities: {e}"
+
+
+async def list_agents_workflow(
+    query: str,
+    entities: dict[str, Any],
+    tool_catalog: ToolCatalog,
+    memory: SharedMemoryManager,
+) -> str:
+    """
+    List all available agents and their capabilities.
+
+    Matches intents: list_agents, what_agents, show_agents, available_agents
+    """
+    try:
+        from src.agents.catalog import AgentCatalog
+
+        catalog = AgentCatalog.get_instance()
+        agents = catalog.list_all()
+
+        if not agents:
+            return "No agents are currently registered."
+
+        # Build markdown table
+        lines = [
+            f"**{len(agents)} Agents Available**\n",
+            "| Agent | Domains | Capabilities | MCP Servers |",
+            "|-------|---------|--------------|-------------|",
+        ]
+
+        for agent in agents:
+            name = agent.role.replace("-agent", "").replace("-", " ").title()
+            domains = ", ".join(catalog.get_agent_domains(agent.role))
+            caps = ", ".join(agent.capabilities)
+            servers = ", ".join(agent.mcp_servers) if agent.mcp_servers else "-"
+            lines.append(f"| **{name}** | {domains} | {caps} | {servers} |")
+
+        # Summary footer
+        summary = catalog.get_summary()
+        lines.append(
+            f"\n_{summary['unique_capabilities']} capabilities, "
+            f"{summary['unique_skills']} skills across "
+            f"{summary['total_agents']} agents_"
+        )
+
+        return "\n".join(lines)
+
+    except Exception as e:
+        logger.error("list_agents workflow failed", error=str(e))
+        return f"Error listing agents: {e}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -6048,6 +6135,13 @@ WORKFLOW_REGISTRY: dict[str, Any] = {
     "search_capabilities": search_capabilities_workflow,
     "help": search_capabilities_workflow,
     "capabilities": search_capabilities_workflow,
+
+    # Agent Discovery
+    "list_agents": list_agents_workflow,
+    "show_agents": list_agents_workflow,
+    "available_agents": list_agents_workflow,
+    "what_agents": list_agents_workflow,
+    "agent_catalog": list_agents_workflow,
 
     # DB Management - Fleet and Database Health
     "db_fleet_health": db_fleet_health_workflow,
