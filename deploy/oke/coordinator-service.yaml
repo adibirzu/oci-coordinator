@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: oci-coordinator
+  namespace: oci-ai
+  labels:
+    app.kubernetes.io/name: oci-coordinator
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: oci-coordinator
+  ports:
+    - name: http
+      port: 3001
+      targetPort: http

@@ -399,7 +399,7 @@ class FinOpsAgent(BaseAgent, SelfHealingMixin):
                 "usage forecasting, anomaly detection, FOCUS normalization, "
                 "and optimization recommendations across OCI services."
             ),
-            mcp_servers=["finopsai", "oci-unified"],  # finopsai primary, oci-unified fallback
+            mcp_servers=["oci-gateway", "finopsai", "oci-unified"],  # gateway primary in OCI deployments
             mcp_tools=[
                 "oci_cost_get_summary",
                 "oci_cost_by_compartment",

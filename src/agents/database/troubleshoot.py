@@ -339,7 +339,7 @@ class DbTroubleshootAgent(BaseAgent, SelfHealingMixin):
                 "Provides fleet health, AWR reports, ADDM findings, capacity planning, and SQL tuning."
             ),
             mcp_tools=list(MCP_TOOLS),
-            mcp_servers=["oci-unified"],
+            mcp_servers=["oci-gateway", "oci-unified"],
         )
 
     def __init__(

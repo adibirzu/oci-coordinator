@@ -1,0 +1,71 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gateway-config
+  namespace: oci-ai
+data:
+  gateway.json: |
+    {
+      "name": "oci-mcp-gateway",
+      "version": "1.0.0",
+      "host": "0.0.0.0",
+      "port": 9000,
+      "path": "/mcp",
+      "log_level": "INFO",
+      "stateless": true,
+      "auth": {
+        "enabled": false,
+        "required_scopes": [],
+        "tool_scopes": {},
+        "static_tokens": {}
+      },
+      "backends": [
+        {
+          "name": "oci",
+          "description": "mcp-oci in-process backend",
+          "enabled": true,
+          "transport": "in_process",
+          "module": "mcp_server_oci.server",
+          "server_attr": "mcp",
+          "auth_method": "resource_principal",
+          "namespace_tools": false,
+          "health_check_interval": 30,
+          "tags": ["oci", "oke"]
+        },
+        {
+          "name": "db-observatory",
+          "description": "Optional remote database observatory backend",
+          "enabled": false,
+          "transport": "streamable_http",
+          "url": "http://database-observatory.oci-ai.svc.cluster.local:8000/mcp",
+          "namespace_tools": true,
+          "auth_method": "bearer_token",
+          "health_check_interval": 30,
+          "tags": ["database", "optional"]
+        },
+        {
+          "name": "finops",
+          "description": "Optional remote FinOps backend",
+          "enabled": false,
+          "transport": "streamable_http",
+          "url": "http://finopsai.oci-ai.svc.cluster.local:8000/mcp",
+          "namespace_tools": true,
+          "auth_method": "bearer_token",
+          "health_check_interval": 30,
+          "tags": ["finops", "optional"]
+        },
+        {
+          "name": "security",
+          "description": "Optional remote security backend",
+          "enabled": false,
+          "transport": "streamable_http",
+          "url": "http://oci-mcp-security.oci-ai.svc.cluster.local:8000/mcp",
+          "namespace_tools": true,
+          "auth_method": "bearer_token",
+          "health_check_interval": 30,
+          "tags": ["security", "optional"]
+        }
+      ],
+      "enable_audit_log": true,
+      "enable_metrics": true
+    }

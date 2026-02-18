@@ -1,0 +1,66 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: oci-mcp-gateway
+  namespace: oci-ai
+  labels:
+    app.kubernetes.io/name: oci-mcp-gateway
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: oci-mcp-gateway
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: oci-mcp-gateway
+    spec:
+      serviceAccountName: gateway-sa
+      containers:
+        - name: gateway
+          image: ghcr.io/your-org/mcp-oci-gateway:latest
+          imagePullPolicy: IfNotPresent
+          command: ["oci-mcp-gateway"]
+          args: ["--config", "/etc/mcp/gateway.json", "--stateless"]
+          ports:
+            - containerPort: 9000
+              name: http
+          volumeMounts:
+            - name: gateway-config
+              mountPath: /etc/mcp
+              readOnly: true
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "1"
+              memory: "2Gi"
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: gateway-config
+          configMap:
+            name: gateway-config
+            items:
+              - key: gateway.json
+                path: gateway.json
+      terminationGracePeriodSeconds: 30

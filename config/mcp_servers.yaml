@@ -53,6 +53,35 @@ servers:
     description: "Unified OCI MCP Server - compartments, compute, network, cost, security, database"
     timeout_seconds: 120  # Increased for slow initialization
 
+  # OCI MCP Gateway (recommended for OCI runtime / multi-backend aggregation)
+  # Example backend: mcp-oci gateway from https://github.com/adibirzu/mcp-oci
+  # Start gateway: uv run oci-mcp-gateway --config gateway.example.json --stateless
+  oci-gateway:
+    transport: http
+    url: ${MCP_GATEWAY_URL:-http://127.0.0.1:9000/mcp}
+    auth:
+      token_env: MCP_GATEWAY_BEARER_TOKEN
+      scheme: Bearer
+    headers:
+      # Override when connecting to custom gateway versions if needed.
+      MCP-Protocol-Version: ${MCP_PROTOCOL_VERSION:-2025-11-05}
+    enabled: ${MCP_GATEWAY_ENABLED:-false}
+    domains:
+      - identity
+      - compute
+      - network
+      - cost
+      - security
+      - observability
+      - database
+      - dbmgmt
+      - finops
+      - logan
+      - opsi
+    description: "OCI MCP Gateway (Streamable HTTP + Bearer auth + backend aggregation)"
+    timeout_seconds: 180
+    retry_attempts: 4
+
   # Native SQLcl MCP Server (Oracle SQLcl 25.2+)
   # Uses SQLcl's built-in MCP server mode with connection manager (~/.dbtools)
   # Connections must be saved first: sql -savepwd <conn_name> <user>/<pass>@<tns_alias>
@@ -227,28 +256,38 @@ servers:
 # Agents can request servers by group name
 groups:
   database:
+    - oci-gateway  # Preferred in OCI (single endpoint via gateway)
     - oci-unified  # Primary for dbmgmt operations (fleet health, etc.)
     - sqlcl-native  # Native SQLcl MCP server for direct SQL execution
     - database-observatory  # External fallback for SQLcl, OPSI, Logan
   observability:
+    - oci-gateway
     - database-observatory
     - oci-unified
   infrastructure:
+    - oci-gateway
     - oci-unified  # Primary for compute, network, security, identity
     - oci-infrastructure  # Fallback
   identity:
+    - oci-gateway
     - oci-unified  # Compartments, tenancy, regions
   security:
+    - oci-gateway
     - oci-mcp-security  # Cloud Guard, VSS, Bastion, Audit, KMS
     - oci-unified  # IAM, basic security
     - oci-infrastructure
   cost:
+    - oci-gateway
     - finopsai  # Primary for multicloud cost/FinOps
     - oci-unified  # Fallback for OCI cost
     - oci-infrastructure
   finops:
+    - oci-gateway
     - finopsai  # Anomaly detection, rightsizing, forecasting
+  oke:
+    - oci-gateway  # OKE production profile: gateway-only routing
   all:
+    - oci-gateway
     - oci-unified
     - sqlcl-native
     - database-observatory

@@ -37,6 +37,19 @@
     "accessgov",
     "zones"
   ],
+  "oci-gateway": [
+    "identity",
+    "compute",
+    "network",
+    "cost",
+    "security",
+    "observability",
+    "database",
+    "dbmgmt",
+    "finops",
+    "opsi",
+    "logan"
+  ],
   "oci-unified": [
     "identity",
     "compute",

@@ -1,0 +1,19 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: oci-ai
+
+resources:
+  - namespace.yaml
+  - coordinator-serviceaccount.yaml
+  - gateway-serviceaccount.yaml
+  - coordinator-configmap.yaml
+  - gateway-configmap.yaml
+  - coordinator-deployment.yaml
+  - coordinator-service.yaml
+  - coordinator-hpa.yaml
+  - coordinator-pdb.yaml
+  - gateway-deployment.yaml
+  - gateway-service.yaml
+  - gateway-hpa.yaml
+  - gateway-pdb.yaml
+  - networkpolicy.yaml

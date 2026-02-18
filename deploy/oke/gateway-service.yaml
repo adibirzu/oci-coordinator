@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: oci-mcp-gateway
+  namespace: oci-ai
+  labels:
+    app.kubernetes.io/name: oci-mcp-gateway
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: oci-mcp-gateway
+  ports:
+    - name: http
+      port: 9000
+      targetPort: http

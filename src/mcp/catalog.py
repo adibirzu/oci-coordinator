@@ -154,6 +154,19 @@ TOOL_ALIASES: dict[str, str] = {
 # Maps MCP servers to their supported domains for agent routing
 # Server names must match config/mcp_servers.yaml
 MCP_SERVER_DOMAINS: dict[str, list[str]] = {
+    "oci-gateway": [
+        "identity",
+        "compute",
+        "network",
+        "cost",
+        "security",
+        "observability",
+        "database",
+        "dbmgmt",
+        "finops",
+        "opsi",
+        "logan",
+    ],
     "oci-unified": ["identity", "compute", "network", "cost", "security", "observability", "discovery"],
     "database-observatory": ["database", "opsi", "logan", "sql", "performance", "awr", "schema", "sqlwatch"],
     "oci-infrastructure": ["compute", "network", "security", "cost", "database", "observability"],
@@ -452,6 +465,25 @@ def _tier_key(name: str) -> str:
     return name
 
 
+def _gateway_alias_candidates(name: str) -> set[str]:
+    """Infer canonical tool aliases from gateway-namespaced tool names.
+
+    Examples:
+    - ``gateway__oci_compute_list_instances`` -> ``oci_compute_list_instances``
+    - ``gateway:oci_compute_list_instances`` -> ``oci_compute_list_instances``
+    - ``oci_oci_compute_list_instances`` -> ``oci_compute_list_instances``
+    """
+    candidates: set[str] = set()
+    normalized = _tier_key(name)
+
+    if "_" in normalized:
+        _, remainder = normalized.split("_", 1)
+        if remainder.startswith(("oci_", "finops_")):
+            candidates.add(remainder)
+
+    return candidates
+
+
 class ToolCatalog:
     """
     Unified catalog of tools from all MCP servers.
@@ -542,6 +574,15 @@ class ToolCatalog:
         for name, tool_def in all_tools.items():
             self._tools[name] = tool_def
             self._tool_to_server[name] = tool_def.server_id
+
+        # Auto-register aliases for gateway-namespaced tools so agents can keep
+        # calling canonical names (e.g., oci_compute_list_instances).
+        for namespaced_name in list(self._tools.keys()):
+            for canonical in _gateway_alias_candidates(namespaced_name):
+                if canonical in self._tools:
+                    continue
+                if canonical not in TOOL_ALIASES:
+                    TOOL_ALIASES[canonical] = namespaced_name
 
         # Re-add custom tools
         for name, tool_def in self._custom_tools.items():

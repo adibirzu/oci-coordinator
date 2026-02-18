@@ -155,7 +155,7 @@ class SecurityThreatAgent(BaseAgent, SelfHealingMixin):
                 "Cloud Guard problem analysis, MITRE ATT&CK mapping, vulnerability scanning, "
                 "WAF policy review, bastion session audit, and Data Safe assessments in OCI."
             ),
-            mcp_servers=["oci-unified", "oci-mcp-security"],
+            mcp_servers=["oci-gateway", "oci-unified", "oci-mcp-security"],
             mcp_tools=[
                 "oci_security_list_users",
                 "oci_security_cloudguard_list_problems",

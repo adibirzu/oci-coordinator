@@ -176,3 +176,28 @@ async def test_validate_server_manifests_reports_issues() -> None:
     )
     assert "valid-server" not in results["missing_manifest"]
     assert results["checked"] == 3
+
+
+@pytest.mark.asyncio
+async def test_gateway_namespaced_tools_register_canonical_aliases() -> None:
+    original_aliases = dict(TOOL_ALIASES)
+    try:
+        tool_name = "oci_oci_compute_list_instances"
+        tools = {
+            tool_name: ToolDefinition(
+                name=tool_name,
+                description="List instances via gateway backend namespace",
+                input_schema={},
+                server_id="oci-gateway",
+            )
+        }
+        registry = FakeRegistry(tools, {})
+        catalog = ToolCatalog(registry)
+        await catalog.refresh()
+
+        resolved = catalog.get_tool("oci_compute_list_instances")
+        assert resolved is not None
+        assert resolved.name == tool_name
+    finally:
+        TOOL_ALIASES.clear()
+        TOOL_ALIASES.update(original_aliases)

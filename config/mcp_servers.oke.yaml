@@ -1,0 +1,82 @@
+# MCP Server Configuration (OKE Profile)
+# =====================================
+#
+# Purpose:
+# - Production profile for OCI OKE deployments.
+# - Routes all coordinator/agent MCP calls through a single gateway endpoint.
+# - Avoids local stdio backend dependencies inside coordinator pods.
+#
+# Usage:
+#   export MCP_CONFIG_FILE=/app/config/mcp_servers.oke.yaml
+#   export MCP_GATEWAY_URL=http://oci-mcp-gateway.oci-ai.svc.cluster.local:9000/mcp
+#   export MCP_GATEWAY_BEARER_TOKEN=<token-if-enabled-on-gateway>
+
+servers:
+  oci-gateway:
+    transport: http
+    url: ${MCP_GATEWAY_URL:-http://oci-mcp-gateway.oci-ai.svc.cluster.local:9000/mcp}
+    auth:
+      token_env: MCP_GATEWAY_BEARER_TOKEN
+      scheme: Bearer
+    headers:
+      MCP-Protocol-Version: ${MCP_PROTOCOL_VERSION:-2025-11-05}
+    enabled: true
+    domains:
+      - identity
+      - compute
+      - network
+      - cost
+      - security
+      - observability
+      - database
+      - dbmgmt
+      - finops
+      - logan
+      - opsi
+    description: "OCI MCP Gateway for OKE (streamable HTTP aggregation)"
+    timeout_seconds: 180
+    retry_attempts: 4
+
+groups:
+  database:
+    - oci-gateway
+  observability:
+    - oci-gateway
+  infrastructure:
+    - oci-gateway
+  identity:
+    - oci-gateway
+  security:
+    - oci-gateway
+  cost:
+    - oci-gateway
+  finops:
+    - oci-gateway
+  all:
+    - oci-gateway
+
+defaults:
+  timeout_seconds: 120
+  retry_attempts: 3
+  backoff_multiplier: 2
+  tool_timeouts:
+    oci_compute_list_instances: 180
+    oci_network_list_vcns: 120
+    oci_cost_get_summary: 180
+    oci_observability_query_logs: 300
+    oci_security_cloudguard_list_problems: 180
+    oci_security_list_cloud_guard_problems: 180
+    oci_dbmgmt_get_fleet_health: 120
+    oci_dbmgmt_list_databases: 180
+    oci_dbmgmt_get_awr_report: 180
+    oci_opsi_list_database_insights: 180
+    oci_opsi_get_database_insight: 120
+    oci_opsi_get_addm_findings: 240
+    oci_opsi_get_addm_recommendations: 240
+    oci_opsi_summarize_resource_stats: 180
+    oci_opsi_summarize_sql_insights: 180
+    oci_opsi_summarize_sql_statistics: 240
+    oci_opsi_search_databases: 120
+    oci_opsi_get_capacity_trend: 180
+    oci_opsi_get_capacity_forecast: 180
+    oci_opsi_sql_insights: 180

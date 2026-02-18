@@ -1,0 +1,89 @@
+profiles:
+  local:
+    strict: false
+    server_order:
+      default:
+        - oci-unified
+        - database-observatory
+        - oci-gateway
+      security:
+        - oci-unified
+        - oci-mcp-security
+        - oci-gateway
+      finops:
+        - oci-unified
+        - finopsai
+        - oci-gateway
+      infrastructure:
+        - oci-unified
+        - oci-infrastructure
+        - oci-gateway
+      selectai:
+        - selectai
+        - database-observatory
+        - oci-gateway
+
+  cloud:
+    strict: false
+    server_order:
+      default:
+        - oci-gateway
+        - oci-unified
+        - database-observatory
+      security:
+        - oci-gateway
+        - oci-mcp-security
+        - oci-unified
+      finops:
+        - oci-gateway
+        - finopsai
+        - oci-unified
+      infrastructure:
+        - oci-gateway
+        - oci-unified
+        - oci-infrastructure
+      selectai:
+        - oci-gateway
+        - selectai
+        - database-observatory
+
+  oke:
+    strict: true
+    server_order:
+      default:
+        - oci-gateway
+
+  oci-demo:
+    strict: false
+    server_order:
+      default:
+        - oci-gateway
+        - oci-unified
+        - database-observatory
+        - finopsai
+        - oci-mcp-security
+        - oci-infrastructure
+      database:
+        - oci-gateway
+        - oci-unified
+        - database-observatory
+      security:
+        - oci-gateway
+        - oci-mcp-security
+        - oci-unified
+      finops:
+        - oci-gateway
+        - finopsai
+        - oci-unified
+      observability:
+        - oci-gateway
+        - database-observatory
+        - oci-unified
+      infrastructure:
+        - oci-gateway
+        - oci-unified
+        - oci-infrastructure
+      selectai:
+        - oci-gateway
+        - selectai
+        - database-observatory

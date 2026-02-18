@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: coordinator-config
+  namespace: oci-ai
+data:
+  API_HOST: "0.0.0.0"
+  API_PORT: "3001"
+  LOG_LEVEL: "INFO"
+  MCP_CONFIG_FILE: "/app/config/mcp_servers.oke.yaml"
+  MCP_GATEWAY_ENABLED: "true"
+  MCP_GATEWAY_URL: "http://oci-mcp-gateway.oci-ai.svc.cluster.local:9000/mcp"
+  MCP_PROTOCOL_VERSION: "2025-11-05"
+  OCI_DEPLOYMENT_MODE: "oke"
+  ALLOW_MUTATIONS: "false"

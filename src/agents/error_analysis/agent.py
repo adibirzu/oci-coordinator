@@ -236,7 +236,7 @@ class ErrorAnalysisAgent(BaseAgent, SelfHealingMixin):
                 "Error Analysis Agent that scans OCI logs for errors, detects patterns, "
                 "performs root cause analysis with LLM reasoning, and creates admin todos."
             ),
-            mcp_servers=["oci-unified", "database-observatory"],
+            mcp_servers=["oci-gateway", "oci-unified", "database-observatory"],
             mcp_tools=[
                 "oci_logan_execute_query",
                 "oci_logan_search_logs",

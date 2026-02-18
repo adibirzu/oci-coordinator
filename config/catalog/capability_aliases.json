@@ -1,0 +1,79 @@
+{
+  "database-analysis": [
+    "database",
+    "db",
+    "db-analysis",
+    "database diagnostics",
+    "database troubleshooting"
+  ],
+  "performance-diagnostics": [
+    "performance",
+    "diagnostics",
+    "performance analysis"
+  ],
+  "threat-detection": [
+    "security",
+    "threat",
+    "vulnerability detection",
+    "security detection"
+  ],
+  "security-posture": [
+    "security posture",
+    "compliance",
+    "security audit"
+  ],
+  "cost-analysis": [
+    "cost",
+    "spend",
+    "finops",
+    "cloud cost",
+    "cost optimization"
+  ],
+  "budget-tracking": [
+    "budget",
+    "budgeting",
+    "budget monitoring"
+  ],
+  "anomaly-detection": [
+    "anomaly",
+    "outlier",
+    "spike detection"
+  ],
+  "log-search": [
+    "logs",
+    "logging",
+    "search logs",
+    "log analysis"
+  ],
+  "observability-overview": [
+    "observability",
+    "monitoring",
+    "operations overview"
+  ],
+  "compute-management": [
+    "compute",
+    "instance management",
+    "infrastructure"
+  ],
+  "network-analysis": [
+    "network",
+    "vcn",
+    "subnet",
+    "network diagnostics"
+  ],
+  "nl2sql": [
+    "text-to-sql",
+    "natural language sql",
+    "selectai"
+  ],
+  "data-chat": [
+    "data chat",
+    "chat with data",
+    "database qa"
+  ],
+  "error-analysis": [
+    "error diagnostics",
+    "root cause",
+    "rca"
+  ]
+}

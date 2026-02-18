@@ -542,7 +542,7 @@ The finopsai-mcp provides multicloud support (AWS, Azure, GCP), but only OCI is 
 ### Long Term (Roadmap)
 - [ ] Enable multicloud cost providers
 - [ ] Web UI dashboard
-- [ ] OKE deployment manifests
+- [x] OKE deployment manifests (`deploy/oke/`)
 - [ ] Full RAG implementation with OCI docs
 
 ---

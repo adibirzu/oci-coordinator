@@ -16,9 +16,7 @@ Run with:
     poetry run pytest tests/test_e2e_mcp_skills.py -v -m integration
 """
 
-import asyncio
 import os
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -231,6 +229,69 @@ servers:
         assert mcp_config.working_dir == "/tmp"
         assert mcp_config.timeout_seconds == 45
 
+    def test_enabled_supports_env_boolean_templates(self, tmp_path, monkeypatch):
+        """Test string-enabled values are parsed via env expansion."""
+        from src.mcp.config import load_mcp_config
+
+        monkeypatch.setenv("MCP_GATEWAY_ENABLED", "false")
+        config_file = tmp_path / "test_mcp.yaml"
+        config_file.write_text(
+            """
+servers:
+  gateway:
+    transport: http
+    url: "http://localhost:9000/mcp"
+    enabled: ${MCP_GATEWAY_ENABLED:-true}
+"""
+        )
+
+        config = load_mcp_config(config_file)
+        assert config.servers["gateway"].enabled is False
+
+    def test_auth_token_env_populates_authorization_header(self, tmp_path, monkeypatch):
+        """Test auth.token_env expands into Authorization header."""
+        from src.mcp.config import load_mcp_config
+
+        monkeypatch.setenv("MCP_GATEWAY_BEARER_TOKEN", "test-token")
+        config_file = tmp_path / "test_mcp.yaml"
+        config_file.write_text(
+            """
+servers:
+  gateway:
+    transport: http
+    url: "http://localhost:9000/mcp"
+    enabled: true
+    auth:
+      token_env: MCP_GATEWAY_BEARER_TOKEN
+      scheme: Bearer
+"""
+        )
+
+        config = load_mcp_config(config_file)
+        mcp_config = config.servers["gateway"].to_mcp_config()
+        assert mcp_config.headers["Authorization"] == "Bearer test-token"
+
+    def test_load_config_from_mcp_config_file_env(self, tmp_path, monkeypatch):
+        """Test MCP_CONFIG_FILE environment variable overrides default config path."""
+        from src.mcp.config import load_mcp_config
+
+        config_file = tmp_path / "mcp_servers.oke.yaml"
+        config_file.write_text(
+            """
+servers:
+  oci-gateway:
+    transport: http
+    url: http://gateway.oci-ai.svc:9000/mcp
+    enabled: true
+    domains: [database, cost]
+"""
+        )
+        monkeypatch.setenv("MCP_CONFIG_FILE", str(config_file))
+
+        config = load_mcp_config()
+        assert "oci-gateway" in config.servers
+        assert config.servers["oci-gateway"].transport.value == "http"
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # MCP Client Tests (Mocked)
@@ -282,6 +343,52 @@ class TestMCPClient:
         assert result.duration_ms == 150
         assert result.error is None
 
+    @pytest.mark.asyncio
+    async def test_http_transport_reuses_mcp_session_header(self):
+        """Test HTTP transport captures and reuses MCP session IDs."""
+        from src.mcp.client import HTTPTransport, MCPServerConfig, TransportType
+
+        config = MCPServerConfig(
+            server_id="oci-gateway",
+            transport=TransportType.HTTP,
+            url="http://gateway.local/mcp",
+            retry_attempts=1,
+        )
+        transport = HTTPTransport(config)
+
+        init_response = MagicMock()
+        init_response.status_code = 200
+        init_response.headers = {"MCP-Session-Id": "session-123"}
+        init_response.json.return_value = {"jsonrpc": "2.0", "id": 1, "result": {"ok": True}}
+        init_response.text = '{"jsonrpc":"2.0","id":1,"result":{"ok":true}}'
+        init_response.raise_for_status = MagicMock()
+
+        tools_response = MagicMock()
+        tools_response.status_code = 200
+        tools_response.headers = {}
+        tools_response.json.return_value = {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "result": {"tools": []},
+        }
+        tools_response.text = '{"jsonrpc":"2.0","id":2,"result":{"tools":[]}}'
+        tools_response.raise_for_status = MagicMock()
+
+        mock_client = MagicMock()
+        mock_client.post = AsyncMock(side_effect=[init_response, tools_response])
+        mock_client.headers = {}
+        mock_client.aclose = AsyncMock()
+
+        with patch("httpx.AsyncClient", return_value=mock_client):
+            await transport.connect()
+            result = await transport.send_request("tools/list")
+
+        assert transport._session_id == "session-123"
+        assert result == {"tools": []}
+
+        call_args = mock_client.post.call_args_list[1].kwargs
+        assert call_args["headers"]["MCP-Session-Id"] == "session-123"
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Tool Catalog Tests
@@ -295,7 +402,7 @@ class TestToolCatalog:
     def mock_registry(self):
         """Create a mock server registry."""
         from src.mcp.client import ToolDefinition
-        from src.mcp.registry import ServerRegistry, ServerStatus
+        from src.mcp.registry import ServerRegistry
 
         registry = MagicMock(spec=ServerRegistry)
 

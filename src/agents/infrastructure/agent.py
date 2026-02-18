@@ -230,7 +230,7 @@ class InfrastructureAgent(BaseAgent, SelfHealingMixin):
                 "and security management using the mcp-oci MCP server."
             ),
             mcp_tools=list(MCP_TOOLS),
-            mcp_servers=["oci-unified", "oci-infrastructure"],
+            mcp_servers=["oci-gateway", "oci-unified", "oci-infrastructure"],
         )
 
     def __init__(
@@ -697,7 +697,6 @@ class InfrastructureAgent(BaseAgent, SelfHealingMixin):
     ) -> dict[str, Any]:
         """List instances in compartment, filter by name, and perform action on each."""
         import json
-        import re
 
         self._logger.info(
             "Multi-instance action: listing instances to filter",

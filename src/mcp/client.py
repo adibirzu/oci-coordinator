@@ -24,6 +24,21 @@ import structlog
 
 logger = structlog.get_logger(__name__)
 
+DEFAULT_MCP_PROTOCOL_VERSION = os.getenv("MCP_PROTOCOL_VERSION", "2025-11-05")
+LEGACY_MCP_PROTOCOL_VERSION = "2024-11-05"
+
+
+def _initialize_request(protocol_version: str) -> dict[str, Any]:
+    """Build initialize payload for MCP transport handshake."""
+    return {
+        "protocolVersion": protocol_version,
+        "capabilities": {"tools": {}},
+        "clientInfo": {
+            "name": "oci-coordinator",
+            "version": "1.0.0",
+        },
+    }
+
 
 class TransportType(str, Enum):
     """MCP transport types."""
@@ -265,18 +280,25 @@ class StdioTransport(MCPTransport):
         # Start reader task
         self._reader_task = asyncio.create_task(self._read_responses())
 
-        # Send initialize request
-        result = await self.send_request(
-            "initialize",
-            {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {"tools": {}},
-                "clientInfo": {
-                    "name": "oci-coordinator",
-                    "version": "1.0.0",
-                },
-            },
-        )
+        # Send initialize request (latest protocol with legacy fallback)
+        try:
+            result = await self.send_request(
+                "initialize",
+                _initialize_request(DEFAULT_MCP_PROTOCOL_VERSION),
+            )
+        except MCPError:
+            if DEFAULT_MCP_PROTOCOL_VERSION != LEGACY_MCP_PROTOCOL_VERSION:
+                self._logger.warning(
+                    "MCP initialize failed on default protocol, retrying legacy",
+                    default_protocol=DEFAULT_MCP_PROTOCOL_VERSION,
+                    fallback_protocol=LEGACY_MCP_PROTOCOL_VERSION,
+                )
+                result = await self.send_request(
+                    "initialize",
+                    _initialize_request(LEGACY_MCP_PROTOCOL_VERSION),
+                )
+            else:
+                raise
 
         self._connected = True
         self._logger.info("MCP server connected", capabilities=result.get("capabilities"))
@@ -414,6 +436,87 @@ class HTTPTransport(MCPTransport):
         super().__init__(config)
         self._client: Any = None
         self._request_id = 0
+        self._session_id: str | None = None
+        self._protocol_version = DEFAULT_MCP_PROTOCOL_VERSION
+
+    @staticmethod
+    def _default_headers(protocol_version: str) -> dict[str, str]:
+        """Default headers for MCP streamable HTTP transport."""
+        return {
+            "Accept": "application/json, text/event-stream",
+            "Content-Type": "application/json",
+            "MCP-Protocol-Version": protocol_version,
+            "User-Agent": "oci-coordinator-mcp-client/1.0",
+        }
+
+    def _request_headers(self) -> dict[str, str]:
+        """Per-request headers (session-aware for stateful gateways)."""
+        headers: dict[str, str] = {}
+        if self._session_id:
+            headers["MCP-Session-Id"] = self._session_id
+        return headers
+
+    def _extract_session_id(self, response: Any) -> None:
+        """Capture MCP session identifier from server responses."""
+        session_id = (
+            response.headers.get("MCP-Session-Id")
+            or response.headers.get("Mcp-Session-Id")
+            or response.headers.get("mcp-session-id")
+        )
+        if session_id:
+            self._session_id = session_id
+
+    def _parse_sse_json_payload(self, body: str) -> dict[str, Any]:
+        """Extract the last JSON object from SSE-formatted response text."""
+        payloads: list[dict[str, Any]] = []
+        current_data: list[str] = []
+
+        def _flush() -> None:
+            if not current_data:
+                return
+            data = "\n".join(current_data).strip()
+            current_data.clear()
+            if not data or data == "[DONE]":
+                return
+            try:
+                decoded = json.loads(data)
+            except json.JSONDecodeError:
+                return
+            if isinstance(decoded, dict):
+                payloads.append(decoded)
+
+        for raw_line in body.splitlines():
+            line = raw_line.rstrip("\r")
+            if line.startswith("data:"):
+                current_data.append(line[5:].lstrip())
+                continue
+            if line == "":
+                _flush()
+
+        _flush()
+
+        if not payloads:
+            raise MCPError(-32700, "Invalid streamable HTTP response (no JSON payload found)")
+
+        return payloads[-1]
+
+    def _parse_payload(self, response: Any) -> dict[str, Any]:
+        """Parse JSON-RPC payload from JSON or SSE streamable HTTP response."""
+        content_type = (response.headers.get("content-type") or "").lower()
+        text_body = response.text
+
+        if "text/event-stream" in content_type:
+            return self._parse_sse_json_payload(text_body)
+
+        try:
+            payload = response.json()
+        except json.JSONDecodeError:
+            return self._parse_sse_json_payload(text_body)
+
+        if not isinstance(payload, dict):
+            raise MCPError(-32700, "Invalid JSON-RPC payload type from HTTP transport")
+
+        return payload
 
     async def connect(self) -> None:
         """Initialize HTTP client."""
@@ -422,31 +525,59 @@ class HTTPTransport(MCPTransport):
 
         import httpx
 
+        if not self.config.url:
+            raise MCPError(-32600, "No URL configured for HTTP transport")
+
+        timeout = httpx.Timeout(
+            timeout=float(self.config.timeout_seconds),
+            connect=min(float(self.config.timeout_seconds), 15.0),
+            pool=5.0,
+        )
         self._client = httpx.AsyncClient(
-            timeout=self.config.timeout_seconds,
-            headers=self.config.headers,
+            timeout=timeout,
+            headers={
+                **self._default_headers(self._protocol_version),
+                **self.config.headers,
+            },
+            limits=httpx.Limits(max_connections=50, max_keepalive_connections=20),
         )
 
-        # Test connection with initialize
-        result = await self.send_request(
-            "initialize",
-            {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {"tools": {}},
-                "clientInfo": {
-                    "name": "oci-coordinator",
-                    "version": "1.0.0",
-                },
-            },
-        )
+        # Test connection with initialize (latest protocol with fallback)
+        try:
+            await self.send_request(
+                "initialize",
+                _initialize_request(self._protocol_version),
+            )
+        except MCPError:
+            if self._protocol_version != LEGACY_MCP_PROTOCOL_VERSION:
+                self._logger.warning(
+                    "HTTP MCP initialize failed on default protocol, retrying legacy",
+                    default_protocol=self._protocol_version,
+                    fallback_protocol=LEGACY_MCP_PROTOCOL_VERSION,
+                )
+                self._protocol_version = LEGACY_MCP_PROTOCOL_VERSION
+                self._client.headers["MCP-Protocol-Version"] = self._protocol_version
+                await self.send_request(
+                    "initialize",
+                    _initialize_request(self._protocol_version),
+                )
+            else:
+                raise
 
         self._connected = True
-        self._logger.info("HTTP MCP server connected")
+        self._logger.info(
+            "HTTP MCP server connected",
+            url=self.config.url,
+            protocol=self._protocol_version,
+            session=bool(self._session_id),
+        )
 
     async def disconnect(self) -> None:
         """Close HTTP client."""
         if self._client:
             await self._client.aclose()
+            self._client = None
+        self._session_id = None
         self._connected = False
 
     async def send_request(
@@ -461,6 +592,8 @@ class HTTPTransport(MCPTransport):
         """
         if not self._client:
             raise MCPError(-32600, "Not connected")
+        if not self.config.url:
+            raise MCPError(-32600, "HTTP transport URL not configured")
 
         self._request_id += 1
 
@@ -473,29 +606,95 @@ class HTTPTransport(MCPTransport):
             request["params"] = params
 
         # Use provided timeout or config default
-        effective_timeout = timeout if timeout is not None else self.config.timeout_seconds
+        effective_timeout = float(timeout if timeout is not None else self.config.timeout_seconds)
+        max_attempts = max(1, int(self.config.retry_attempts))
+        transient_status_codes = {408, 425, 429, 500, 502, 503, 504}
+        last_error = "Unknown HTTP transport error"
 
-        try:
-            response = await asyncio.wait_for(
-                self._client.post(
+        import httpx
+
+        for attempt in range(max_attempts):
+            try:
+                response = await self._client.post(
                     self.config.url,
                     json=request,
-                ),
-                timeout=effective_timeout,
-            )
-            response.raise_for_status()
-        except TimeoutError:
-            raise MCPError(-32000, f"Request timeout: {method} (after {effective_timeout}s)")
+                    headers=self._request_headers(),
+                    timeout=effective_timeout,
+                )
+                self._extract_session_id(response)
 
-        data = response.json()
-        if "error" in data:
-            error = data["error"]
-            raise MCPError(
-                error.get("code", -32000),
-                error.get("message", "Unknown error"),
-            )
+                if (
+                    response.status_code in transient_status_codes
+                    and attempt < max_attempts - 1
+                ):
+                    last_error = (
+                        f"HTTP {response.status_code} for {method} "
+                        f"(attempt {attempt + 1}/{max_attempts})"
+                    )
+                    backoff = self.config.retry_backoff ** attempt
+                    await asyncio.sleep(backoff)
+                    continue
 
-        return data.get("result")
+                if response.status_code == 401:
+                    raise MCPError(
+                        -32001,
+                        "Unauthorized MCP request (HTTP 401). "
+                        "Verify gateway token and Authorization header.",
+                    )
+
+                response.raise_for_status()
+                data = self._parse_payload(response)
+                if "error" in data:
+                    error = data["error"]
+                    raise MCPError(
+                        error.get("code", -32000),
+                        error.get("message", "Unknown error"),
+                        error.get("data"),
+                    )
+
+                return data.get("result")
+
+            except httpx.TimeoutException:
+                last_error = (
+                    f"Request timeout: {method} "
+                    f"(after {effective_timeout:.1f}s, attempt {attempt + 1}/{max_attempts})"
+                )
+                if attempt < max_attempts - 1:
+                    backoff = self.config.retry_backoff ** attempt
+                    await asyncio.sleep(backoff)
+                    continue
+                raise MCPError(-32000, last_error)
+
+            except MCPError as e:
+                # Non-retriable protocol/auth errors
+                if e.code == -32001:
+                    raise
+                last_error = str(e)
+                if attempt < max_attempts - 1:
+                    backoff = self.config.retry_backoff ** attempt
+                    await asyncio.sleep(backoff)
+                    continue
+                raise
+
+            except httpx.HTTPStatusError as e:
+                status = e.response.status_code
+                last_error = f"HTTP {status} error: {e.response.text[:200]}"
+                if status in transient_status_codes and attempt < max_attempts - 1:
+                    backoff = self.config.retry_backoff ** attempt
+                    await asyncio.sleep(backoff)
+                    continue
+                raise MCPError(-32000, last_error)
+
+            except httpx.RequestError as e:
+                last_error = f"HTTP transport request failed: {e!s}"
+                if attempt < max_attempts - 1:
+                    backoff = self.config.retry_backoff ** attempt
+                    await asyncio.sleep(backoff)
+                    continue
+                self._connected = False
+                raise MCPError(-32099, "Connection lost", str(e))
+
+        raise MCPError(-32000, last_error)
 
 
 class MCPClient:

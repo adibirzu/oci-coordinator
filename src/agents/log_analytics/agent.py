@@ -141,7 +141,7 @@ class LogAnalyticsAgent(BaseAgent, SelfHealingMixin):
                 "Supports namespaces, log groups, storage analytics, and "
                 "advanced Log Analytics query syntax."
             ),
-            mcp_servers=["oci-unified", "database-observatory"],
+            mcp_servers=["oci-gateway", "oci-unified", "database-observatory"],
             mcp_tools=[
                 "oci_logan_list_namespaces",
                 "oci_logan_list_log_groups",

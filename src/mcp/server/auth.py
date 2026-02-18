@@ -1,19 +1,18 @@
+from __future__ import annotations
+
 import configparser
 import os
+from typing import Any
+
+import structlog
 
 import oci
 
+logger = structlog.get_logger(__name__)
+
 
 def _find_profile_case_insensitive(config_file: str, profile: str) -> str | None:
-    """Find a profile name in OCI config file with case-insensitive matching.
-
-    Args:
-        config_file: Path to OCI config file
-        profile: Profile name to find (case-insensitive)
-
-    Returns:
-        The actual profile name from config file, or None if not found
-    """
+    """Find a profile name in OCI config file with case-insensitive matching."""
     expanded_path = os.path.expanduser(config_file)
     if not os.path.exists(expanded_path):
         return None
@@ -26,167 +25,310 @@ def _find_profile_case_insensitive(config_file: str, profile: str) -> str | None
             if section.lower() == profile_lower:
                 return section
     except Exception:
-        pass
+        return None
     return None
 
 
-def get_oci_config(profile: str | None = None) -> dict:
-    """Get OCI configuration from environment or file.
+def _create_signer(auth_mode: str) -> Any:
+    """Create OCI signer for non-file auth modes."""
+    mode = auth_mode.strip().lower()
 
-    Args:
-        profile: OCI config profile name. Defaults to OCI_CLI_PROFILE env var.
-                 Profile lookup is case-insensitive.
+    if mode in {"resource_principal", "resource-principal"}:
+        return oci.auth.signers.get_resource_principals_signer()
 
-    Returns:
-        OCI configuration dictionary
-    """
+    if mode in {"instance_principal", "instance-principal"}:
+        return oci.auth.signers.InstancePrincipalsSecurityTokenSigner()
+
+    if mode in {"oke_workload_identity", "workload_identity", "oke-workload-identity"}:
+        # SDK method availability depends on OCI SDK version.
+        getter = getattr(
+            oci.auth.signers,
+            "get_oke_workload_identity_resource_principal_signer",
+            None,
+        )
+        if getter is None:
+            msg = (
+                "OCI SDK does not expose OKE workload identity signer. "
+                "Upgrade OCI Python SDK."
+            )
+            raise RuntimeError(msg)
+        return getter()
+
+    msg = f"Unsupported OCI_CLI_AUTH mode: {auth_mode}"
+    raise ValueError(msg)
+
+
+def _effective_auth_mode() -> str:
+    """Return normalized auth mode from OCI_CLI_AUTH."""
+    mode = (os.getenv("OCI_CLI_AUTH") or "").strip().lower()
+    if not mode or mode in {"api_key", "api-key", "config_file", "none"}:
+        return "api_key"
+    return mode
+
+
+def _build_signer_config(
+    signer: Any,
+    profile: str | None = None,
+    region: str | None = None,
+) -> dict[str, Any]:
+    """Build minimal OCI config dict for signer-based auth."""
+    config: dict[str, Any] = {}
+
+    effective_region = (
+        region
+        or os.getenv("OCI_REGION")
+        or getattr(signer, "region", None)
+        or getattr(signer, "_region", None)
+    )
+    if effective_region:
+        config["region"] = effective_region
+
+    tenancy = (
+        getattr(signer, "tenancy_id", None)
+        or getattr(signer, "tenancy", None)
+        or os.getenv("OCI_TENANCY_OCID")
+    )
+    if tenancy:
+        config["tenancy"] = tenancy
+
+    if profile:
+        config["profile"] = profile
+
+    return config
+
+
+def _resolve_oci_auth(
+    profile: str | None = None,
+    region: str | None = None,
+) -> tuple[dict[str, Any], Any | None]:
+    """Resolve OCI config + optional signer from runtime environment."""
+    auth_mode = _effective_auth_mode()
+
+    if auth_mode == "api_key":
+        config = _load_oci_config_from_file(profile)
+        if region:
+            config["region"] = region
+        return config, None
+
+    try:
+        signer = _create_signer(auth_mode)
+        config = _build_signer_config(signer, profile=profile, region=region)
+        logger.info("Using OCI signer auth", auth_mode=auth_mode, region=config.get("region"))
+        return config, signer
+    except Exception as e:
+        # Graceful fallback to file-based config so local/dev keeps working.
+        logger.warning(
+            "Failed to initialize signer auth, falling back to OCI config file",
+            auth_mode=auth_mode,
+            error=str(e),
+        )
+        config = _load_oci_config_from_file(profile)
+        if region:
+            config["region"] = region
+        return config, None
+
+
+def _build_client(
+    client_cls: Any,
+    profile: str | None = None,
+    region: str | None = None,
+) -> Any:
+    """Create OCI client using either config-file auth or signer auth."""
+    config, signer = _resolve_oci_auth(profile=profile, region=region)
+    if signer is not None:
+        return client_cls(config, signer=signer)
+    return client_cls(config)
+
+
+def _load_oci_config_from_file(profile: str | None = None) -> dict[str, Any]:
+    """Load OCI configuration from file-based profile."""
     config_file = os.getenv("OCI_CONFIG_FILE", "~/.oci/config")
     profile = profile or os.getenv("OCI_CLI_PROFILE", "DEFAULT")
 
     try:
         return oci.config.from_file(file_location=config_file, profile_name=profile)
     except oci.exceptions.ProfileNotFound:
-        # Try case-insensitive lookup
         actual_profile = _find_profile_case_insensitive(config_file, profile)
         if actual_profile:
             try:
                 return oci.config.from_file(
-                    file_location=config_file, profile_name=actual_profile
+                    file_location=config_file,
+                    profile_name=actual_profile,
                 )
             except Exception:
                 return {}
         return {}
     except Exception:
-        # Fallback to instance principals or other methods if needed
         return {}
 
 
-def get_oci_config_with_region(profile: str | None = None, region: str | None = None) -> dict:
-    """Get OCI configuration with optional region override.
+def get_oci_config(profile: str | None = None) -> dict[str, Any]:
+    """Get OCI configuration for the active auth mode.
 
-    Args:
-        profile: OCI config profile name
-        region: OCI region (e.g., 'us-ashburn-1'). Overrides profile region.
-
-    Returns:
-        OCI configuration dictionary with region set
+    For `api_key`, reads from OCI config file/profile.
+    For signer modes, returns signer-derived config (region/tenancy when available).
     """
-    config = get_oci_config(profile)
+    auth_mode = _effective_auth_mode()
+    if auth_mode == "api_key":
+        return _load_oci_config_from_file(profile)
+
+    try:
+        signer = _create_signer(auth_mode)
+        return _build_signer_config(signer, profile=profile)
+    except Exception as e:
+        logger.warning(
+            "Failed to build auth config from signer, falling back to file config",
+            auth_mode=auth_mode,
+            error=str(e),
+        )
+        return _load_oci_config_from_file(profile)
+
+
+def get_oci_config_with_region(
+    profile: str | None = None,
+    region: str | None = None,
+) -> dict[str, Any]:
+    """Get OCI config resolved for active auth mode plus optional region override."""
+    config, _ = _resolve_oci_auth(profile=profile, region=region)
     if region:
         config["region"] = region
     return config
 
 
-# Client cache for performance (keyed by profile+region)
+# Client cache for performance (keyed by profile+region+auth mode)
 _client_cache: dict[str, object] = {}
 
-def get_compute_client():
-    """Get OCI Compute client."""
-    config = get_oci_config()
-    return oci.core.ComputeClient(config)
 
-def get_network_client():
+def _cache_key(service: str, profile: str | None, region: str | None) -> str:
+    profile_key = (profile or "default").lower()
+    auth_key = _effective_auth_mode()
+    return f"{service}:{profile_key}:{region or 'default'}:{auth_key}"
+
+
+def get_compute_client(
+    profile: str | None = None,
+    region: str | None = None,
+) -> oci.core.ComputeClient:
+    """Get OCI Compute client."""
+    key = _cache_key("compute", profile, region)
+    if key in _client_cache:
+        return _client_cache[key]  # type: ignore[return-value]
+
+    client = _build_client(oci.core.ComputeClient, profile=profile, region=region)
+    _client_cache[key] = client
+    return client
+
+
+def get_network_client(
+    profile: str | None = None,
+    region: str | None = None,
+) -> oci.core.VirtualNetworkClient:
     """Get OCI Virtual Network client."""
-    config = get_oci_config()
-    return oci.core.VirtualNetworkClient(config)
+    key = _cache_key("network", profile, region)
+    if key in _client_cache:
+        return _client_cache[key]  # type: ignore[return-value]
+
+    client = _build_client(oci.core.VirtualNetworkClient, profile=profile, region=region)
+    _client_cache[key] = client
+    return client
+
 
 def get_usage_client(profile: str | None = None):
     """Get OCI Usage client."""
-    config = get_oci_config(profile)
-    return oci.usage_api.UsageapiClient(config)
+    key = _cache_key("usage", profile, None)
+    if key in _client_cache:
+        return _client_cache[key]
 
-def get_identity_client():
+    client = _build_client(oci.usage_api.UsageapiClient, profile=profile)
+    _client_cache[key] = client
+    return client
+
+
+def get_identity_client(
+    profile: str | None = None,
+    region: str | None = None,
+) -> oci.identity.IdentityClient:
     """Get OCI Identity client."""
-    config = get_oci_config()
-    return oci.identity.IdentityClient(config)
+    key = _cache_key("identity", profile, region)
+    if key in _client_cache:
+        return _client_cache[key]  # type: ignore[return-value]
+
+    client = _build_client(oci.identity.IdentityClient, profile=profile, region=region)
+    _client_cache[key] = client
+    return client
+
 
 def get_monitoring_client(
     profile: str | None = None,
     region: str | None = None,
 ) -> oci.monitoring.MonitoringClient:
-    """Get OCI Monitoring client.
+    """Get OCI Monitoring client."""
+    key = _cache_key("monitoring", profile, region)
+    if key in _client_cache:
+        return _client_cache[key]  # type: ignore[return-value]
 
-    Args:
-        profile: OCI config profile name (default: from env or DEFAULT)
-        region: OCI region override
-
-    Returns:
-        MonitoringClient instance for alarms and metrics
-    """
-    profile_key = (profile or "default").lower()
-    cache_key = f"monitoring:{profile_key}:{region or 'default'}"
-    if cache_key in _client_cache:
-        return _client_cache[cache_key]
-
-    config = get_oci_config_with_region(profile, region)
-    client = oci.monitoring.MonitoringClient(config)
-    _client_cache[cache_key] = client
+    client = _build_client(oci.monitoring.MonitoringClient, profile=profile, region=region)
+    _client_cache[key] = client
     return client
 
-def get_logging_client():
-    """Get OCI Logging Management client."""
-    config = get_oci_config()
-    return oci.loggingingestion.LoggingClient(config) # For ingestion
-    # Note: Logging search uses loggingsearch client
 
-def get_logging_search_client():
+def get_logging_client(
+    profile: str | None = None,
+    region: str | None = None,
+) -> oci.loggingingestion.LoggingClient:
+    """Get OCI Logging ingestion client."""
+    key = _cache_key("logging", profile, region)
+    if key in _client_cache:
+        return _client_cache[key]  # type: ignore[return-value]
+
+    client = _build_client(oci.loggingingestion.LoggingClient, profile=profile, region=region)
+    _client_cache[key] = client
+    return client
+
+
+def get_logging_search_client(
+    profile: str | None = None,
+    region: str | None = None,
+) -> oci.loggingsearch.LogSearchClient:
     """Get OCI Logging Search client."""
-    config = get_oci_config()
-    return oci.loggingsearch.LogSearchClient(config)
+    key = _cache_key("loggingsearch", profile, region)
+    if key in _client_cache:
+        return _client_cache[key]  # type: ignore[return-value]
+
+    client = _build_client(oci.loggingsearch.LogSearchClient, profile=profile, region=region)
+    _client_cache[key] = client
+    return client
 
 
 def get_database_client(
     profile: str | None = None,
     region: str | None = None,
 ) -> oci.database.DatabaseClient:
-    """Get OCI Database client for Autonomous Database operations.
+    """Get OCI Database client for Autonomous Database operations."""
+    key = _cache_key("database", profile, region)
+    if key in _client_cache:
+        return _client_cache[key]  # type: ignore[return-value]
 
-    Args:
-        profile: OCI config profile name (default: from env or DEFAULT)
-        region: OCI region override
-
-    Returns:
-        DatabaseClient instance
-    """
-    cache_key = f"database:{profile or 'default'}:{region or 'default'}"
-    if cache_key in _client_cache:
-        return _client_cache[cache_key]
-
-    config = get_oci_config(profile)
-    if region:
-        config["region"] = region
-    client = oci.database.DatabaseClient(config)
-    _client_cache[cache_key] = client
+    client = _build_client(oci.database.DatabaseClient, profile=profile, region=region)
+    _client_cache[key] = client
     return client
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Database Observability Clients (DB Management, OpsInsights, Log Analytics)
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 def get_database_management_client(
     profile: str | None = None,
     region: str | None = None,
 ) -> oci.database_management.DbManagementClient:
-    """Get OCI Database Management client.
+    """Get OCI Database Management client."""
+    key = _cache_key("dbmgmt", profile, region)
+    if key in _client_cache:
+        return _client_cache[key]  # type: ignore[return-value]
 
-    Args:
-        profile: OCI config profile (e.g., 'EMDEMO'). Defaults to OCI_CLI_PROFILE.
-        region: OCI region override (e.g., 'us-ashburn-1').
-
-    Returns:
-        DbManagementClient for managed database operations
-    """
-    # Normalize profile to lowercase for consistent cache keys
-    profile_key = (profile or "default").lower()
-    cache_key = f"dbmgmt:{profile_key}:{region or 'default'}"
-    if cache_key in _client_cache:
-        return _client_cache[cache_key]
-
-    config = get_oci_config_with_region(profile, region)
-    client = oci.database_management.DbManagementClient(config)
-    _client_cache[cache_key] = client
+    client = _build_client(
+        oci.database_management.DbManagementClient,
+        profile=profile,
+        region=region,
+    )
+    _client_cache[key] = client
     return client
 
 
@@ -194,24 +336,17 @@ def get_opsi_client(
     profile: str | None = None,
     region: str | None = None,
 ) -> oci.opsi.OperationsInsightsClient:
-    """Get OCI Operations Insights client.
+    """Get OCI Operations Insights client."""
+    key = _cache_key("opsi", profile, region)
+    if key in _client_cache:
+        return _client_cache[key]  # type: ignore[return-value]
 
-    Args:
-        profile: OCI config profile (e.g., 'EMDEMO'). Defaults to OCI_CLI_PROFILE.
-        region: OCI region override (e.g., 'uk-london-1').
-
-    Returns:
-        OperationsInsightsClient for OPSI operations
-    """
-    # Normalize profile to lowercase for consistent cache keys
-    profile_key = (profile or "default").lower()
-    cache_key = f"opsi:{profile_key}:{region or 'default'}"
-    if cache_key in _client_cache:
-        return _client_cache[cache_key]
-
-    config = get_oci_config_with_region(profile, region)
-    client = oci.opsi.OperationsInsightsClient(config)
-    _client_cache[cache_key] = client
+    client = _build_client(
+        oci.opsi.OperationsInsightsClient,
+        profile=profile,
+        region=region,
+    )
+    _client_cache[key] = client
     return client
 
 
@@ -219,24 +354,17 @@ def get_log_analytics_client(
     profile: str | None = None,
     region: str | None = None,
 ) -> oci.log_analytics.LogAnalyticsClient:
-    """Get OCI Log Analytics client.
+    """Get OCI Log Analytics client."""
+    key = _cache_key("logan", profile, region)
+    if key in _client_cache:
+        return _client_cache[key]  # type: ignore[return-value]
 
-    Args:
-        profile: OCI config profile (e.g., 'EMDEMO'). Defaults to OCI_CLI_PROFILE.
-        region: OCI region override (e.g., 'us-ashburn-1').
-
-    Returns:
-        LogAnalyticsClient for log analytics operations
-    """
-    # Normalize profile to lowercase for consistent cache keys
-    profile_key = (profile or "default").lower()
-    cache_key = f"logan:{profile_key}:{region or 'default'}"
-    if cache_key in _client_cache:
-        return _client_cache[cache_key]
-
-    config = get_oci_config_with_region(profile, region)
-    client = oci.log_analytics.LogAnalyticsClient(config)
-    _client_cache[cache_key] = client
+    client = _build_client(
+        oci.log_analytics.LogAnalyticsClient,
+        profile=profile,
+        region=region,
+    )
+    _client_cache[key] = client
     return client
 
 
@@ -244,24 +372,17 @@ def get_diagnosability_client(
     profile: str | None = None,
     region: str | None = None,
 ) -> oci.database_management.DiagnosabilityClient:
-    """Get OCI Diagnosability client for AWR/ADDM reports.
+    """Get OCI Diagnosability client for AWR/ADDM reports."""
+    key = _cache_key("diag", profile, region)
+    if key in _client_cache:
+        return _client_cache[key]  # type: ignore[return-value]
 
-    Args:
-        profile: OCI config profile (e.g., 'EMDEMO'). Defaults to OCI_CLI_PROFILE.
-        region: OCI region override.
-
-    Returns:
-        DiagnosabilityClient for AWR/ADDM operations
-    """
-    # Normalize profile to lowercase for consistent cache keys
-    profile_key = (profile or "default").lower()
-    cache_key = f"diag:{profile_key}:{region or 'default'}"
-    if cache_key in _client_cache:
-        return _client_cache[cache_key]
-
-    config = get_oci_config_with_region(profile, region)
-    client = oci.database_management.DiagnosabilityClient(config)
-    _client_cache[cache_key] = client
+    client = _build_client(
+        oci.database_management.DiagnosabilityClient,
+        profile=profile,
+        region=region,
+    )
+    _client_cache[key] = client
     return client
 
 
@@ -269,23 +390,17 @@ def get_cloud_guard_client(
     profile: str | None = None,
     region: str | None = None,
 ) -> oci.cloud_guard.CloudGuardClient:
-    """Get OCI Cloud Guard client.
+    """Get OCI Cloud Guard client."""
+    key = _cache_key("cloudguard", profile, region)
+    if key in _client_cache:
+        return _client_cache[key]  # type: ignore[return-value]
 
-    Args:
-        profile: OCI config profile. Defaults to OCI_CLI_PROFILE.
-        region: OCI region override.
-
-    Returns:
-        CloudGuardClient for security operations
-    """
-    profile_key = (profile or "default").lower()
-    cache_key = f"cloudguard:{profile_key}:{region or 'default'}"
-    if cache_key in _client_cache:
-        return _client_cache[cache_key]
-
-    config = get_oci_config_with_region(profile, region)
-    client = oci.cloud_guard.CloudGuardClient(config)
-    _client_cache[cache_key] = client
+    client = _build_client(
+        oci.cloud_guard.CloudGuardClient,
+        profile=profile,
+        region=region,
+    )
+    _client_cache[key] = client
     return client
 
 
@@ -293,27 +408,16 @@ def get_audit_client(
     profile: str | None = None,
     region: str | None = None,
 ) -> oci.audit.AuditClient:
-    """Get OCI Audit client.
+    """Get OCI Audit client."""
+    key = _cache_key("audit", profile, region)
+    if key in _client_cache:
+        return _client_cache[key]  # type: ignore[return-value]
 
-    Args:
-        profile: OCI config profile. Defaults to OCI_CLI_PROFILE.
-        region: OCI region override.
-
-    Returns:
-        AuditClient for audit event operations
-    """
-    profile_key = (profile or "default").lower()
-    cache_key = f"audit:{profile_key}:{region or 'default'}"
-    if cache_key in _client_cache:
-        return _client_cache[cache_key]
-
-    config = get_oci_config_with_region(profile, region)
-    client = oci.audit.AuditClient(config)
-    _client_cache[cache_key] = client
+    client = _build_client(oci.audit.AuditClient, profile=profile, region=region)
+    _client_cache[key] = client
     return client
 
 
 def clear_client_cache():
     """Clear the client cache. Useful for testing or profile changes."""
-    global _client_cache
     _client_cache.clear()

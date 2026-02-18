@@ -10,7 +10,8 @@ This software was created to showcase Oracle Cloud Infrastructure (OCI) AI Integ
 
 - **Multi-Agent Orchestration**: Coordinate 7 specialized agents for database, logging, security, cost, infrastructure, error analysis, and NL2SQL/data chat
 - **Workflow-First Design**: 70%+ deterministic workflows via MCP tools (**40+ pre-built workflows** with 300+ intent aliases); LLM reasoning for complex analysis
-- **270+ MCP Tools**: 5 MCP servers (oci-unified, database-observatory, oci-infrastructure, finopsai-mcp, oci-mcp-security)
+- **Gateway-First MCP Connectivity**: Streamable HTTP + Bearer auth support for `mcp-oci` gateway with session-aware retries
+- **270+ MCP Tools**: 5 MCP servers (oci-unified, database-observatory, oci-infrastructure, finopsai-mcp, oci-mcp-security) or a single aggregated `oci-gateway` endpoint
 - **Database Observatory Integration**: Full OPSI, SQLcl, and Logan Analytics via MCP
 - **Slack Integration**: Real-time chatbot with Socket Mode, 3-second ack pattern, and interactive quick actions
 - **REST API**: FastAPI server with SSE streaming support - all commands available via API
@@ -259,6 +260,45 @@ defaults:
   backoff_multiplier: 2
 ```
 
+### OCI Runtime Best Practices (Gateway-First)
+
+For OCI deployment (OKE/Compute), route coordinator traffic through a single gateway endpoint:
+
+```bash
+# Use OKE MCP profile (gateway-only)
+MCP_CONFIG_FILE=/app/config/mcp_servers.oke.yaml
+MCP_GATEWAY_ENABLED=true
+MCP_GATEWAY_URL=http://<gateway-host>:9000/mcp
+MCP_GATEWAY_BEARER_TOKEN=<gateway-bearer-token>
+MCP_PROTOCOL_VERSION=2025-11-05
+OCI_DEPLOYMENT_MODE=oke
+```
+
+Recommended pattern:
+1. Run `mcp-oci` gateway in stateless streamable HTTP mode behind OCI Load Balancer.
+2. Use Bearer/JWT auth on the gateway and scope mutation tools separately.
+3. Keep direct stdio servers as fallback entries in `groups` for local/dev operation.
+
+OKE manifests and gateway interconnect templates are in `deploy/oke/`.
+
+Quick deploy:
+```bash
+kubectl apply -k deploy/oke
+```
+
+Detailed guide: `docs/OKE_DEPLOYMENT.md`
+
+### Deployment Modes (Local / Cloud / OCI-DEMO)
+
+Agent capability routing and MCP server ordering are now runtime-aware via `OCI_DEPLOYMENT_MODE`:
+
+- `local`: direct local MCP servers first (`oci-unified`, `database-observatory`), gateway as fallback.
+- `cloud`: gateway-first with direct fallback if enabled.
+- `oke`: strict gateway-only (best for horizontally scaled OKE).
+- `oci-demo`: gateway-first with federated backend preference for complex demo environments.
+
+Profiles are configurable in `config/catalog/runtime_profiles.yaml`.
+
 ## API Server
 
 The FastAPI server provides REST endpoints for programmatic access:
@@ -299,12 +339,13 @@ curl -X POST http://localhost:3001/chat \
 | Server | Tools | Description | GitHub |
 |--------|-------|-------------|--------|
 | **oci-unified** | 83 | Built-in server with ShowOCI-style discovery | `src/mcp/server/` (this project) |
+| **oci-gateway** | Aggregated | Streamable HTTP gateway (auth + backend aggregation) | [adibirzu/mcp-oci](https://github.com/adibirzu/mcp-oci) |
 | **database-observatory** | 50+ | OPSI, SQLcl, Logan Analytics | [adibirzu/mcp-oci-database-observatory](https://github.com/adibirzu/mcp-oci-database-observatory) |
 | **oci-infrastructure** | 44 | Full OCI management (mcp-oci) | [adibirzu/mcp-oci](https://github.com/adibirzu/mcp-oci) |
 | **finopsai-mcp** | 33 | Multicloud FinOps with anomaly detection | [adibirzu/finopsai-mcp](https://github.com/adibirzu/finopsai-mcp) |
 | **oci-mcp-security** | 60+ | Cloud Guard, WAF, KMS, Bastion, DataSafe | [adibirzu/oci-mcp-security](https://github.com/adibirzu/oci-mcp-security) |
 
-**Total: 270+ tools across 5 MCP servers**
+**Total: 270+ tools across 5 direct MCP servers (or one gateway endpoint)**
 
 ### Why oci-unified vs mcp-oci?
 
@@ -459,7 +500,7 @@ View correlated logs in OCI Console:
 ### Planned 📋
 - [ ] Microsoft Teams integration
 - [ ] Web UI dashboard
-- [ ] OKE deployment manifests
+- [x] OKE deployment manifests
 
 ## Testing
 

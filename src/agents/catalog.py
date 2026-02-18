@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -22,8 +23,10 @@ from typing import Any
 
 import httpx
 import structlog
+import yaml
 
 from src.agents.base import AgentDefinition, AgentStatus, BaseAgent
+from src.mcp.config import load_mcp_config
 
 logger = structlog.get_logger(__name__)
 
@@ -168,6 +171,19 @@ MCP_SERVER_DOMAINS = {
         "data-chat",
     ],
     # Legacy server names for backward compatibility
+    "oci-gateway": [
+        "identity",
+        "compute",
+        "network",
+        "cost",
+        "security",
+        "observability",
+        "database",
+        "dbmgmt",
+        "finops",
+        "opsi",
+        "logan",
+    ],
     "oci-unified": ["discovery", "infrastructure", "observability", "security", "finops"],
     "oci-infrastructure": ["infrastructure", "observability", "database", "security", "finops"],
     "finopsai": ["finops", "cost"],
@@ -197,6 +213,125 @@ def _load_server_domains_config() -> None:
 
 
 _load_server_domains_config()
+
+# Capability alias mapping for resilient capability matching and delegation.
+# Maps canonical capability names to common query aliases/synonyms.
+CAPABILITY_ALIASES: dict[str, list[str]] = {
+    "database-analysis": ["database", "db", "db-analysis", "database diagnostics"],
+    "performance-diagnostics": ["performance", "diagnostics", "performance analysis"],
+    "sql-tuning": ["sql optimization", "query tuning", "sql optimization"],
+    "threat-detection": ["security", "threat", "security detection", "vulnerability"],
+    "security-posture": ["security posture", "compliance", "security audit"],
+    "cost-analysis": ["cost", "spend", "finops", "cloud cost", "cost optimization"],
+    "budget-tracking": ["budget", "budgeting", "budget monitor"],
+    "anomaly-detection": ["anomaly", "outlier", "spike detection"],
+    "log-search": ["logs", "logging", "search logs", "log analysis"],
+    "observability-overview": ["observability", "monitoring", "ops overview"],
+    "compute-management": ["compute", "instances", "instance management", "infrastructure"],
+    "network-analysis": ["network", "vcn", "subnet", "network diagnostics"],
+    "nl2sql": ["text-to-sql", "natural language sql", "selectai"],
+    "data-chat": ["data chat", "chat with data", "database qa"],
+    "error-analysis": ["error diagnostics", "root cause", "rca"],
+}
+
+
+def _load_capability_aliases_config() -> None:
+    """Load capability aliases from config/catalog if present."""
+    global CAPABILITY_ALIASES
+    config_path = _CATALOG_CONFIG_DIR / "capability_aliases.json"
+    if not config_path.exists():
+        return
+    try:
+        data = json.loads(config_path.read_text())
+        if isinstance(data, dict) and data:
+            parsed: dict[str, list[str]] = {}
+            for canonical, aliases in data.items():
+                if not isinstance(canonical, str):
+                    continue
+                if isinstance(aliases, list):
+                    parsed[canonical] = [str(a) for a in aliases if str(a).strip()]
+            if parsed:
+                CAPABILITY_ALIASES = parsed
+    except Exception as exc:
+        logger.warning(
+            "Failed to load capability aliases config",
+            path=str(config_path),
+            error=str(exc),
+        )
+
+
+_load_capability_aliases_config()
+
+DEFAULT_RUNTIME_PROFILES: dict[str, dict[str, Any]] = {
+    "local": {
+        "strict": False,
+        "server_order": {
+            "default": ["oci-unified", "database-observatory", "oci-gateway"],
+            "security": ["oci-unified", "oci-mcp-security", "oci-gateway"],
+            "finops": ["oci-unified", "finopsai", "oci-gateway"],
+            "infrastructure": ["oci-unified", "oci-infrastructure", "oci-gateway"],
+            "selectai": ["selectai", "database-observatory", "oci-gateway"],
+        },
+    },
+    "cloud": {
+        "strict": False,
+        "server_order": {
+            "default": ["oci-gateway", "oci-unified", "database-observatory"],
+            "security": ["oci-gateway", "oci-mcp-security", "oci-unified"],
+            "finops": ["oci-gateway", "finopsai", "oci-unified"],
+            "infrastructure": ["oci-gateway", "oci-unified", "oci-infrastructure"],
+            "selectai": ["oci-gateway", "selectai", "database-observatory"],
+        },
+    },
+    "oke": {
+        "strict": True,
+        "server_order": {
+            "default": ["oci-gateway"],
+        },
+    },
+    "oci-demo": {
+        "strict": False,
+        "server_order": {
+            "default": [
+                "oci-gateway",
+                "oci-unified",
+                "database-observatory",
+                "finopsai",
+                "oci-mcp-security",
+                "oci-infrastructure",
+            ],
+            "database": ["oci-gateway", "oci-unified", "database-observatory"],
+            "security": ["oci-gateway", "oci-mcp-security", "oci-unified"],
+            "finops": ["oci-gateway", "finopsai", "oci-unified"],
+            "infrastructure": ["oci-gateway", "oci-unified", "oci-infrastructure"],
+            "observability": ["oci-gateway", "database-observatory", "oci-unified"],
+            "selectai": ["oci-gateway", "selectai", "database-observatory"],
+        },
+    },
+}
+
+
+def _load_runtime_profiles_config() -> dict[str, dict[str, Any]]:
+    """Load runtime deployment profile mapping from config/catalog if present."""
+    config_path = _CATALOG_CONFIG_DIR / "runtime_profiles.yaml"
+    if not config_path.exists():
+        return DEFAULT_RUNTIME_PROFILES
+    try:
+        data = yaml.safe_load(config_path.read_text()) or {}
+        profiles = data.get("profiles")
+        if isinstance(profiles, dict) and profiles:
+            merged = dict(DEFAULT_RUNTIME_PROFILES)
+            for profile, cfg in profiles.items():
+                if isinstance(profile, str) and isinstance(cfg, dict):
+                    merged[profile.lower()] = cfg
+            return merged
+    except Exception as exc:
+        logger.warning(
+            "Failed to load runtime profiles config",
+            path=str(config_path),
+            error=str(exc),
+        )
+    return DEFAULT_RUNTIME_PROFILES
 
 # Tool lists are derived dynamically from ToolCatalog and manifests.
 MCP_DOMAIN_TOOLS: dict[str, list[str]] = {}
@@ -375,6 +510,16 @@ class AgentCatalog:
         self._domain_index: dict[str, set[str]] = {}  # domain -> set of agent roles
         self._tool_catalog = tool_catalog
         self._logger = logger.bind(component="AgentCatalog")
+        self._runtime_profiles = _load_runtime_profiles_config()
+        self._runtime_mode = (
+            os.getenv("OCI_DEPLOYMENT_MODE")
+            or os.getenv("OCI_RUNTIME_MODE")
+            or "local"
+        ).strip().lower()
+        self._capability_reverse_aliases = self._build_capability_reverse_aliases()
+        self._enabled_servers: set[str] = set()
+        self._mcp_groups: dict[str, list[str]] = {}
+        self._refresh_mcp_runtime_context()
 
     def set_tool_catalog(self, tool_catalog: ToolCatalog | None) -> None:
         """Attach a tool catalog for dynamic tool resolution."""
@@ -390,6 +535,120 @@ class AgentCatalog:
         self._tool_catalog = ToolCatalog.get_instance()
         return self._tool_catalog
 
+    @staticmethod
+    def _normalize_capability_name(value: str) -> str:
+        """Normalize capability strings for resilient matching."""
+        normalized = value.strip().lower().replace("_", "-").replace(" ", "-")
+        while "--" in normalized:
+            normalized = normalized.replace("--", "-")
+        return normalized
+
+    def _build_capability_reverse_aliases(self) -> dict[str, str]:
+        """Build reverse alias index alias->canonical."""
+        reverse: dict[str, str] = {}
+        for canonical, aliases in CAPABILITY_ALIASES.items():
+            canonical_norm = self._normalize_capability_name(canonical)
+            reverse[canonical_norm] = canonical_norm
+            for alias in aliases:
+                alias_norm = self._normalize_capability_name(alias)
+                reverse[alias_norm] = canonical_norm
+        return reverse
+
+    def _canonicalize_capability(self, value: str) -> str:
+        """Map an arbitrary capability string to canonical form."""
+        normalized = self._normalize_capability_name(value)
+        return self._capability_reverse_aliases.get(normalized, normalized)
+
+    def _refresh_mcp_runtime_context(self) -> None:
+        """Load enabled MCP servers and groups from active MCP config."""
+        try:
+            mcp_config = load_mcp_config()
+            self._enabled_servers = set(mcp_config.get_enabled_servers().keys())
+            self._mcp_groups = {k: list(v) for k, v in mcp_config.groups.items()}
+        except Exception as exc:
+            self._enabled_servers = set()
+            self._mcp_groups = {}
+            self._logger.warning("Failed to load MCP runtime context", error=str(exc))
+
+    def _get_runtime_profile(self) -> dict[str, Any]:
+        """Get active runtime deployment profile."""
+        profile = self._runtime_profiles.get(self._runtime_mode)
+        if profile:
+            return profile
+        return self._runtime_profiles.get("local", {})
+
+    def _enhance_agent_capabilities(self, agent_def: AgentDefinition) -> None:
+        """Enrich capabilities with canonical aliases and domain tags."""
+        existing = list(agent_def.capabilities)
+        normalized_existing = {self._normalize_capability_name(c) for c in existing}
+
+        # Ensure canonical capability names are present when aliases are used.
+        for capability in list(existing):
+            canonical = self._canonicalize_capability(capability)
+            if canonical not in normalized_existing:
+                existing.append(canonical)
+                normalized_existing.add(canonical)
+
+        # Add domain tags as explicit capabilities for robust routing.
+        domains = self._get_agent_domains(agent_def)
+        for domain in domains:
+            domain_tag = f"domain:{domain}"
+            if domain_tag not in normalized_existing:
+                existing.append(domain_tag)
+                normalized_existing.add(domain_tag)
+            if domain not in normalized_existing:
+                existing.append(domain)
+                normalized_existing.add(domain)
+
+        agent_def.capabilities = existing
+
+    def _resolve_agent_servers_for_runtime(self, agent_def: AgentDefinition) -> list[str]:
+        """Resolve ordered MCP server list for current runtime mode."""
+        profile = self._get_runtime_profile()
+        server_order = profile.get("server_order", {}) if isinstance(profile, dict) else {}
+        strict_mode = bool(profile.get("strict", False)) if isinstance(profile, dict) else False
+
+        domains = self._get_agent_domains(agent_def)
+        candidates: list[str] = []
+
+        for domain in domains:
+            domain_candidates = server_order.get(domain)
+            if not domain_candidates:
+                domain_candidates = self._mcp_groups.get(domain)
+            if domain_candidates:
+                candidates.extend(domain_candidates)
+
+        if not candidates:
+            default_candidates = server_order.get("default")
+            if isinstance(default_candidates, list):
+                candidates.extend(default_candidates)
+
+        if not candidates:
+            candidates.extend(agent_def.mcp_servers)
+
+        # Preserve order while deduplicating.
+        deduped = list(dict.fromkeys(candidates))
+
+        if self._enabled_servers:
+            resolved = [s for s in deduped if s in self._enabled_servers]
+        else:
+            resolved = deduped
+
+        # If strict mode (e.g., OKE), do not silently inject unavailable servers.
+        if strict_mode and resolved:
+            return resolved
+
+        if resolved:
+            return resolved
+
+        # Fallback to declared static list when nothing matches runtime profile.
+        if self._enabled_servers:
+            declared_enabled = [s for s in agent_def.mcp_servers if s in self._enabled_servers]
+            if declared_enabled:
+                return declared_enabled
+
+        return list(agent_def.mcp_servers)
+
     def auto_discover(self, agents_path: str = "src/agents") -> int:
         """
         Auto-discover and register agents from the agents directory.
@@ -403,6 +662,15 @@ class AgentCatalog:
         Returns:
             Number of agents discovered
         """
+        # Refresh runtime context to honor current deployment mode/config.
+        self._runtime_mode = (
+            os.getenv("OCI_DEPLOYMENT_MODE")
+            or os.getenv("OCI_RUNTIME_MODE")
+            or self._runtime_mode
+            or "local"
+        ).strip().lower()
+        self._refresh_mcp_runtime_context()
+
         agents_dir = Path(agents_path)
         discovered_count = 0
 
@@ -511,6 +779,12 @@ class AgentCatalog:
         try:
             agent_def = agent_class.get_definition()
 
+            # Normalize and enrich capability taxonomy for robust routing.
+            self._enhance_agent_capabilities(agent_def)
+
+            # Resolve runtime-aware MCP server ordering (local/cloud/oke/oci-demo).
+            agent_def.mcp_servers = self._resolve_agent_servers_for_runtime(agent_def)
+
             # Skip if agent is already registered (prevents duplicate warnings
             # when auto_discover() is called multiple times during startup)
             if agent_def.role in self._agents:
@@ -571,6 +845,13 @@ class AgentCatalog:
         duplicates: dict[str, list[str]] = {}
 
         for cap in new_agent.capabilities:
+            # Skip broad taxonomy tags; duplicates are expected here.
+            normalized_cap = self._normalize_capability_name(cap)
+            if normalized_cap.startswith("domain:"):
+                continue
+            if normalized_cap in DOMAIN_CAPABILITIES:
+                continue
+
             existing_agents = []
             for role, agent_def in self._agents.items():
                 if cap in agent_def.capabilities:
@@ -673,11 +954,40 @@ class AgentCatalog:
         Returns:
             List of agents with the capability
         """
-        return [
-            agent
-            for agent in self._agents.values()
-            if capability in agent.capabilities
-        ]
+        query = self._normalize_capability_name(capability)
+        canonical_query = self._canonicalize_capability(query)
+
+        # Build acceptable exact-match tokens.
+        accepted = {query, canonical_query}
+        for alias, canonical in self._capability_reverse_aliases.items():
+            if canonical == canonical_query:
+                accepted.add(alias)
+        accepted.add(f"domain:{query}")
+        accepted.add(f"domain:{canonical_query}")
+
+        matches: list[AgentDefinition] = []
+        for agent in self._agents.values():
+            agent_caps = [
+                self._normalize_capability_name(cap)
+                for cap in agent.capabilities
+            ]
+            agent_set = set(agent_caps)
+
+            # Exact/alias match first.
+            if agent_set.intersection(accepted):
+                matches.append(agent)
+                continue
+
+            # Fallback semantic substring match for natural queries
+            # (e.g., "security audit", "cloud cost", "log analysis").
+            if any(
+                query in cap or cap in query
+                for cap in agent_caps
+                if len(cap) >= 4
+            ):
+                matches.append(agent)
+
+        return matches
 
     def get_by_skill(self, skill: str) -> list[AgentDefinition]:
         """
@@ -1163,6 +1473,8 @@ class AgentCatalog:
         if not tool_catalog:
             return 0
 
+        self._refresh_mcp_runtime_context()
+
         updated = 0
         for agent in self._agents.values():
             domains = self._get_agent_domains(agent)
@@ -1173,6 +1485,11 @@ class AgentCatalog:
             new_tools = sorted(tool_names)
             if new_tools != agent.mcp_tools:
                 agent.mcp_tools = new_tools
+                updated += 1
+
+            resolved_servers = self._resolve_agent_servers_for_runtime(agent)
+            if resolved_servers != agent.mcp_servers:
+                agent.mcp_servers = resolved_servers
                 updated += 1
 
         if updated:

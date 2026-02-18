@@ -173,7 +173,7 @@ class SelectAIAgent(BaseAgent, SelfHealingMixin):
                 "chat with database context, AI agent orchestration, and report "
                 "generation using Oracle Autonomous Database SelectAI."
             ),
-            mcp_servers=["selectai", "database-observatory"],
+            mcp_servers=["oci-gateway", "selectai", "database-observatory"],
             mcp_tools=[
                 "oci_selectai_generate",
                 "oci_selectai_list_profiles",
@@ -440,7 +440,7 @@ class SelectAIAgent(BaseAgent, SelfHealingMixin):
                 reasoning.append(error)
 
         except Exception as e:
-            error = f"SelectAI execution failed: {str(e)}"
+            error = f"SelectAI execution failed: {e!s}"
             reasoning.append(error)
             self._logger.error("SelectAI execution error", error=str(e))
 
@@ -494,7 +494,7 @@ class SelectAIAgent(BaseAgent, SelfHealingMixin):
                 reasoning.append(f"Received response ({len(llm_response)} chars)")
 
         except Exception as e:
-            error = f"Chat execution failed: {str(e)}"
+            error = f"Chat execution failed: {e!s}"
             reasoning.append(error)
 
         return {
@@ -544,12 +544,12 @@ class SelectAIAgent(BaseAgent, SelfHealingMixin):
 
             elif isinstance(result, dict):
                 agent_response = result
-                reasoning.append(f"Agent executed successfully")
+                reasoning.append("Agent executed successfully")
             elif isinstance(result, str):
                 agent_response = {"response": result}
 
         except Exception as e:
-            error = f"Agent execution failed: {str(e)}"
+            error = f"Agent execution failed: {e!s}"
             reasoning.append(error)
 
         return {

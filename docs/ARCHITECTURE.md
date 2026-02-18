@@ -847,6 +847,10 @@ APPROVAL_REQUIRED = [
                     └───────────────────────────────────────┘
 ```
 
+Runtime profile selection:
+- `OCI_DEPLOYMENT_MODE=local|cloud|oke|oci-demo`
+- Profile definitions: `config/catalog/runtime_profiles.yaml`
+
 ## 13. Implementation Phases
 
 ### Phase 1: Foundation ✅
@@ -884,7 +888,7 @@ APPROVAL_REQUIRED = [
 - [x] Slack integration (`src/channels/slack.py`)
 - [x] Resilience infrastructure (bulkhead, circuit breaker, health monitor)
 - [ ] Teams integration
-- [ ] OKE deployment
+- [x] OKE deployment (see `deploy/oke/`)
 - [ ] Production observability
 
 ## 14. Resilience Architecture

@@ -15,11 +15,10 @@ Usage:
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-
-import re
 
 import structlog
 import yaml
@@ -27,6 +26,31 @@ import yaml
 from src.mcp.client import MCPServerConfig, TransportType
 
 logger = structlog.get_logger(__name__)
+
+
+def parse_bool(value: Any, default: bool = False) -> bool:
+    """Parse booleans from native bool/int/string values.
+
+    Accepts common string forms, including values wrapped in env templates
+    like "${VAR:-true}" via expand_bash_vars().
+    """
+    if value is None:
+        return default
+
+    if isinstance(value, bool):
+        return value
+
+    if isinstance(value, (int, float)):
+        return bool(value)
+
+    if isinstance(value, str):
+        expanded = expand_bash_vars(value).strip().lower()
+        if expanded in {"1", "true", "yes", "y", "on"}:
+            return True
+        if expanded in {"0", "false", "no", "n", "off", ""}:
+            return False
+
+    return default
 
 
 def expand_bash_vars(value: str) -> str:
@@ -86,6 +110,8 @@ class ServerConfigEntry:
     env: dict[str, str] = field(default_factory=dict)
     url: str | None = None
     headers: dict[str, str] = field(default_factory=dict)
+    auth_token_env: str | None = None
+    auth_token_prefix: str = "Bearer"
     domains: list[str] = field(default_factory=list)
     description: str = ""
     timeout_seconds: int = 30
@@ -99,6 +125,24 @@ class ServerConfigEntry:
         for key, value in self.env.items():
             env[key] = expand_bash_vars(os.path.expanduser(value))
 
+        args = [
+            expand_bash_vars(os.path.expanduser(arg))
+            for arg in self.args
+        ]
+
+        url = self.url
+        if url:
+            url = expand_bash_vars(url)
+
+        headers = {}
+        for key, value in self.headers.items():
+            headers[key] = expand_bash_vars(value)
+
+        if self.auth_token_env:
+            auth_token = os.getenv(self.auth_token_env)
+            if auth_token and "Authorization" not in headers:
+                headers["Authorization"] = f"{self.auth_token_prefix} {auth_token}"
+
         command = self.command
         if command:
             command = expand_bash_vars(os.path.expanduser(command))
@@ -111,11 +155,11 @@ class ServerConfigEntry:
             server_id=self.server_id,
             transport=self.transport,
             command=command,
-            args=self.args,
+            args=args,
             env=env,
             working_dir=working_dir,
-            url=self.url,
-            headers=self.headers,
+            url=url,
+            headers=headers,
             timeout_seconds=self.timeout_seconds,
             retry_attempts=self.retry_attempts,
             tool_timeouts=self.tool_timeouts,
@@ -167,14 +211,20 @@ def load_mcp_config(
     Load MCP configuration from YAML file.
 
     Args:
-        config_path: Path to config file. Defaults to config/mcp_servers.yaml
+        config_path: Path to config file. If not provided, uses MCP_CONFIG_FILE
+                     env var when set, otherwise defaults to config/mcp_servers.yaml.
 
     Returns:
         MCPConfig with loaded server configurations
     """
     if config_path is None:
-        # Default to config/mcp_servers.yaml relative to project root
-        config_path = Path(__file__).parent.parent.parent / "config" / "mcp_servers.yaml"
+        # Allow environment override for deployment-specific profiles (e.g., OKE)
+        env_config_path = os.getenv("MCP_CONFIG_FILE")
+        if env_config_path:
+            config_path = Path(env_config_path)
+        else:
+            # Default to config/mcp_servers.yaml relative to project root
+            config_path = Path(__file__).parent.parent.parent / "config" / "mcp_servers.yaml"
     else:
         config_path = Path(config_path)
 
@@ -215,21 +265,28 @@ def load_mcp_config(
             continue
 
         # Apply defaults
-        timeout = server_data.get("timeout_seconds", defaults.get("timeout_seconds", 30))
-        retry = server_data.get("retry_attempts", defaults.get("retry_attempts", 3))
+        timeout = int(server_data.get("timeout_seconds", defaults.get("timeout_seconds", 30)))
+        retry = int(server_data.get("retry_attempts", defaults.get("retry_attempts", 3)))
         # Tool-specific timeouts from defaults
-        tool_timeouts = defaults.get("tool_timeouts", {})
+        tool_timeouts = dict(defaults.get("tool_timeouts", {}))
+        tool_timeouts.update(server_data.get("tool_timeouts", {}))
+
+        auth = server_data.get("auth", {})
+        if not isinstance(auth, dict):
+            auth = {}
 
         servers[server_id] = ServerConfigEntry(
             server_id=server_id,
             transport=transport,
-            enabled=server_data.get("enabled", True),
+            enabled=parse_bool(server_data.get("enabled", True), default=True),
             command=server_data.get("command"),
             args=server_data.get("args", []),
             working_dir=server_data.get("working_dir"),
             env=server_data.get("env", {}),
             url=server_data.get("url"),
             headers=server_data.get("headers", {}),
+            auth_token_env=server_data.get("auth_token_env") or auth.get("token_env"),
+            auth_token_prefix=server_data.get("auth_token_prefix") or auth.get("scheme", "Bearer"),
             domains=server_data.get("domains", []),
             description=server_data.get("description", ""),
             timeout_seconds=timeout,
@@ -289,13 +346,15 @@ def load_mcp_config_from_env() -> MCPConfig:
         except ValueError:
             continue
 
-        enabled = os.getenv(f"{prefix}ENABLED", "true").lower() == "true"
+        enabled = parse_bool(os.getenv(f"{prefix}ENABLED", "true"), default=True)
         command = os.getenv(f"{prefix}COMMAND")
         args_str = os.getenv(f"{prefix}ARGS", "")
         args = [a.strip() for a in args_str.split(",") if a.strip()]
         url = os.getenv(f"{prefix}URL")
         domains_str = os.getenv(f"{prefix}DOMAINS", "")
         domains = [d.strip() for d in domains_str.split(",") if d.strip()]
+        auth_token_env = os.getenv(f"{prefix}AUTH_TOKEN_ENV")
+        auth_token_prefix = os.getenv(f"{prefix}AUTH_TOKEN_PREFIX", "Bearer")
 
         server_id = name.lower().replace("_", "-")
 
@@ -307,6 +366,8 @@ def load_mcp_config_from_env() -> MCPConfig:
             args=args,
             url=url,
             domains=domains,
+            auth_token_env=auth_token_env,
+            auth_token_prefix=auth_token_prefix,
         )
 
     return MCPConfig(servers=servers)
