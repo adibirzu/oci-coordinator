@@ -1204,6 +1204,7 @@ class AgentCatalog:
         capabilities: list[str] | None = None,
         skills: list[str] | None = None,
         prefer_healthy: bool = True,
+        query: str | None = None,
     ) -> AgentScore | None:
         """
         Find the best agent for a given set of requirements.
@@ -1230,7 +1231,14 @@ class AgentCatalog:
 
         scores = []
         for agent in candidates:
-            score = self._score_agent(agent, domains, capabilities, skills, prefer_healthy)
+            score = self._score_agent(
+                agent, 
+                domains, 
+                capabilities, 
+                skills, 
+                prefer_healthy, 
+                query
+            )
             scores.append(score)
 
         # Sort by score descending
@@ -1253,6 +1261,7 @@ class AgentCatalog:
         skills: list[str] | None = None,
         prefer_healthy: bool = True,
         limit: int = 5,
+        query: str | None = None,
     ) -> list[AgentScore]:
         """
         Find and rank agents for given requirements.
@@ -1274,7 +1283,14 @@ class AgentCatalog:
 
         scores = []
         for agent in candidates:
-            score = self._score_agent(agent, domains, capabilities, skills, prefer_healthy)
+            score = self._score_agent(
+                agent, 
+                domains, 
+                capabilities, 
+                skills, 
+                prefer_healthy, 
+                query
+            )
             scores.append(score)
 
         # Sort by score descending
@@ -1322,17 +1338,28 @@ class AgentCatalog:
         capabilities: list[str] | None,
         skills: list[str] | None,
         prefer_healthy: bool,
+        query: str | None = None,
     ) -> AgentScore:
         """Calculate score for an agent."""
-        # Capability match (40%)
+        # Dynamic capability bidding (takes precedence if query is present) (40%)
+        bidding_score = 0.0
+        bid_reasoning = ""
+        if query and agent.role in self._agent_classes:
+            agent_class = self._agent_classes[agent.role]
+            # Use synchronous assess_capability
+            assessment = agent_class.assess_capability(query, self._resolve_tool_catalog())
+            bidding_score = assessment.confidence_score
+            bid_reasoning = assessment.reasoning
+
+        # Capability match (fallback or addition) (20%)
         capability_match = 0.0
         if capabilities:
             matched = sum(1 for cap in capabilities if cap in agent.capabilities)
             capability_match = matched / len(capabilities)
         elif agent.capabilities:
             capability_match = 0.5  # Partial credit if has any capabilities
-
-        # Domain priority (30%)
+            
+        # Domain priority (20%)
         domain_priority = 0.0
         if domains:
             max_priority = 0
@@ -1362,14 +1389,17 @@ class AgentCatalog:
 
         # Calculate weighted score
         score = (
-            capability_match * 0.40
-            + domain_priority * 0.30
-            + health_score * 0.15
-            + performance_score * 0.15
+            bidding_score * 0.40
+            + capability_match * 0.20
+            + domain_priority * 0.20
+            + health_score * 0.10
+            + performance_score * 0.10
         )
 
         # Build reasoning
         reasoning_parts = []
+        if bidding_score > 0:
+            reasoning_parts.append(f"bid={bidding_score:.0%} ({bid_reasoning})")
         if capability_match > 0:
             reasoning_parts.append(f"capability={capability_match:.0%}")
         if domain_priority > 0:
@@ -1377,11 +1407,11 @@ class AgentCatalog:
         reasoning_parts.append(f"health={health_score:.0%}")
         if metrics and metrics.total_invocations > 0:
             reasoning_parts.append(f"perf={performance_score:.0%}")
-
+            
         return AgentScore(
             agent=agent,
             score=score,
-            capability_match=capability_match,
+            capability_match=max(capability_match, bidding_score), # merge for backwards compatibility output
             domain_priority=domain_priority,
             health_score=health_score,
             performance_score=performance_score,

@@ -61,6 +61,15 @@ class AgentMetadata:
 
 
 @dataclass
+class AgentCapabilityAssessment:
+    """Assessment of an agent's capability to handle a task."""
+
+    confidence_score: float  # 0.0 to 1.0
+    reasoning: str
+    estimated_tokens: int = 0
+
+
+@dataclass
 class KafkaTopics:
     """Message topics for event-driven communication."""
 
@@ -269,6 +278,60 @@ class BaseAgent(ABC):
             AgentDefinition with all agent metadata
         """
         pass
+
+    @classmethod
+    def assess_capability(
+        cls,
+        intent: str,
+        tools: ToolCatalog | None = None,
+    ) -> AgentCapabilityAssessment:
+        """
+        Evaluate if this agent is suited to handle the given intent.
+
+        Args:
+            intent: The user's query or task description
+            tools: Optional tool catalog for deep introspection
+
+        Returns:
+            AgentCapabilityAssessment with confidence score and reasoning
+        """
+        definition = cls.get_definition()
+        intent_lower = intent.lower()
+
+        score = 0.0
+        reasoning_parts = []
+
+        # Capability matching
+        for cap in definition.capabilities:
+            # Simple keyword overlap match
+            cap_parts = cap.replace("-", " ").replace("_", " ").split()
+            if any(part in intent_lower for part in cap_parts if len(part) >= 3):
+                score += 0.3
+                reasoning_parts.append(f"capability_match({cap})")
+
+        # Role and description matching
+        for role_part in definition.role.split("-"):
+            if len(role_part) > 3 and role_part in intent_lower:
+                score += 0.2
+                reasoning_parts.append(f"role_match({role_part})")
+
+        # Tool matching if catalog is provided
+        if tools and hasattr(definition, "mcp_tools") and definition.mcp_tools:
+            for tool_name in definition.mcp_tools:
+                tool_def = tools.get_tool(tool_name)
+                if tool_def:
+                    if tool_def.name.replace("_", " ") in intent_lower or (tool_def.description and any(w in intent_lower for w in tool_def.name.split("_") if len(w) > 3)):
+                        score += 0.4
+                        reasoning_parts.append(f"tool_match({tool_name})")
+
+        # Cap at 1.0
+        final_score = min(score, 1.0)
+        
+        return AgentCapabilityAssessment(
+            confidence_score=final_score,
+            reasoning=", ".join(reasoning_parts) if reasoning_parts else "no matching keywords",
+            estimated_tokens=500,
+        )
 
     @abstractmethod
     async def invoke(self, query: str, context: dict[str, Any] | None = None) -> str:

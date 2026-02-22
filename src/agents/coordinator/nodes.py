@@ -2603,13 +2603,15 @@ DB perf: fleet health→db_fleet_health, AWR→awr_report, top SQL→top_sql, AD
                     {"domains": state.get("intent").domains},
                 )
 
-            # Discover matching agents for transparency
+            # Discover matching agents for transparency and dynamic bidding execution
             agent_candidates = self._discover_agents(state.get("intent"), state.get("query", ""))
+            
+            intent = state.get("intent")
 
             if thinking_trace and agent_candidates:
                 thinking_trace.add_step(
                     ThinkingPhase.DISCOVERED,
-                    f"Found {len(agent_candidates)} potential agents",
+                    f"Found {len(agent_candidates)} potential agents via dynamic bidding",
                     {
                         "candidates": [
                             {"role": c.agent_role, "confidence": c.confidence}
@@ -2617,9 +2619,18 @@ DB perf: fleet health→db_fleet_health, AWR→awr_report, top SQL→top_sql, AD
                         ]
                     },
                 )
+                
+            # DYNAMIC DISCOVERY OVERRIDE: Use the top bidding agent instead of generic mapping
+            if agent_candidates and intent:
+                top_candidate = agent_candidates[0]
+                # If bidding confidence is decent, override suggested agent
+                if top_candidate.confidence > 0.4:
+                    intent.suggested_agent = top_candidate.agent_role
+                    # Increase intent confidence since we have a good bidding match
+                    intent.confidence = max(intent.confidence, top_candidate.confidence)
 
             # Pass original query for complexity detection
-            routing = determine_routing(state.get("intent"), original_query=state.get("query", ""))
+            routing = determine_routing(intent, original_query=state.get("query", ""))
 
             span.set_attribute("routing.type", routing.routing_type.value)
             span.set_attribute("routing.target", routing.target or "none")
@@ -2679,7 +2690,7 @@ DB perf: fleet health→db_fleet_health, AWR→awr_report, top SQL→top_sql, AD
         query: str,
     ) -> list[AgentCandidate]:
         """
-        Discover and rank agents that could handle this request.
+        Discover and rank agents that could handle this request using dynamic bidding.
 
         Args:
             intent: Classified intent
@@ -2690,48 +2701,37 @@ DB perf: fleet health→db_fleet_health, AWR→awr_report, top SQL→top_sql, AD
         """
         candidates = []
 
-        # Get all agents from catalog
-        all_agents = self.agent_catalog.list_all()
+        # Use the AgentCatalog's dynamic capabilities bidding and ranking
+        ranked_agents = self.agent_catalog.find_agents_ranked(
+            domains=intent.domains,
+            query=query,
+            limit=5,
+        )
 
-        for agent_def in all_agents:
-            match_reasons = []
-            base_confidence = 0.0
-
-            # Check domain match
-            agent_domains = self._get_agent_domains(agent_def.role)
-            domain_overlap = set(intent.domains) & set(agent_domains)
-            if domain_overlap:
-                match_reasons.append(f"Domain match: {', '.join(domain_overlap)}")
-                base_confidence += 0.4 * (len(domain_overlap) / max(len(intent.domains), 1))
-
-            # Check capability match
-            for capability in agent_def.capabilities:
-                cap_lower = capability.lower()
-                if intent.intent and intent.intent.lower() in cap_lower:
-                    match_reasons.append(f"Capability: {capability}")
-                    base_confidence += 0.3
-                    break
-
-            # Check if this is the suggested agent
+        for ranked in ranked_agents:
+            agent_def = ranked.agent
+            
+            # Additional confidence boost if it was the suggested agent by classification
+            adjusted_confidence = ranked.score
+            match_reasons = [ranked.reasoning]
+            
             if agent_def.role == intent.suggested_agent:
                 match_reasons.append("Suggested by classifier")
-                base_confidence += 0.3
-
-            # Only include if there's some match
-            if match_reasons and base_confidence > 0:
-                candidates.append(
-                    AgentCandidate(
-                        agent_id=agent_def.agent_id,
-                        agent_role=agent_def.role,
-                        confidence=min(base_confidence, 1.0),
-                        capabilities=agent_def.capabilities[:3],
-                        match_reasons=match_reasons,
-                        selected=False,
-                        mcp_servers=agent_def.mcp_servers[:3] if agent_def.mcp_servers else [],
-                    )
+                adjusted_confidence = min(adjusted_confidence + 0.3, 1.0)
+                
+            candidates.append(
+                AgentCandidate(
+                    agent_id=agent_def.agent_id,
+                    agent_role=agent_def.role,
+                    confidence=adjusted_confidence,
+                    capabilities=agent_def.capabilities[:3],
+                    match_reasons=match_reasons,
+                    selected=False,
+                    mcp_servers=agent_def.mcp_servers[:3] if agent_def.mcp_servers else [],
                 )
+            )
 
-        # Sort by confidence descending
+        # Re-sort by adjusted confidence descending
         candidates.sort(key=lambda c: c.confidence, reverse=True)
 
         return candidates[:5]  # Top 5 candidates

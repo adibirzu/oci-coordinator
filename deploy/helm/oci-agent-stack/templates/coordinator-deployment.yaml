@@ -1,0 +1,66 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "oci-agent-stack.fullname" . }}-coordinator
+  labels:
+    {{- include "oci-agent-stack.labels" . | nindent 4 }}
+    app.kubernetes.io/component: coordinator
+spec:
+  replicas: {{ .Values.coordinator.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "oci-agent-stack.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: coordinator
+  template:
+    metadata:
+      labels:
+        {{- include "oci-agent-stack.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: coordinator
+    spec:
+      serviceAccountName: {{ include "oci-agent-stack.serviceAccountName" . }}
+      containers:
+        - name: coordinator
+          image: "{{ .Values.coordinator.image.repository }}:{{ .Values.coordinator.image.tag }}"
+          imagePullPolicy: {{ .Values.coordinator.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 3001
+              protocol: TCP
+          env:
+            - name: LLM_PROVIDER
+              value: {{ .Values.coordinator.env.LLM_PROVIDER | quote }}
+            - name: OCI_GENAI_COMPARTMENT_ID
+              value: {{ .Values.coordinator.env.OCI_GENAI_COMPARTMENT_ID | quote }}
+            - name: OCI_GENAI_ENDPOINT
+              value: {{ .Values.coordinator.env.OCI_GENAI_ENDPOINT | quote }}
+            - name: USE_LANGGRAPH_COORDINATOR
+              value: {{ .Values.coordinator.env.USE_LANGGRAPH_COORDINATOR | quote }}
+            - name: ADB_CONNECTION_STRING
+              value: {{ .Values.coordinator.env.ADB_CONNECTION_STRING | quote }}
+            - name: ADB_USERNAME
+              value: {{ .Values.coordinator.env.ADB_USERNAME | quote }}
+            - name: ADB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.coordinator.env.ADB_PASSWORD_SECRET }}
+                  key: password
+            - name: REDIS_URL
+              value: {{ .Values.coordinator.env.REDIS_URL | quote }}
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.coordinator.resources | nindent 12 }}

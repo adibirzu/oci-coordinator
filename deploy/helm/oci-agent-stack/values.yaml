@@ -1,0 +1,61 @@
+# Default values for oci-agent-stack.
+# This is a YAML-formatted file.
+# Declare variables to be passed into your templates.
+
+global:
+  namespace: oci-ai
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: "oci-coordinator-sa"
+
+coordinator:
+  replicaCount: 3
+  image:
+    repository: ghcr.io/your-org/oci-coordinator
+    pullPolicy: IfNotPresent
+    tag: "latest"
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "1Gi"
+    limits:
+      cpu: "2"
+      memory: "4Gi"
+  env:
+    # Set to true to use OCI Generative AI (GCP Vertex AI equivalent)
+    LLM_PROVIDER: "oci_genai"
+    OCI_GENAI_COMPARTMENT_ID: "ocid1.compartment.oc1..xxxx"
+    OCI_GENAI_ENDPOINT: "https://inference.generativeai.us-chicago-1.oci.oraclecloud.com"
+    USE_LANGGRAPH_COORDINATOR: "true"
+    # Using Autonomous Database for Agent Memory (Firestore / Vector Search equivalent)
+    ADB_CONNECTION_STRING: "(description= (retry_count=20)...)"
+    ADB_USERNAME: "ADMIN"
+    ADB_PASSWORD_SECRET: "my-adb-password-secret-name"
+    # Using local redis for the agent's hot cache (GCP Memorystore equivalent)
+    REDIS_URL: "redis://redis-master.oci-ai.svc.cluster.local:6379"
+
+gateway:
+  replicaCount: 2
+  image:
+    repository: ghcr.io/your-org/mcp-oci-gateway
+    pullPolicy: IfNotPresent
+    tag: "latest"
+  resources:
+    requests:
+      cpu: "250m"
+      memory: "512Mi"
+    limits:
+      cpu: "1"
+      memory: "2Gi"
+  config:
+    stateless: true
+
+redis:
+  # Using local redis for the agent's hot cache (GCP Memorystore equivalent)
+  enabled: true
+  architecture: standalone
+
+ingress:
+  enabled: false
