@@ -344,4 +344,5 @@ register_selectai_tools(mcp)  # SelectAI NL2SQL tools
 register_troubleshoot_skills(mcp)
 
 if __name__ == "__main__":
-    mcp.run()
+    transport = os.getenv("TRANSPORT", "stdio")
+    mcp.run(transport=transport)
