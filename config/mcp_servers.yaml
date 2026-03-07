@@ -108,14 +108,14 @@ servers:
   # Database Observatory - Primary database operations server (Python-based)
   database-observatory:
     transport: stdio
-    command: /Users/abirzu/dev/MCP/mcp-oci-database-observatory/.venv/bin/python
+    command: ${DB_OBSERVATORY_PATH:-/path/to/mcp-oci-database-observatory}/.venv/bin/python
     args:
       - "-m"
       - "src.mcp_server"
-    working_dir: /Users/abirzu/dev/MCP/mcp-oci-database-observatory
+    working_dir: ${DB_OBSERVATORY_PATH:-/path/to/mcp-oci-database-observatory}
     env:
-      PYTHONPATH: "/Users/abirzu/dev/MCP/mcp-oci-database-observatory"
-      OCI_CONFIG_FILE: "/Users/abirzu/.oci/config"
+      PYTHONPATH: "${DB_OBSERVATORY_PATH:-/path/to/mcp-oci-database-observatory}"
+      OCI_CONFIG_FILE: "~/.oci/config"
       OCI_CLI_PROFILE: "DEFAULT"
       MCP_TRANSPORT: "stdio"
       # SQLcl configuration

@@ -17,6 +17,8 @@ Usage:
     compartments = await manager.list_compartments()
 """
 
+import asyncio
+import functools
 import os
 from dataclasses import dataclass
 from typing import Any
@@ -212,6 +214,7 @@ class TenancyManager:
         """Discover compartments for a single tenancy."""
         try:
             import oci
+            from oci.pagination import list_call_get_all_results
 
             config = oci.config.from_file(self.config_file, tenancy.profile_name)
             identity_client = oci.identity.IdentityClient(config)
@@ -219,12 +222,19 @@ class TenancyManager:
             # Get root compartment (tenancy)
             root_ocid = tenancy.tenancy_ocid
 
-            # List all compartments recursively
-            compartments_response = identity_client.list_compartments(
-                compartment_id=root_ocid,
-                compartment_id_in_subtree=True,
-                access_level="ACCESSIBLE",
-                lifecycle_state="ACTIVE",
+            loop = asyncio.get_event_loop()
+
+            # List all compartments recursively (paginated, offloaded to thread pool)
+            compartments_response = await loop.run_in_executor(
+                None,
+                functools.partial(
+                    list_call_get_all_results,
+                    identity_client.list_compartments,
+                    compartment_id=root_ocid,
+                    compartment_id_in_subtree=True,
+                    access_level="ACCESSIBLE",
+                    lifecycle_state="ACTIVE",
+                ),
             )
 
             count = 0
@@ -244,7 +254,11 @@ class TenancyManager:
 
             # Add root compartment
             try:
-                root_comp = identity_client.get_compartment(root_ocid).data
+                root_response = await loop.run_in_executor(
+                    None,
+                    functools.partial(identity_client.get_compartment, root_ocid),
+                )
+                root_comp = root_response.data
                 root = Compartment(
                     id=root_ocid,
                     name=root_comp.name or "root",
